@@ -78,6 +78,12 @@ object NaConfig {
             ConfigItem.configTypeBool,
             true
         )
+    val ignoreNoForwards =
+        addConfig(
+            "IgnoreNoForwards",
+            ConfigItem.configTypeBool,
+            false
+        )
     val showTextQuote =
         addConfig(
             "TextQuote",

@@ -1432,9 +1432,68 @@ public class MessageHelper extends BaseController {
         return messageObject.type == MessageObject.TYPE_TEXT || messageObject.isAnimatedEmoji() || messageObject.isSticker() || messageObject.isAnimatedSticker() || messageObject.isPhoto() || messageObject.isVideo() || messageObject.getDocument() != null || ChatActivity.getMessageCaption(messageObject, null, null) != null;
     }
 
+    /**
+     * True when the messages come from a source the server would refuse to
+     * forward from, and the IgnoreNoForwards bypass is on. The server checks
+     * the real flags whatever the client UI shows, so such a forward has to
+     * leave as a local copy-resend instead of messages.forwardMessages.
+     * Forwarding to Saved Messages stays legal, so the caller checks the
+     * target first.
+     */
+    public boolean isForwardSourceRestricted(ArrayList<MessageObject> messages) {
+        if (!NaConfig.INSTANCE.getIgnoreNoForwards().Bool() || messages == null) {
+            return false;
+        }
+        for (int i = 0; i < messages.size(); i++) {
+            MessageObject message = messages.get(i);
+            if (message == null) {
+                continue;
+            }
+            if (message.messageOwner != null && message.messageOwner.noforwards) {
+                return true;
+            }
+            final long sourceDialog = message.getDialogId();
+            if (sourceDialog < 0) {
+                TLRPC.Chat chat = getMessagesController().getChat(-sourceDialog);
+                if (chat != null) {
+                    if (chat.noforwards) {
+                        return true;
+                    }
+                    if (chat.migrated_to != null) {
+                        TLRPC.Chat migratedTo = getMessagesController().getChat(chat.migrated_to.channel_id);
+                        if (migratedTo != null && migratedTo.noforwards) {
+                            return true;
+                        }
+                    }
+                }
+            } else {
+                TLRPC.UserFull userFull = getMessagesController().getUserFull(sourceDialog);
+                if (userFull != null
+                        && (userFull.noforwards_peer_enabled || userFull.noforwards_my_enabled)) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
     public boolean shouldRepeatMessagesAsCopy(ArrayList<MessageObject> messages, TLRPC.Chat currentChat) {
-        if (getMessagesController().isChatNoForwards(currentChat)) {
-            return true;
+        // The server enforces the real restriction regardless of the
+        // IgnoreNoForwards UI bypass: messages.forwardMessages on a restricted
+        // source fails with CHAT_FORWARDS_RESTRICTED. This decision must read
+        // the raw flag, not the bypassed MessagesController.isChatNoForwards,
+        // or turning the bypass on silently disables the copy-resend fallback
+        // and every forward of restricted media dies on the server.
+        if (currentChat != null) {
+            if (currentChat.noforwards) {
+                return true;
+            }
+            if (currentChat.migrated_to != null) {
+                TLRPC.Chat migratedTo = getMessagesController().getChat(currentChat.migrated_to.channel_id);
+                if (migratedTo != null && migratedTo.noforwards) {
+                    return true;
+                }
+            }
         }
         if (messages == null) {
             return false;

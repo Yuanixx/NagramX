@@ -2386,6 +2386,7 @@
     <string name="NotificationsLedInfo">LED is a small blinking light on some devices that is used to indicate new messages.</string>
     <string name="PriorityInfo">Higher priority notifications will work even if your phone is in Do Not Disturb mode.</string>
     <string name="General">General</string>
+    <string name="IgnoreNoForwards">Ignore \u0022no forwarding\u0022 restrictions</string>
     <string name="NotificationsMuted">Muted</string>
     <string name="NotificationsUnmuted">Unmuted</string>
     <string name="NotificationsOn">On</string>

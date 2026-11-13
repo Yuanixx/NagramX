@@ -82,6 +82,7 @@ public class NekoGeneralSettingsActivity extends BaseNekoXSettingsActivity {
 
     // General
     private final AbstractConfigCell headerGeneral = cellGroup.appendCell(new ConfigCellHeader(getString(R.string.General)));
+    private final AbstractConfigCell ignoreNoForwardsRow = cellGroup.appendCell(new ConfigCellTextCheck(NaConfig.INSTANCE.getIgnoreNoForwards()));
     private final AbstractConfigCell customTitleRow = cellGroup.appendCell(new ConfigCellTextInput(null, NaConfig.INSTANCE.getCustomTitle(),
         getString(R.string.CustomTitleHint), null,
         (input) -> input.isEmpty() ? (String) NaConfig.INSTANCE.getCustomTitle().defaultValue : input));

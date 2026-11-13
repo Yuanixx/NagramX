@@ -2046,7 +2046,7 @@ public class ChatActivity extends BaseFragment implements
                     return false;
                 }
                 selectedObjectGroup = getValidGroupedMessage(selectedObject = ((ChatMessageCell) view).getMessageObject());
-                var noforwards = getMessagesController().isChatNoForwards(currentChat) || message.messageOwner.noforwards;
+                var noforwards = getMessagesController().isChatNoForwards(currentChat) || message.isMsgNoForwards();
                 var isAyuDeleted = message.isAyuDeleted();
                 boolean allowChatActions = chatMode != MODE_SCHEDULED && (threadMessageObjects == null || !threadMessageObjects.contains(message)) &&
                         !message.isSponsored() && (getMessageType(message) != MESSAGE_TYPE_SERVICE || message.getDialogId() != mergeDialogId) &&
@@ -3794,7 +3794,7 @@ public class ChatActivity extends BaseFragment implements
             if (selectedView != null && selectedView.getMessageObject() != null && selectedView.getMessageObject().isAyuDeleted()) return false;
             final boolean noforwards = (
                 chatActivity != null && chatActivity.isPeerNoForwards() ||
-                selectedView != null && selectedView.getMessageObject() != null && selectedView.getMessageObject().messageOwner != null && selectedView.getMessageObject().messageOwner.noforwards
+                selectedView != null && selectedView.getMessageObject() != null && selectedView.getMessageObject().isMsgNoForwards()
             );
             return !isFactCheck && (
                 chatActivity != null && chatActivity.getCurrentEncryptedChat() == null &&
@@ -12949,7 +12949,7 @@ public class ChatActivity extends BaseFragment implements
             for (int i = 0; i < selectedMessagesIds.length; ++i) {
                 for (int j = 0; j < selectedMessagesIds[i].size(); ++j) {
                     MessageObject msg = selectedMessagesIds[i].valueAt(j);
-                    if (msg != null && msg.messageOwner != null && msg.messageOwner.noforwards) {
+                    if (msg != null && msg.isMsgNoForwards()) {
                         return true;
                     }
                 }
@@ -14127,7 +14127,7 @@ public class ChatActivity extends BaseFragment implements
     }
 
     private void showTextSelectionHint(MessageObject messageObject) {
-        if (getParentActivity() == null || getMessagesController().isPeerNoForwards(messageObject.getDialogId()) || (messageObject != null && messageObject.messageOwner != null && messageObject.messageOwner.noforwards)) {
+        if (getParentActivity() == null || getMessagesController().isPeerNoForwards(messageObject.getDialogId()) || messageObject.isMsgNoForwards()) {
             return;
         }
         CharSequence text;
@@ -15176,11 +15176,48 @@ public class ChatActivity extends BaseFragment implements
         getConnectionsManager().bindRequestToGuid(linkSearchRequestId, classGuid);
     }
 
+    /**
+     * Reroutes a forward of restricted media to the local copy-resend path.
+     * The server rejects messages.forwardMessages from a restricted source no
+     * matter what the client menu showed, so with the IgnoreNoForwards bypass
+     * on, such a forward has to leave as a fresh upload. Saved Messages as the
+     * target stays legal, so it keeps the native forward.
+     *
+     * @return true when the messages left as a copy-resend and the caller must
+     *         not run the native forward
+     */
+    private boolean tryForwardAsCopyIfRestricted(ArrayList<MessageObject> messages,
+                                                 long targetDialogId, boolean notify,
+                                                 int scheduleDate, long payStars) {
+        if (targetDialogId == UserConfig.getInstance(currentAccount).getClientUserId()) {
+            return false;
+        }
+        if (!getMessageHelper().isForwardSourceRestricted(messages)) {
+            return false;
+        }
+        // The server refuses a native forward of restricted media whatever the
+        // client menu showed, so falling back to it can only produce a failed
+        // message. When the copy-resend cannot run yet (media not fully
+        // downloaded), tell the user instead of sending something that is
+        // guaranteed to bounce.
+        if (!getMessageHelper().sendMessagesAsCopy(messages, targetDialogId,
+                getThreadMessage(), getThreadMessage(), replyingQuote, notify,
+                scheduleDate, chatMode, quickReplyShortcut, getQuickReplyId(),
+                payStars, getSendMonoForumPeerId(), getSendMessageSuggestionParams())) {
+            BulletinFactory.of(this).createErrorBulletin(
+                    getString(R.string.PleaseDownload), themeDelegate).show();
+        }
+        return true;
+    }
+
     private void forwardMessages(ArrayList<MessageObject> arrayList, boolean fromMyName, boolean hideCaption, boolean notify, int scheduleDate, long payStars) {
         if (arrayList == null || arrayList.isEmpty()) {
             return;
         }
         if (!checkSlowModeAlert()) {
+            return;
+        }
+        if (tryForwardAsCopyIfRestricted(arrayList, dialog_id, notify, scheduleDate, payStars)) {
             return;
         }
         if ((scheduleDate != 0) == (chatMode == MODE_SCHEDULED)) {
@@ -15204,10 +15241,14 @@ public class ChatActivity extends BaseFragment implements
         if (arrayList == null || arrayList.isEmpty()) {
             return;
         }
+        final long target = did == 0 ? dialog_id : did;
+        if (tryForwardAsCopyIfRestricted(arrayList, target, notify, scheduleDate, payStars)) {
+            return;
+        }
         if ((scheduleDate != 0) == (chatMode == MODE_SCHEDULED)) {
             waitingForSendingMessageLoad = true;
         }
-        AlertsCreator.showSendMediaAlert(getSendMessagesHelper().sendMessage(arrayList, did == 0 ? dialog_id : did, fromMyName, hideCaption, notify, scheduleDate, 0, getThreadMessage(), -1, payStars, getSendMonoForumPeerId(), getSendMessageSuggestionParams()), this);
+        AlertsCreator.showSendMediaAlert(getSendMessagesHelper().sendMessage(arrayList, target, fromMyName, hideCaption, notify, scheduleDate, 0, getThreadMessage(), -1, payStars, getSendMonoForumPeerId(), getSendMessageSuggestionParams()), this);
     }
 
     public boolean shouldShowImport() {

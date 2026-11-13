@@ -6753,6 +6753,9 @@ public class MessagesController extends BaseController implements NotificationCe
     }
 
     public boolean isChatNoForwards(TLRPC.Chat chat) {
+        if (NaConfig.INSTANCE.getIgnoreNoForwards().Bool()) {
+            return false;
+        }
         if (chat == null) {
             return false;
         }
@@ -6778,6 +6781,9 @@ public class MessagesController extends BaseController implements NotificationCe
     }
 
     public boolean isUserNoForwards(TLRPC.UserFull userFull) {
+        if (NaConfig.INSTANCE.getIgnoreNoForwards().Bool()) {
+            return false;
+        }
         if (userFull == null) {
             return false;
         }
