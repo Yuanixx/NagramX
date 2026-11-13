@@ -306,6 +306,7 @@ import org.telegram.ui.Components.VideoCompressButton;
 import org.telegram.ui.Components.VideoEditTextureView;
 import org.telegram.ui.Components.VideoForwardDrawable;
 import org.telegram.ui.Components.Mp4IndexExtractorsFactory;
+import org.telegram.ui.Components.VideoSeekFramePreview;
 import org.telegram.ui.Components.VideoPlayer;
 import org.telegram.ui.Components.VideoPlayerSeekBar;
 import org.telegram.ui.Components.VideoSeekPreviewImage;
@@ -1074,6 +1075,13 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
                 if (PipInstance == PhotoViewer.this) {
                     return;
                 }
+                if (videoPlayerSeekbar != null && videoPlayerSeekbar.isDragging()) {
+                    // The finger is holding the seek bar: hiding the chrome
+                    // now would rip the gesture away from it. Re-check soon.
+                    AndroidUtilities.cancelRunOnUIThread(hideActionBarRunnable);
+                    AndroidUtilities.runOnUIThread(hideActionBarRunnable, 500);
+                    return;
+                }
                 toggleActionBar(false, true);
             }
         }
@@ -1129,6 +1137,8 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
     private View videoPlayerSeekbarView;
     private VideoSeekPreviewImage videoPreviewFrame;
     private AnimatorSet videoPreviewFrameAnimation;
+    private VideoSeekFramePreview videoSeekFramePreview;
+    private int abpvDragEventCount;
     private boolean needShowOnReady;
     private int waitingForDraw;
     public TextureView changedTextureView;
@@ -3584,6 +3594,13 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
         @Override
         public boolean onTouchEvent(MotionEvent event) {
             if (progress < 1f) {
+                final int action = event.getAction();
+                if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL) {
+                    // The gesture end must always reach the seek bar. Dropping
+                    // it here used to wedge pressed=true forever, which kept
+                    // the seek-preview bubble on screen until the next tap.
+                    videoPlayerSeekbar.onTouch(action, event.getX() - dp(2), event.getY());
+                }
                 return false;
             }
             if (videoPlayerSeekbar.onTouch(event.getAction(), event.getX() - dp(2), event.getY())) {
@@ -9911,6 +9928,172 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
         videoPreviewFrame.setTranslationX(x);
     }
 
+    /**
+     * Shows the decoded-frame preview while dragging the seek bar.
+     *
+     * The stock storyboard preview stays hidden for videos without a
+     * storyboard, so this provides an independent preview that decodes the
+     * frame from the locally cached media file. When the media is not cached
+     * locally it degrades to a timestamp-only preview.
+     */
+    private void showVideoSeekFramePreview(float progress) {
+        try {
+            if (videoSeekFramePreview == null) {
+                return;
+            }
+            final long duration = getVideoDuration();
+            if (duration <= 0) {
+                return;
+            }
+            final long position = (long) (progress * duration);
+            // While streaming, the media exists on disk as a partially written
+            // file. Decoding that file with the platform retriever is fast
+            // (local I/O) and yields frames for the ranges already buffered.
+            // The content:// route is the fallback for media with no local
+            // file. Its provider keeps sequential reads on one DataSource and
+            // only reopens the stream when the retriever seeks to a new offset.
+            final File localFile = getLocalVideoFile();
+            if (videoSeekFramePreview.getVisibility() != View.VISIBLE) {
+                FileLog.d("ABPV: showPreview local=" + (localFile != null ? localFile.getName() + " len=" + localFile.length() : "null") + " size=" + getVideoStreamSize());
+            }
+            videoSeekFramePreview.setBufferingProvider(
+                    () -> videoPlayer != null && videoPlayer.isBuffering());
+            // Ask the seek bar whether it is pressed instead of trusting the
+            // preview's own dragging flag: a single missed ACTION_UP used to
+            // leave the bubble on screen until the user tapped it away.
+            videoSeekFramePreview.setPressedProvider(
+                    () -> videoPlayerSeekbar != null && videoPlayerSeekbar.isDragging());
+            if (localFile != null && localFile.exists()) {
+                videoSeekFramePreview.setMediaFile(localFile, getVideoStreamSize(),
+                        currentMessageObject != null ? currentMessageObject.getDocument() : null,
+                        currentAccount,
+                        // The message id, not the document id: a multi-quality
+                        // video swaps its document as qualities become cached,
+                        // which used to tear the preview session down mid-prefetch.
+                        currentMessageObject != null ? currentMessageObject.getId() : 0,
+                        // The chat matters too: message ids restart in every
+                        // channel, so two chats can share one and the preview
+                        // would keep showing the previous video.
+                        currentMessageObject != null ? currentMessageObject.getDialogId() : 0,
+                        currentMessageObject != null ? currentMessageObject.getId() : 0);
+            } else {
+                videoSeekFramePreview.setMediaUri(getStreamingContentUri(),
+                        currentMessageObject != null ? currentMessageObject.getDocument() : null,
+                        currentAccount,
+                        currentMessageObject != null ? currentMessageObject.getId() : 0,
+                        currentMessageObject != null ? currentMessageObject.getDialogId() : 0,
+                        currentMessageObject != null ? currentMessageObject.getId() : 0);
+            }
+            videoSeekFramePreview.requestFrame(position);
+
+            if (videoSeekFramePreview.getVisibility() != View.VISIBLE) {
+                videoSeekFramePreview.setAlpha(0f);
+                videoSeekFramePreview.setVisibility(View.VISIBLE);
+                videoSeekFramePreview.animate().alpha(1f).setDuration(150).start();
+            }
+
+            // Keep the bubble horizontally aligned with the dragged thumb.
+            final int previewWidth = videoSeekFramePreview.getPreviewWidth();
+            int x = videoPlayerSeekbar.getThumbX() + dp(2) - previewWidth / 2;
+            final int parentWidth = videoPlayerControlFrameLayout.getMeasuredWidth();
+            final int max = parentWidth - dp(10) - previewWidth / 2;
+            if (x < 0) {
+                x = 0;
+            } else if (x > max) {
+                x = max;
+            }
+            videoSeekFramePreview.setTranslationX(x);
+        } catch (Throwable e) {
+            FileLog.e(e);
+        }
+    }
+
+    /**
+     * Returns a content:// URI that streams the current video through
+     * {@code MediaStreamingProvider}, or null when the media is already a local
+     * file (in which case {@link #getLocalVideoFile()} is cheaper).
+     */
+    private Uri getStreamingContentUri() {
+        if (currentMessageObject == null) {
+            return null;
+        }
+        final TLRPC.Document document = currentMessageObject.getDocument();
+        if (document == null) {
+            return null;
+        }
+        try {
+            return MediaStreamingProvider.getStreamingUri(
+                    currentMessageObject.currentAccount,
+                    document,
+                    currentMessageObject);
+        } catch (Throwable e) {
+            FileLog.e(e);
+            return null;
+        }
+    }
+
+    private void hideVideoSeekFramePreview() {
+        try {
+            if (videoSeekFramePreview == null) {
+                return;
+            }
+            // clear() routes the hide through VideoSeekFramePreview.hide(reason)
+            // so every teardown is logged with its session and gesture state;
+            // hiding the view directly here would bypass that.
+            videoSeekFramePreview.clear();
+        } catch (Throwable e) {
+            FileLog.e(e);
+        }
+    }
+
+    /**
+     * Returns the media file backing the current video. Priority:
+     * 1. the partial {@code .temp} file an active streaming download writes to
+     *    (plaintext on the fly, decodable while playback is still ongoing);
+     * 2. the final downloaded file (MEDIA_DIR_VIDEO or MEDIA_DIR_CACHE);
+     * 3. the attachPath fallback.
+     * Returns null when nothing is cached locally.
+     */
+    private File getLocalVideoFile() {
+        if (currentMessageObject == null) {
+            return null;
+        }
+        TLRPC.Document document = currentMessageObject.getDocument();
+        if (document != null) {
+            FileLoader fileLoader = FileLoader.getInstance(currentMessageObject.currentAccount);
+            // Streaming in progress: the temp file ExoPlayer reads from.
+            File file = fileLoader.getActiveDownloadFile(document);
+            if (file != null) {
+                return file;
+            }
+            // Downloaded: final location (VIDEO dir, or CACHE for keyed docs).
+            file = fileLoader.getPathToAttach(document);
+            if (file != null && file.exists()) {
+                return file;
+            }
+            file = fileLoader.getPathToAttach(document, true);
+            if (file != null && file.exists()) {
+                return file;
+            }
+        }
+        final String path = MessageHelper.getPathToMessage(currentMessageObject);
+        if (!TextUtils.isEmpty(path)) {
+            File file = new File(path);
+            if (file.exists()) {
+                return file;
+            }
+        }
+        return null;
+    }
+
+    /** Total size of the current video document, used by the streaming decoder. */
+    private long getVideoStreamSize() {
+        if (currentMessageObject != null && currentMessageObject.getDocument() != null) {
+            return currentMessageObject.getDocument().size;
+        }
+        return 0;
+    }
+
     private void showVideoSeekPreviewPosition(boolean show) {
         if (show && videoPreviewFrame.getTag() != null || !show && videoPreviewFrame.getTag() == null) {
             return;
@@ -9948,6 +10131,9 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
         final VideoPlayerSeekBar.SeekBarDelegate seekBarDelegate = new VideoPlayerSeekBar.SeekBarDelegate() {
             @Override
             public void onSeekBarDrag(float progress) {
+                if (videoSeekFramePreview != null) {
+                    videoSeekFramePreview.setDragging(false);
+                }
                 if (videoPlayer != null || photoViewerWebView != null && photoViewerWebView.isControllable()) {
                     if (!inPreview && videoTimelineViewContainer.getVisibility() == View.VISIBLE) {
                         progress = videoTimelineView.getLeftProgress() + (videoTimelineView.getRightProgress() - videoTimelineView.getLeftProgress()) * progress;
@@ -9960,18 +10146,54 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
                     }
                     showVideoSeekPreviewPosition(false);
                     needShowOnReady = false;
+                    hideVideoSeekFramePreview();
                 }
             }
 
             @Override
             public void onSeekBarContinuousDrag(float progress) {
+                final boolean logDrag = (++abpvDragEventCount & 31) == 1;
+                if (videoSeekFramePreview != null) {
+                    videoSeekFramePreview.setDragging(true);
+                }
+                if (logDrag) {
+                    FileLog.d("ABPV: drag p=" + progress + " player=" + (videoPlayer != null) + " vf=" + (videoPreviewFrame != null));
+                }
                 if (photoViewerWebView != null && photoViewerWebView.isYouTube() && videoPreviewFrame != null) {
                     videoPreviewFrame.setProgressForYouTube(photoViewerWebView, progress, videoPlayerSeekbar.getWidth());
-                } else if (videoPlayer != null && videoPreviewFrame != null) {
-                    videoPreviewFrame.setProgress(currentMessageObject, progress, videoPlayerSeekbar.getWidth());
+                    showVideoSeekPreviewPosition(true);
+                    updateVideoSeekPreviewPosition();
+                    return;
                 }
-                showVideoSeekPreviewPosition(true);
-                updateVideoSeekPreviewPosition();
+                // Local and streamed videos use the decoded-frame preview.
+                // The stock decoder is reserved for a real storyboard so the
+                // two implementations never compete for the same gesture.
+                boolean stockShown = false;
+                final boolean useStoryboard = videoPlayer != null && videoPreviewFrame != null
+                        && videoPreviewFrame.hasStoryboard(currentMessageObject);
+                if (useStoryboard) {
+                    videoPreviewFrame.setProgress(currentMessageObject, progress, videoPlayerSeekbar.getWidth());
+                    final boolean stockCanShow = videoPreviewFrame.canShowFrame();
+                    if (logDrag) {
+                        FileLog.d("ABPV: storyboard canShowFrame=" + stockCanShow + " ready=" + videoPreviewFrame.isReady());
+                    }
+                    if (stockCanShow) {
+                        showVideoSeekPreviewPosition(true);
+                        updateVideoSeekPreviewPosition();
+                        stockShown = videoPreviewFrame.getTag() != null;
+                    }
+                }
+                if (!stockShown) {
+                    if (!useStoryboard) {
+                        needShowOnReady = false;
+                    }
+                    showVideoSeekPreviewPosition(false);
+                }
+                if (stockShown) {
+                    hideVideoSeekFramePreview();
+                } else {
+                    showVideoSeekFramePreview(progress);
+                }
             }
         };
 
@@ -10014,6 +10236,11 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
             if (needShowOnReady) {
                 showVideoSeekPreviewPosition(true);
             }
+            // Opening an ordinary local file must not hide the custom preview.
+            // Only a stock storyboard that is actually shown may take over.
+            if (videoPreviewFrame.getTag() != null) {
+                hideVideoSeekFramePreview();
+            }
         }) {
             @Override
             protected void onLayout(boolean changed, int left, int top, int right, int bottom) {
@@ -10031,6 +10258,10 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
         };
         videoPreviewFrame.setAlpha(0.0f);
         containerView.addView(videoPreviewFrame, LayoutHelper.createFrame(LayoutHelper.WRAP_CONTENT, LayoutHelper.WRAP_CONTENT, Gravity.BOTTOM | Gravity.LEFT, 0, 0, 0, 48 + 10));
+
+        videoSeekFramePreview = new VideoSeekFramePreview(containerView.getContext());
+        videoSeekFramePreview.setPreviewSize(dp(150), dp(104));
+        containerView.addView(videoSeekFramePreview, LayoutHelper.createFrame(LayoutHelper.WRAP_CONTENT, LayoutHelper.WRAP_CONTENT, Gravity.BOTTOM | Gravity.LEFT, 0, 0, 0, 48 + 10));
 
         videoPlayerTime = new SimpleTextView(containerView.getContext());
         videoPlayerTime.setTextColor(0xffffffff);
@@ -11441,6 +11672,16 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
     }
 
     private void releasePlayer(boolean onClose) {
+        // The preview must not outlive the player: releasing here covers closing
+        // the viewer, switching media and destroying the activity, none of which
+        // necessarily detach the view (and detach is what clear() relied on).
+        try {
+            if (videoSeekFramePreview != null) {
+                videoSeekFramePreview.releaseSession();
+            }
+        } catch (Throwable e) {
+            FileLog.e(e);
+        }
         usedSurfaceView = false;
         if (pipSource != null) {
             pipSource.destroy();
@@ -11526,7 +11767,14 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
 
     private void setVideoPlayerControlVisible(boolean visible, boolean animated) {
         if (videoPlayerControlVisible != visible) {
-
+            if (!visible) {
+                // Hiding the control frame makes Android drop the whole touch
+                // stream: no ACTION_UP or CANCEL ever reaches the seek bar,
+                // so its pressed flag stays true and the seek-preview bubble
+                // survives its own staleness guard. The bubble belongs to the
+                // controls, so it goes away with them.
+                hideVideoSeekFramePreview();
+            }
             if (visible) {
                 bottomLayout.setTag(1);
             } else {
@@ -13825,6 +14073,12 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
 
         if (!show) {
             Bulletin.hide(containerView);
+            // Hiding the chrome animates the video controls' progress down,
+            // and while that progress is below 1 the control frame swallows
+            // the rest of the touch stream. If the finger is on the seek bar
+            // right then, its UP never arrives, pressed stays wedged true and
+            // the seek-preview bubble could never dismiss on its own.
+            hideVideoSeekFramePreview();
         }
 
         final float offsetY = dpf2(24);

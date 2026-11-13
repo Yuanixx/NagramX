@@ -127,7 +127,11 @@ public class VideoPlayerSeekBar {
         } else if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL) {
             if (pressed) {
                 animatedThumbX = thumbX = draggingThumbX;
-                if (action == MotionEvent.ACTION_UP && delegate != null) {
+                if (delegate != null) {
+                    // CANCEL must finish the gesture the same way UP does.
+                    // The preview bubble hides in onSeekBarDrag; skipping it
+                    // on CANCEL left the bubble on screen with no further
+                    // event to remove it.
                     delegate.onSeekBarDrag((float) thumbX / (float) (width - thumbWidth));
                 }
                 pressed = false;

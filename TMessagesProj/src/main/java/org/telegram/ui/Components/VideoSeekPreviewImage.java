@@ -43,6 +43,13 @@ public class VideoSeekPreviewImage extends View implements NotificationCenter.No
     private boolean open;
     private boolean isQualities;
     private AnimatedFileDrawable fileDrawable;
+    /**
+     * Whether the media backing {@link #fileDrawable} is fully present on disk.
+     * While a video is still streaming, the drawable points at a partially
+     * written .temp file; seeking inside it from a background thread can trip
+     * the native decoder, so frame extraction is skipped until it completes.
+     */
+    private volatile boolean fileComplete = true;
     private long duration;
     private Uri videoUri;
     private Runnable loadRunnable;
@@ -284,11 +291,16 @@ public class VideoSeekPreviewImage extends View implements NotificationCenter.No
         }
         if (usingStoryboard) return;
         AnimatedFileDrawable file = fileDrawable;
-        if (file != null) {
-            file.resetStream(false);
+        FileLog.d("ABPV: stock setProgress file=" + (file != null) + " complete=" + fileComplete + " dur=" + duration);
+        if (file == null || !fileComplete) {
+            // No storyboard and no complete file: show the timestamp alone.
+            // Decoding a partially streamed file here is what crashed.
+            clearFrame();
+            return;
         }
+        file.resetStream(false);
         Utilities.globalQueue.postRunnable(progressRunnable = () -> {
-            if (fileDrawable == null) {
+            if (fileDrawable == null || !fileComplete) {
                 pendingProgress = progress;
                 return;
             }
@@ -514,7 +526,12 @@ public class VideoSeekPreviewImage extends View implements NotificationCenter.No
         videoUri = qualityUri.uri;
         Utilities.globalQueue.postRunnable(loadRunnable = () -> {
             if (qualityUri.isCached()) {
-                fileDrawable = new AnimatedFileDrawable(new File(qualityUri.uri.getPath()), true, 0, 0, null, null, null, 0, 0, true, null);
+                fileComplete = isFileComplete(qualityUri.uri.getPath(), 0);
+                // Only touch the native decoder when the media is complete:
+                // on a half-downloaded file even opening it can crash.
+                if (fileComplete) {
+                    fileDrawable = new AnimatedFileDrawable(new File(qualityUri.uri.getPath()), true, 0, 0, null, null, null, 0, 0, true, null);
+                }
             } else {
                 int currentAccount = UserConfig.selectedAccount;
                 try {
@@ -537,9 +554,14 @@ public class VideoSeekPreviewImage extends View implements NotificationCenter.No
                     path = FileLoader.getInstance(currentAccount).getPathToAttach(document, false).getAbsolutePath();
                 }
 
-                fileDrawable = new AnimatedFileDrawable(new File(path), true, document.size, FileLoader.PRIORITY_NORMAL, document, null, parentObject, 0, currentAccount, true, null);
+                fileComplete = isFileComplete(path, document.size);
+                if (fileComplete) {
+                    fileDrawable = new AnimatedFileDrawable(new File(path), true, document.size, FileLoader.PRIORITY_NORMAL, document, null, parentObject, 0, currentAccount, true, null);
+                }
             }
-            duration = fileDrawable.getDurationMs();
+            if (fileDrawable != null) {
+                duration = fileDrawable.getDurationMs();
+            }
             final float progressToApply = pendingProgress;
             if (progressToApply != 0.0f) {
                 pendingProgress = 0.0f;
@@ -590,12 +612,23 @@ public class VideoSeekPreviewImage extends View implements NotificationCenter.No
                 } else {
                     path = FileLoader.getInstance(currentAccount).getPathToAttach(document, false).getAbsolutePath();
                 }
-                fileDrawable = new AnimatedFileDrawable(new File(path), true, document.size, FileLoader.PRIORITY_NORMAL, document, null, parentObject, 0, currentAccount, true, null);
+                fileComplete = isFileComplete(path, document.size);
+                // Skip the native decoder entirely while the file is still
+                // arriving: constructing it on a partial file is what crashed
+                // for streamed media. Frame decoding stays disabled too.
+                if (fileComplete) {
+                    fileDrawable = new AnimatedFileDrawable(new File(path), true, document.size, FileLoader.PRIORITY_NORMAL, document, null, parentObject, 0, currentAccount, true, null);
+                }
             } else {
                 path = uri.getPath();
-                fileDrawable = new AnimatedFileDrawable(new File(path), true, 0, 0, null, null, null, 0, 0, true, null);
+                fileComplete = isFileComplete(path, 0);
+                if (fileComplete) {
+                    fileDrawable = new AnimatedFileDrawable(new File(path), true, 0, 0, null, null, null, 0, 0, true, null);
+                }
             }
-            duration = fileDrawable.getDurationMs();
+            if (fileDrawable != null) {
+                duration = fileDrawable.getDurationMs();
+            }
             final float progressToApply = pendingProgress;
             if (progressToApply != 0.0f) {
                 pendingProgress = 0.0f;
@@ -648,6 +681,62 @@ public class VideoSeekPreviewImage extends View implements NotificationCenter.No
 
     public boolean isReady() {
         return ready;
+    }
+
+    /**
+     * Whether this widget can actually render a frame for the current position.
+     * Unlike {@link #isReady()}, this is false while a streamed video has no
+     * storyboard and no complete local file — the case where decoding would be
+     * unsafe and the caller should fall back to another preview source.
+     */
+    public boolean canShowFrame() {
+        return drawStoryBoard || (fileDrawable != null && fileComplete);
+    }
+
+    public boolean hasStoryboard(MessageObject messageObject) {
+        return storyBoardMap != null && findDocumentById(messageObject, storyBoardPictureDocId) != null;
+    }
+
+    /**
+     * Drops any decoded frame so the bubble falls back to showing only the
+     * timestamp. Called when the frame cannot be produced safely (media still
+     * streaming) to avoid leaving a stale frame from an earlier position.
+     */
+    /**
+     * A media file counts as complete when it is on disk and holds at least the
+     * declared size. Anything smaller is still being streamed.
+     */
+    private static boolean isFileComplete(String path, long expectedSize) {
+        if (path == null) {
+            return false;
+        }
+        // Telegram writes an in-progress download to a *.temp file. That is
+        // incomplete by definition and must never reach the native decoder,
+        // even when the declared size is unknown (0).
+        if (path.endsWith(".temp")) {
+            return false;
+        }
+        try {
+            final File f = new File(path);
+            return f.exists() && f.length() > 0
+                    && (expectedSize <= 0 || f.length() >= expectedSize);
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    private void clearFrame() {
+        if (bitmapToDraw != null) {
+            if (bitmapToRecycle != null) {
+                bitmapToRecycle.recycle();
+            }
+            bitmapToRecycle = bitmapToDraw;
+            bitmapToDraw = null;
+        }
+        bitmapShader = null;
+        bitmapPaint.setShader(null);
+        setVisibility(INVISIBLE);
+        invalidate();
     }
 
     public boolean isOpen() {
