@@ -759,6 +759,76 @@ public class FileLoader extends BaseController {
         }
     }
 
+    /**
+     * Returns the plaintext data file backing an active download, i.e. the
+     * partial {@code .temp} file a streaming player is currently reading from.
+     * Decrypted on the fly as chunks arrive, so it can be decoded directly.
+     * Returns null when the document is not currently being downloaded.
+     */
+    public File getActiveDownloadFile(TLRPC.Document document) {
+        if (document == null) {
+            return null;
+        }
+        final String fileName = getAttachFileName(document);
+        if (TextUtils.isEmpty(fileName)) {
+            return null;
+        }
+        FileLoadOperation loadOperation = loadOperationPaths.get(fileName);
+        if (loadOperation != null) {
+            File file = loadOperation.getCurrentFileFast();
+            if (file != null && file.exists() && file.length() > 0) {
+                return file;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * How many bytes starting at {@code offset} are actually present on disk for
+     * this document, capped at {@code length}.
+     *
+     * A streaming download writes sparsely: holes in the middle of the file read
+     * back as zeros while {@code File.length()} still reports the highest offset
+     * written. Feeding those zeros to a decoder parses garbage, so preview data
+     * sources use this to turn a hole into an explicit EOF instead.
+     */
+    /**
+     * The active download operation for a document, or null when it is not
+     * running. Exposed so a preview can reuse its file location for a ranged
+     * request instead of rebuilding a file_reference that may already be stale.
+     */
+    public org.telegram.messenger.FileLoadOperation getLoadOperation(TLRPC.Document document) {
+        if (document == null) {
+            return null;
+        }
+        final String fileName = getAttachFileName(document);
+        if (TextUtils.isEmpty(fileName)) {
+            return null;
+        }
+        return loadOperationPaths.get(fileName);
+    }
+
+    public long getDownloadedLengthFast(TLRPC.Document document, long offset, long length) {
+        if (document == null || length <= 0) {
+            return 0;
+        }
+        final String fileName = getAttachFileName(document);
+        if (TextUtils.isEmpty(fileName)) {
+            return 0;
+        }
+        FileLoadOperation loadOperation = loadOperationPaths.get(fileName);
+        if (loadOperation != null) {
+            return loadOperation.getDownloadedLengthFast(offset, length);
+        }
+        // No active download: only a finished file can serve bytes.
+        File file = getPathToAttach(document);
+        if (file != null && file.exists()
+                && (document.size <= 0 || file.length() >= document.size)) {
+            return length;
+        }
+        return 0;
+    }
+
     public File getLocalFile(ImageLocation imageLocation) {
         if (imageLocation == null) return null;
         String fileName;

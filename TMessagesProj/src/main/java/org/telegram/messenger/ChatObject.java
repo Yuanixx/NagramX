@@ -17,7 +17,7 @@ import android.util.SparseArray;
 import androidx.annotation.IntDef;
 import androidx.collection.LongSparseArray;
 
-import com.google.android.exoplayer2.util.Log;
+import androidx.media3.common.util.Log;
 
 import org.telegram.messenger.utils.tlutils.TlUtils;
 import org.telegram.messenger.voip.Instance;

@@ -74,12 +74,12 @@ import androidx.annotation.Nullable;
 import androidx.annotation.RequiresApi;
 import androidx.exifinterface.media.ExifInterface;
 
-import com.google.android.exoplayer2.C;
-import com.google.android.exoplayer2.ExoPlayer;
-import com.google.android.exoplayer2.Player;
-import com.google.android.exoplayer2.extractor.jpeg.MotionPhotoDescription;
-import com.google.android.exoplayer2.extractor.jpeg.XmpMotionPhotoDescriptionParser;
-import com.google.android.exoplayer2.ui.AspectRatioFrameLayout;
+import androidx.media3.common.C;
+import androidx.media3.exoplayer.ExoPlayer;
+import androidx.media3.common.Player;
+import org.telegram.messenger.motionphoto.MotionPhotoDescription;
+import org.telegram.messenger.motionphoto.MotionPhotoXmpParser;
+import org.telegram.ui.Components.AspectRatioFrameLayout;
 import com.google.android.gms.cast.MediaMetadata;
 import com.google.android.gms.common.images.WebImage;
 import com.radolyn.ayugram.AyuConstants;
@@ -648,7 +648,7 @@ public class MediaController implements AudioManager.OnAudioFocusChangeListener,
                 final ExifInterface ei = new ExifInterface(new File(path));
                 final String xmp = ei.getAttribute(ExifInterface.TAG_XMP);
                 if (xmp != null) {
-                    final MotionPhotoDescription motionPhoto = XmpMotionPhotoDescriptionParser.parse(xmp);
+                    final MotionPhotoDescription motionPhoto = MotionPhotoXmpParser.parse(xmp);
                     if (motionPhoto != null) {
                         MotionPhotoDescription.ContainerItem photo = null, video = null;
                         for (int i = 0; i < motionPhoto.items.size(); ++i) {

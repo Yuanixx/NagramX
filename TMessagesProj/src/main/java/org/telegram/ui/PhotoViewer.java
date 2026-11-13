@@ -143,13 +143,13 @@ import androidx.recyclerview.widget.LinearLayoutManager;
 import androidx.recyclerview.widget.LinearSmoothScrollerEnd;
 import androidx.recyclerview.widget.RecyclerView;
 
-import com.google.android.exoplayer2.C;
-import com.google.android.exoplayer2.ExoPlayer;
-import com.google.android.exoplayer2.Format;
-import com.google.android.exoplayer2.analytics.AnalyticsListener;
-import com.google.android.exoplayer2.ui.AspectRatioFrameLayout;
-import com.google.android.exoplayer2.video.VideoFrameMetadataListener;
-import com.google.android.exoplayer2.video.VideoSize;
+import androidx.media3.common.C;
+import androidx.media3.exoplayer.ExoPlayer;
+import androidx.media3.common.Format;
+import androidx.media3.exoplayer.analytics.AnalyticsListener;
+import org.telegram.ui.Components.AspectRatioFrameLayout;
+import androidx.media3.exoplayer.video.VideoFrameMetadataListener;
+import androidx.media3.common.VideoSize;
 import com.google.android.gms.cast.framework.CastContext;
 import com.google.android.gms.vision.Frame;
 import com.google.android.gms.vision.face.Face;
@@ -305,6 +305,7 @@ import org.telegram.ui.Components.UndoView;
 import org.telegram.ui.Components.VideoCompressButton;
 import org.telegram.ui.Components.VideoEditTextureView;
 import org.telegram.ui.Components.VideoForwardDrawable;
+import org.telegram.ui.Components.Mp4IndexExtractorsFactory;
 import org.telegram.ui.Components.VideoPlayer;
 import org.telegram.ui.Components.VideoPlayerSeekBar;
 import org.telegram.ui.Components.VideoSeekPreviewImage;
@@ -1086,6 +1087,7 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
     private boolean usedSurfaceView;
     private FirstFrameView firstFrameView;
     private VideoPlayer videoPlayer;
+    private volatile int preparePlayerToken;
     private PipSource pipSource;
     private boolean manuallyPaused;
     private Runnable videoPlayRunnable;
@@ -10687,6 +10689,104 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
         }
     }
 
+    /**
+     * Resolves the local, fully-downloaded file for this prepare and creates a per-player
+     * extractors factory. Only cheap path/metadata lookups happen here: the box scan itself is
+     * performed lazily by the factory on ExoPlayer's loader thread, so preparePlayer keeps its
+     * original synchronous order and there is no stale async callback to guard against.
+     */
+    @Nullable
+    private Mp4IndexExtractorsFactory createIndexFactory(ArrayList<VideoPlayer.Quality> videoUrises, Uri uri, long videoByteOffset, int token) {
+        if (videoByteOffset != 0 || videoPlayer == null) {
+            android.util.Log.w("FMPIDX", "prepare skip token=" + token + " reason=offsetOrNoPlayer");
+            return null;
+        }
+        TLRPC.Document doc = null;
+        if (videoUrises != null && currentMessageObject != null) {
+            VideoPlayer.Quality quality = VideoPlayer.getSavedQuality(videoUrises, currentMessageObject);
+            if (quality == null && !videoUrises.isEmpty()) {
+                quality = videoUrises.get(0);
+            }
+            if (quality != null) {
+                for (int i = 0; i < quality.uris.size(); i++) {
+                    VideoPlayer.VideoUri videoUri = quality.uris.get(i);
+                    if (videoUri == null) {
+                        continue;
+                    }
+                    if (videoUri.m3u8uri != null) {
+                        android.util.Log.w("FMPIDX", "prepare skip token=" + token + " reason=hls");
+                        return null;
+                    }
+                    if (videoUri.document != null) {
+                        doc = videoUri.document;
+                        break;
+                    }
+                }
+            }
+        }
+        if (doc == null && currentMessageObject != null) {
+            doc = currentMessageObject.getDocument();
+        }
+        String path = null;
+        if (uri != null && "file".equalsIgnoreCase(uri.getScheme()) && uri.getPath() != null) {
+            path = uri.getPath();
+        } else if (doc != null) {
+            File file = FileLoader.getInstance(currentAccount).getPathToAttach(doc);
+            if (file != null && file.exists()) {
+                path = file.getAbsolutePath();
+            } else {
+                file = FileLoader.getInstance(currentAccount).getPathToAttach(doc, null, true, false);
+                if (file != null && file.exists()) {
+                    path = file.getAbsolutePath();
+                } else {
+                    String name = FileLoader.getAttachFileName(doc);
+                    if (!TextUtils.isEmpty(name)) {
+                        file = new File(FileLoader.getDirectory(FileLoader.MEDIA_DIR_VIDEO), name);
+                        if (file.exists()) {
+                            path = file.getAbsolutePath();
+                        }
+                    }
+                    if (path == null) {
+                        // Still downloading: FileLoader knows the live *.temp (or preload)
+                        // file. Its prefix is already the real beginning of the document, so
+                        // walking the box chain there yields a usable index for everything
+                        // that has arrived -- no need to wait for the download to finish.
+                        // getPathToAttach() only ever names the *final* file, which does not
+                        // exist yet, so the active operation has to be asked directly.
+                        File live = FileLoader.getInstance(currentAccount).getActiveDownloadFile(doc);
+                        if (live != null && live.length() > 0) {
+                            path = live.getAbsolutePath();
+                        }
+                    }
+                    if (path == null) {
+                        for (boolean cacheDir : new boolean[]{true, false}) {
+                            File live = FileLoader.getInstance(currentAccount)
+                                    .getPathToAttach(doc, cacheDir);
+                            if (live != null && live.length() > 0) {
+                                path = live.getAbsolutePath();
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if (path == null && (doc == null || doc.id == 0 || doc.size <= 0)) {
+            android.util.Log.w("FMPIDX", "prepare skip token=" + token + " reason=noLocalFile");
+            return null;
+        }
+        // A null path is fine: the factory first asks for an index stored by document id, which
+        // is valid even while the file is being (re)downloaded. Only a cache miss needs a file.
+        long size = doc != null ? doc.size : new File(path).length();
+        long id = doc != null ? doc.id : 0;
+        boolean notLoading = doc == null || !FileLoader.getInstance(currentAccount).isLoadingFile(FileLoader.getAttachFileName(doc));
+        double expectedSec = currentMessageObject != null ? currentMessageObject.getDuration() : 0;
+        android.util.Log.w("FMPIDX", "prepare candidate token=" + token + " doc=" + id
+                + " size=" + size + " path=" + path + " notLoading=" + notLoading
+                + " expectSec=" + expectedSec);
+        return new Mp4IndexExtractorsFactory(path, id, size, expectedSec, notLoading);
+    }
+
     private void preparePlayer(ArrayList<VideoPlayer.Quality> videoUrises, Uri uri, boolean playWhenReady, boolean preview, boolean livePhoto) {
         preparePlayer(videoUrises, uri, playWhenReady, preview, null, livePhoto, 0);
     }
@@ -10699,6 +10799,7 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
         if (parentActivity == null) {
             return;
         }
+        final int token = ++preparePlayerToken;
         streamingAlertShown = false;
         startedPlayTime = SystemClock.elapsedRealtime();
         currentVideoFinishedLoading = false;
@@ -10845,6 +10946,8 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
                 }
                 newPlayerCreated = true;
             }
+            // FMPIDX: one factory per prepare; null clears any index left on a reused (PiP) player.
+            videoPlayer.setExtractorsFactory(createIndexFactory(videoUrises, uri, videoByteOffset, token));
             if (videoTextureView != null) {
                 videoPlayer.setTextureView(videoTextureView);
             } else if (videoSurfaceView != null) {
@@ -10887,10 +10990,33 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
                         return;
                     }
                     FileLog.e(e);
-                    if (!menuItem.isSubItemVisible(gallery_menu_openin)) {
+                    android.util.Log.w("STREAMDBG", "onError " + (e != null ? e.getClass().getSimpleName() + ": " + e.getMessage() : "null"));
+                    if (currentMessageObject != null && currentMessageObject.isGif() && NekoConfig.takeGIFasVideo.Bool()) {
                         return;
                     }
-                    if (currentMessageObject != null && currentMessageObject.isGif() && NekoConfig.takeGIFasVideo.Bool()) {
+
+                    final TLRPC.Document document = currentMessageObject != null ? currentMessageObject.getDocument() : null;
+                    // Do NOT blacklist the document here. A local sparse-file failure says
+                    // nothing about whether MTProto ranged streaming works, and blacklisting
+                    // it makes every later attempt fall back to a full download - exactly
+                    // the "must download the whole video first" symptom.
+                    android.util.Log.w("STREAMDBG", "onError streaming=" + isStreaming + " id=" + (document != null ? document.id : -1));
+
+                    // Drop the broken player so the existing fileLoaded handler in
+                    // didReceivedNotification() rebuilds it from the completed file.
+                    if (videoPlayer != null) {
+                        videoPlayer.releasePlayer(true);
+                        videoPlayer = null;
+                    }
+
+                    boolean downloading = false;
+                    if (currentMessageObject != null && document != null) {
+                        FileLoader.getInstance(currentAccount).loadFile(document, currentMessageObject, FileLoader.PRIORITY_NORMAL, 0);
+                        downloading = true;
+                    }
+                    android.util.Log.w("STREAMDBG", "onError fallback downloading=" + downloading + " id=" + (document != null ? document.id : -1));
+
+                    if (!menuItem.isSubItemVisible(gallery_menu_openin)) {
                         return;
                     }
                     AlertDialog.Builder builder = new AlertDialog.Builder(parentActivity, resourcesProvider);
@@ -10898,8 +11024,16 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
                     builder.setMessage(getString(R.string.CantPlayVideo));
                     builder.setPositiveButton(getString("Open", R.string.Open), (dialog, which) -> {
                         try {
-                            AndroidUtilities.openForView(currentMessageObject, parentActivity, resourcesProvider, true);
-                            closePhoto(false, false);
+                            boolean openedExternal = AndroidUtilities.openForView(currentMessageObject, parentActivity, resourcesProvider, true);
+                            if (!openedExternal && currentMessageObject != null && currentMessageObject.isVideo() && document != null) {
+                                openedExternal = MediaStreamingProvider.openForStreaming(parentActivity, currentAccount, document, currentMessageObject);
+                            }
+                            android.util.Log.w("STREAMDBG", "onError external opened=" + openedExternal);
+                            if (openedExternal) {
+                                closePhoto(false, false);
+                            } else {
+                                showDownloadAlert();
+                            }
                         } catch (Exception e1) {
                             FileLog.e(e1);
                         }
@@ -16977,6 +17111,17 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
                 boolean existsFinal = exists;
                 File finalF2Local = f2Local;
                 AndroidUtilities.runOnUIThread(() -> {
+                    // Opening a not-yet-downloaded video used to leave a black screen
+                    // while DownloadController pulled the whole file, because the
+                    // auto-play path is gated by SharedConfig.isAutoplayVideo() and
+                    // messageObject.mediaExists. Start the streaming datasource once
+                    // for this photo so playback begins from the first ranges that
+                    // arrive instead of waiting for the full download.
+                    if (a == 0 && isVideoFinal && canStreamFinal && !playerAutoStarted && videoPlayer == null) {
+                        playerAutoStarted = true;
+                        android.util.Log.w("STREAMDBG", "checkProgress auto-start streaming file=" + currentFileNames[0]);
+                        onActionClick(true);
+                    }
                     if (shownControlsByEnd && !actionBarWasShownBeforeByEnd && isPlaying) {
                         photoProgressViews[a].setBackgroundState(PROGRESS_PLAY, false, false);
                         return;
@@ -21017,6 +21162,81 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
     }
 
 
+    // A partially downloaded (.temp / short) file must never be handed to the
+    // decoder: it looks "present" but ExoPlayer fails while parsing it, which is
+    // what produced the "unable to play this video" dialog. Treat it as missing
+    // so the streaming (or download) branch is used instead.
+    //
+    // File.length() alone is NOT enough: Telegram's streaming download writes
+    // into the final-named file sparsely, so the length already equals
+    // document.size while the not-yet-downloaded holes read back as zeros.
+    // ExoPlayer then parses a zero-filled moof/trun and dies with a Source
+    // error (FragmentedMp4Extractor.parseTrun). Probe a few offsets to detect
+    // those holes; a false positive only costs us a tg:// datasource, which can
+    // still read a finished file.
+    private boolean hasSparseHole(File file, long size) {
+        if (size < 1024 * 1024) {
+            return false;
+        }
+        java.io.RandomAccessFile raf = null;
+        try {
+            raf = new java.io.RandomAccessFile(file, "r");
+            byte[] buf = new byte[16];
+            int holes = 0;
+            for (int i = 1; i <= 12; i++) {
+                long pos = size * i / 13;
+                if (pos > raf.length() - buf.length) {
+                    continue;
+                }
+                raf.seek(pos);
+                if (raf.read(buf) != buf.length) {
+                    continue;
+                }
+                boolean zero = true;
+                for (int j = 0; j < buf.length; j++) {
+                    if (buf[j] != 0) {
+                        zero = false;
+                        break;
+                    }
+                }
+                if (zero) {
+                    holes++;
+                }
+            }
+            return holes >= 2;
+        } catch (Throwable ignore) {
+            return false;
+        } finally {
+            if (raf != null) {
+                try {
+                    raf.close();
+                } catch (Throwable ignore) {
+                }
+            }
+        }
+    }
+
+    private boolean isPlayableLocalFile(File file, MessageObject messageObject) {
+        if (file == null || !file.exists() || file.getName().endsWith(".temp")) {
+            return false;
+        }
+        if (messageObject != null) {
+            TLRPC.Document document = messageObject.getDocument();
+            if (document != null && document.size > 0) {
+                if (file.length() < document.size) {
+                    android.util.Log.w("STREAMDBG", "incomplete local file len=" + file.length() + " need=" + document.size + " name=" + file.getName());
+                    return false;
+                }
+                if (hasSparseHole(file, document.size)) {
+                    android.util.Log.w("STREAMDBG", "sparse local file len=" + file.length() + " need=" + document.size + " name=" + file.getName());
+                    return false;
+                }
+            }
+        }
+        android.util.Log.w("STREAMDBG", "local file ok name=" + file.getName() + " len=" + file.length());
+        return true;
+    }
+
     private void onActionClick(boolean download) {
         if (currentMessageObject == null && currentBotInlineResult == null && (pageBlocksAdapter == null || currentFileNames[0] == null) && sendPhotoType != SELECT_TYPE_NO_SELECT) {
             return;
@@ -21067,15 +21287,49 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
                         }
                     }
                 }
-                if (file == null || !file.exists()) {
+                // Always prefer the streaming datasource for a streamable video.
+                // VideoUri.of() replaces tg:// with file:// as soon as a same-named
+                // cache file exists, but Telegram writes that file sparsely: its
+                // length already equals document.size while undownloaded ranges read
+                // back as zeros. Handing it to ExoPlayer produces a bogus moof/trun
+                // and the "can't play this video" dialog. FileStreamLoadOperation
+                // instead reads only ranges the downloader has really filled and
+                // waits for the rest, so it works both mid-download and when the
+                // file is already complete.
+                final boolean forceStreaming = original != null
+                        && currentMessageObject.isVideo()
+                        && (currentMessageObject.hasVideoQualities() || SharedConfig.streamMedia || SharedConfig.streamAllVideo)
+                        && !DialogObject.isEncryptedDialog(currentMessageObject.getDialogId())
+                        && currentMessageObject.canStreamVideo();
+                if (forceStreaming || !isPlayableLocalFile(file, currentMessageObject)) {
                     file = null;
-                    if (currentMessageObject.isVideo() && (currentMessageObject.hasVideoQualities() || SharedConfig.streamMedia) && !DialogObject.isEncryptedDialog(currentMessageObject.getDialogId()) && currentMessageObject.canStreamVideo()) {
+                    if (forceStreaming) {
+                        android.util.Log.w("STREAMDBG", "stream gate forced=true streamMedia=" + SharedConfig.streamMedia + " streamAllVideo=" + SharedConfig.streamAllVideo + " id=" + original.id);
                         final int reference = FileLoader.getInstance(currentMessageObject.currentAccount).getFileReference(currentMessageObject);
 
-                        videoUrises = new ArrayList<>();
-                        videoUrises.addAll(VideoPlayer.getQualities(currentAccount, original, alt_documents, reference, false));
-                        isStreaming = true;
-                        checkProgress(0, false, false);
+                        ArrayList<VideoPlayer.Quality> qualities = new ArrayList<>();
+                        qualities.addAll(VideoPlayer.getQualities(currentAccount, original, alt_documents, reference, false));
+                        int forcedTg = 0;
+                        for (VideoPlayer.Quality quality : qualities) {
+                            for (VideoPlayer.VideoUri videoUri : quality.uris) {
+                                if (videoUri == null || videoUri.document == null) {
+                                    continue;
+                                }
+                                try {
+                                    videoUri.uri = VideoPlayer.VideoUri.getUri(currentAccount, videoUri.document, reference);
+                                    videoUri.mediaItem = null;
+                                    forcedTg++;
+                                } catch (Throwable e) {
+                                    FileLog.e(e);
+                                }
+                            }
+                        }
+                        android.util.Log.w("STREAMDBG", "onActionClick -> streaming id=" + original.id + " qualities=" + qualities.size() + " mime=" + original.mime_type + " forcedTg=" + forcedTg);
+                        if (!qualities.isEmpty() && forcedTg > 0) {
+                            videoUrises = qualities;
+                            isStreaming = true;
+                            checkProgress(0, false, false);
+                        }
                     }
                 }
             }
@@ -21113,6 +21367,7 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
             uri = Uri.fromFile(file);
         }
         if (uri == null && videoUrises == null) {
+            android.util.Log.w("STREAMDBG", "onActionClick -> no uri / no qualities, download=" + download + " file=" + (file != null ? file.getName() : "null"));
             if (download) {
                 if (currentMessageObject != null) {
                     if (!FileLoader.getInstance(currentAccount).isLoadingFile(currentFileNames[0])) {

@@ -133,7 +133,7 @@ import androidx.recyclerview.widget.RecyclerView;
 import androidx.viewpager.widget.PagerAdapter;
 import androidx.viewpager.widget.ViewPager;
 
-import com.google.android.exoplayer2.ui.AspectRatioFrameLayout;
+import org.telegram.ui.Components.AspectRatioFrameLayout;
 import com.google.zxing.common.detector.MathUtils;
 
 import com.radolyn.ayugram.AyuConstants;

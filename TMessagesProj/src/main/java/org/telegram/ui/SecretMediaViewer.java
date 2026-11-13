@@ -70,9 +70,9 @@ import android.widget.FrameLayout;
 import android.widget.ImageView;
 import android.widget.TextView;
 
-import com.google.android.exoplayer2.C;
-import com.google.android.exoplayer2.ExoPlayer;
-import com.google.android.exoplayer2.ui.AspectRatioFrameLayout;
+import androidx.media3.common.C;
+import androidx.media3.exoplayer.ExoPlayer;
+import org.telegram.ui.Components.AspectRatioFrameLayout;
 
 import org.telegram.messenger.AndroidUtilities;
 import org.telegram.messenger.Emoji;

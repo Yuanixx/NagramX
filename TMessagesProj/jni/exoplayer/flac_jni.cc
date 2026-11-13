@@ -32,11 +32,11 @@
 #define DECODER_FUNC(RETURN_TYPE, NAME, ...)                             \
   extern "C" {                                                           \
   JNIEXPORT RETURN_TYPE                                                  \
-      Java_com_google_android_exoplayer2_ext_flac_FlacDecoderJni_##NAME( \
+      Java_androidx_media3_decoder_flac_FlacDecoderJni_##NAME( \
           JNIEnv *env, jobject thiz, ##__VA_ARGS__);                     \
   }                                                                      \
   JNIEXPORT RETURN_TYPE                                                  \
-      Java_com_google_android_exoplayer2_ext_flac_FlacDecoderJni_##NAME( \
+      Java_androidx_media3_decoder_flac_FlacDecoderJni_##NAME( \
           JNIEnv *env, jobject thiz, ##__VA_ARGS__)
 
 class JavaDataSource : public DataSource {
@@ -123,7 +123,7 @@ DECODER_FUNC(jobject, flacDecodeMetadata, jlong jContext) {
   if (picturesValid) {
     std::vector<FlacPicture> pictures = context->parser->getPictures();
     jclass pictureFrameClass = env->FindClass(
-            "com/google/android/exoplayer2/metadata/flac/PictureFrame");
+            "androidx/media3/extractor/metadata/flac/PictureFrame");
     jmethodID pictureFrameConstructor =
             env->GetMethodID(pictureFrameClass, "<init>",
                              "(ILjava/lang/String;Ljava/lang/String;IIII[B)V");
@@ -149,7 +149,7 @@ DECODER_FUNC(jobject, flacDecodeMetadata, jlong jContext) {
           context->parser->getStreamInfo();
 
   jclass flacStreamMetadataClass = env->FindClass(
-          "com/google/android/exoplayer2/extractor/"
+          "androidx/media3/extractor/"
           "FlacStreamMetadata");
   jmethodID flacStreamMetadataConstructor =
           env->GetMethodID(flacStreamMetadataClass, "<init>",

@@ -37,7 +37,7 @@ import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 import androidx.core.graphics.ColorUtils;
 
-import com.google.android.exoplayer2.util.MimeTypes;
+import androidx.media3.common.MimeTypes;
 
 import org.json.JSONObject;
 import org.telegram.messenger.AndroidUtilities;

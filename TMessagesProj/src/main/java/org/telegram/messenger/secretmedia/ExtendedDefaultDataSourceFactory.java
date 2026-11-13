@@ -12,10 +12,10 @@ import android.content.Context;
 import android.net.Uri;
 import android.util.LongSparseArray;
 
-import com.google.android.exoplayer2.upstream.DataSource;
-import com.google.android.exoplayer2.upstream.DefaultDataSource;
-import com.google.android.exoplayer2.upstream.DefaultHttpDataSourceFactory;
-import com.google.android.exoplayer2.upstream.TransferListener;
+import androidx.media3.datasource.DataSource;
+import androidx.media3.datasource.DefaultDataSource;
+import androidx.media3.datasource.DefaultHttpDataSource;
+import androidx.media3.datasource.TransferListener;
 
 public final class ExtendedDefaultDataSourceFactory implements DataSource.Factory {
 
@@ -38,7 +38,9 @@ public final class ExtendedDefaultDataSourceFactory implements DataSource.Factor
      */
     public ExtendedDefaultDataSourceFactory(Context context, String userAgent,
                                     TransferListener listener) {
-        this(context, listener, new DefaultHttpDataSourceFactory(userAgent, listener));
+        this(context, listener, new DefaultHttpDataSource.Factory()
+                .setUserAgent(userAgent)
+                .setTransferListener(listener));
     }
 
     /**

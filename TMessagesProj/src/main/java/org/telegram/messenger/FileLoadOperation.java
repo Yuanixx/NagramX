@@ -203,6 +203,16 @@ public class FileLoadOperation {
     private int initialDatacenterId;
     private long documentId;
     protected TLRPC.InputFileLocation location;
+
+    /**
+     * The location this operation downloads from. Exposed so a preview can fetch
+     * a small byte range for a keyframe it has not buffered yet, reusing this
+     * operation's up-to-date file_reference instead of rebuilding one (a stale
+     * reference is rejected by the server).
+     */
+    public TLRPC.InputFileLocation getFileLocation() {
+        return location;
+    }
     private TLRPC.InputWebFileLocation webLocation;
     private WebFile webFile;
     private volatile int state = stateIdle;
@@ -693,7 +703,7 @@ public class FileLoadOperation {
         return result[0];
     }
 
-    protected File getCurrentFileFast() {
+    public File getCurrentFileFast() {
         if (state == stateFinished && !preloadFinished && cacheFileFinalReady) {
             return cacheFileFinal;
         } else {
@@ -742,6 +752,33 @@ public class FileLoadOperation {
             return 0;
         }
         return progress + getDownloadedLengthFromOffsetInternal(ranges, (int) (totalBytesCount * progress), totalBytesCount) / (float) totalBytesCount;
+    }
+
+    /**
+     * Non-blocking variant of {@link #getDownloadedLengthFromOffset(long, long)}.
+     *
+     * A media decoder issues a large number of small reads, so a blocking
+     * round-trip through the stage queue per read is not affordable. This reads
+     * the volatile snapshot of the missing-ranges list instead and never waits.
+     *
+     * @return how many bytes starting at {@code offset} are actually on disk,
+     *         capped at {@code length}
+     */
+    public long getDownloadedLengthFast(final long offset, final long length) {
+        if (length <= 0) {
+            return 0;
+        }
+        try {
+            final ArrayList<Range> ranges = notLoadedBytesRangesCopy;
+            if (ranges == null || state == stateFinished) {
+                // Finished, or nothing recorded yet: treat the whole span as
+                // present rather than blocking a decoder on bookkeeping.
+                return length;
+            }
+            return getDownloadedLengthFromOffsetInternal(ranges, offset, length);
+        } catch (Throwable e) {
+            return length;
+        }
     }
 
     protected long[] getDownloadedLengthFromOffset(final long offset, final long length) {

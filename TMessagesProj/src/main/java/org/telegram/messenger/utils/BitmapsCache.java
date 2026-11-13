@@ -5,7 +5,7 @@ import android.graphics.BitmapFactory;
 import android.os.Build;
 import android.os.SystemClock;
 
-import com.google.android.exoplayer2.util.Log;
+import androidx.media3.common.util.Log;
 import com.google.common.util.concurrent.AtomicDouble;
 
 import org.telegram.messenger.AndroidUtilities;

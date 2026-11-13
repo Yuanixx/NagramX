@@ -169,6 +169,26 @@ public class NekoConfig {
 
     public static ConfigItem customAudioBitrate = addConfig("customAudioBitrate", configTypeInt, 32);
     public static ConfigItem enhancedFileLoader = addConfig("enhancedFileLoader", configTypeBool, false);
+    /**
+     * Gates the *behaviour* of the video preview diagnostics: the N=5/N=10
+     * retry ladder, the readAt tracer and the control-group re-decode. The
+     * ABPV log lines themselves are always written (FileLog lets that prefix
+     * through regardless of {@code BuildVars.LOGS_ENABLED}), so this switch
+     * costs nothing when it is off.
+     *
+     * Default true for this build so the next round of tests produces data;
+     * flip back to false before shipping.
+     */
+    public static ConfigItem videoPreviewDiagnostics = addConfig("videoPreviewDiagnostics", configTypeBool, false);
+
+    /**
+     * Master switch for preview range requests. Fetching is now structurally
+     * unable to compete with playback: FileRangeFetcher refuses every request
+     * while the document has an active download operation, and otherwise
+     * spaces them at one per second. Set this to false to make the preview
+     * strictly local-only (no range request under any circumstance).
+     */
+    public static ConfigItem videoPreviewNetworkFetch = addConfig("videoPreviewNetworkFetch", configTypeBool, true);
     public static ConfigItem uploadBoost = addConfig("uploadBoost", configTypeBool, false);
     public static ConfigItem useOSMDroidMap = addConfig("useOSMDroidMap", configTypeBool, false);
     public static ConfigItem mapDriftingFixForGoogleMaps = addConfig("mapDriftingFixForGoogleMaps", configTypeBool, true);

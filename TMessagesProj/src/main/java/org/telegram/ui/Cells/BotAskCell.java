@@ -10,7 +10,7 @@ import android.view.ViewGroup;
 
 import androidx.annotation.NonNull;
 
-import com.google.android.exoplayer2.util.Log;
+import androidx.media3.common.util.Log;
 
 import org.telegram.ui.ActionBar.Theme;
 import org.telegram.ui.Components.LayoutHelper;

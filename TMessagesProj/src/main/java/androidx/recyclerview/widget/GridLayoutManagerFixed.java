@@ -11,7 +11,7 @@ import android.content.Context;
 import android.graphics.Rect;
 import android.view.View;
 
-import com.google.android.exoplayer2.util.Log;
+import androidx.media3.common.util.Log;
 
 import org.telegram.ui.Cells.ChatMessageCell;
 

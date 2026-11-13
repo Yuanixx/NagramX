@@ -15,8 +15,8 @@ import android.system.OsConstants;
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 
-import com.google.android.exoplayer2.upstream.DataSource;
-import com.google.android.exoplayer2.upstream.DataSpec;
+import androidx.media3.datasource.DataSource;
+import androidx.media3.datasource.DataSpec;
 
 import org.telegram.messenger.ApplicationLoader;
 import org.telegram.messenger.FileLoader;
@@ -103,7 +103,15 @@ public class MediaStreamingProvider extends ContentProvider {
     }
 
     @Nullable
-    private static Uri getStreamingUri(int currentAccount, TLRPC.Document document, Object parent) {
+    /**
+     * Builds a {@code content://} URI that streams the given document through
+     * this provider. Returns null when the media already exists as a local
+     * file (the {@code tg://} form is only produced for missing files).
+     *
+     * Exposed so in-app consumers (e.g. seek-preview frame extraction) can read
+     * the media through the same proxy-fd path an external player would use.
+     */
+    public static Uri getStreamingUri(int currentAccount, TLRPC.Document document, Object parent) {
         var uri = FileStreamLoadOperation.prepareUri(currentAccount, document, parent);
         if (uri == null || !"tg".equals(uri.getScheme())) {
             return null;
@@ -131,12 +139,17 @@ public class MediaStreamingProvider extends ContentProvider {
 
     private static class ProxyFileDescriptorCallback extends StorageManagerCompat.ProxyFileDescriptorCallbackCompat {
         private long size;
-        private final DataSource dataSource;
+        private DataSource dataSource;
+        private final DataSource.Factory dataSourceFactory;
         private final DataSpec.Builder dataSpecBuilder;
+        /** Offset the currently open stream is positioned at, -1 when closed. */
+        private long streamPosition = -1;
+        private boolean streamEof;
 
         public ProxyFileDescriptorCallback(Uri uri) {
             var tgUri = uri.buildUpon().scheme("tg").build();
             var mediaDataSourceFactory = new ExtendedDefaultDataSourceFactory(ApplicationLoader.applicationContext, "Mozilla/5.0 (X11; Linux x86_64; rv:10.0) Gecko/20150101 Firefox/47.0 (Chrome)");
+            dataSourceFactory = mediaDataSourceFactory;
             dataSource = mediaDataSourceFactory.createDataSource();
             dataSpecBuilder = new DataSpec.Builder().setUri(tgUri);
             try {
@@ -145,22 +158,50 @@ public class MediaStreamingProvider extends ContentProvider {
             } catch (IOException e) {
                 FileLog.e(e);
             }
+            dataSource = null;
         }
 
         @Override
         public int onRead(long offset, int size, byte[] data) throws ErrnoException {
             try {
-                dataSpecBuilder.setPosition(offset);
-                dataSpecBuilder.setLength(size);
-
-                dataSource.open(dataSpecBuilder.build());
+                // The retriever reads in bursts; reopening the DataSource for
+                // every single read used to be a fresh network request per
+                // burst, which is why previewing an uncached video appeared to
+                // hang. Keep one stream open while the reads stay sequential
+                // and only reopen when the reader seeks.
+                if (dataSource == null || streamEof || offset != streamPosition) {
+                    closeStream();
+                    dataSource = dataSourceFactory.createDataSource();
+                    dataSpecBuilder.setPosition(offset);
+                    dataSpecBuilder.setLength(androidx.media3.common.C.LENGTH_UNSET);
+                    dataSource.open(dataSpecBuilder.build());
+                    streamPosition = offset;
+                    streamEof = false;
+                }
                 var bytesRead = dataSource.read(data, 0, size);
-                dataSource.close();
-
+                if (bytesRead <= 0) {
+                    streamEof = true;
+                    return 0;
+                }
+                streamPosition += bytesRead;
                 return bytesRead;
             } catch (IOException e) {
+                streamEof = true;
                 FileLog.e(e);
                 throw new ErrnoException("onRead", OsConstants.EBADF);
+            }
+        }
+
+        private void closeStream() {
+            final DataSource old = dataSource;
+            dataSource = null;
+            streamPosition = -1;
+            streamEof = false;
+            if (old != null) {
+                try {
+                    old.close();
+                } catch (Throwable ignore) {
+                }
             }
         }
 
@@ -181,7 +222,7 @@ public class MediaStreamingProvider extends ContentProvider {
 
         @Override
         public void onRelease() {
-
+            closeStream();
         }
     }
 }

@@ -12,11 +12,11 @@ import android.net.Uri;
 
 import androidx.annotation.Nullable;
 
-import com.google.android.exoplayer2.C;
-import com.google.android.exoplayer2.upstream.BaseDataSource;
-import com.google.android.exoplayer2.upstream.DataSpec;
-import com.google.android.exoplayer2.upstream.TransferListener;
-import com.google.android.exoplayer2.util.Log;
+import androidx.media3.common.C;
+import androidx.media3.datasource.BaseDataSource;
+import androidx.media3.datasource.DataSpec;
+import androidx.media3.datasource.TransferListener;
+import androidx.media3.common.util.Log;
 
 import org.telegram.tgnet.TLRPC;
 
@@ -43,6 +43,7 @@ public class FileStreamLoadOperation extends BaseDataSource implements FileLoadO
     private boolean opened;
     private long currentOffset;
     private CountDownLatch countDownLatch;
+    private boolean debugWaitLogged;
     private RandomAccessFile file;
     private TLRPC.Document document;
     private Object parentObject;
@@ -105,6 +106,7 @@ public class FileStreamLoadOperation extends BaseDataSource implements FileLoadO
             bytesRemaining = Math.min(bytesRemaining, requestedLength - bytesTransferred);
         }
         opened = true;
+        android.util.Log.w("STREAMDBG", "open id=" + document.id + " mime=" + document.mime_type + " size=" + document.size + " pos=" + dataSpec.position + " len=" + dataSpec.length);
         transferStarted(dataSpec);
         if (loadOperation != null) {
             currentFile = loadOperation.getCurrentFile();
@@ -113,7 +115,6 @@ public class FileStreamLoadOperation extends BaseDataSource implements FileLoadO
                     file = new RandomAccessFile(currentFile, "r");
                     file.seek(currentOffset);
                     if (loadOperation.isFinished()) {
-                        super.isNetwork = false;
                         bytesRemaining = currentFile.length() - currentOffset;
                         if (requestedLength != C.LENGTH_UNSET) {
                             bytesRemaining = Math.min(bytesRemaining, requestedLength - bytesTransferred);
@@ -153,6 +154,16 @@ public class FileStreamLoadOperation extends BaseDataSource implements FileLoadO
                 }
                 while ((availableLength == 0 && opened) || file == null) {
                     availableLength = (int) loadOperation.getDownloadedLengthFromOffset(currentOffset, readLength)[0];
+                    if (availableLength == 0 && loadOperation.isFinished()) {
+                        // Once the download has finished the parts bitmap is gone and
+                        // getDownloadedLengthFromOffset() keeps reporting 0. The bytes
+                        // are already on disk, so read them directly instead of waiting
+                        // for a download notification that will never arrive.
+                        File finishedFile = loadOperation.getCurrentFileFast();
+                        if (finishedFile != null && finishedFile.length() > currentOffset) {
+                            availableLength = (int) Math.min(readLength, finishedFile.length() - currentOffset);
+                        }
+                    }
                     if (availableLength == 0) {
                         countDownLatch = new CountDownLatch(1);
                         FileLoadOperation loadOperation = FileLoader.getInstance(currentAccount).loadStreamFile(this, document, null, parentObject, currentOffset, false, getCurrentPriority());
@@ -162,8 +173,19 @@ public class FileStreamLoadOperation extends BaseDataSource implements FileLoadO
                             this.loadOperation = loadOperation;
                         }
 //                        FileLog.e("FileStreamLoadOperation " + document.id + " read sleeping.... Zzz");
-                        if (countDownLatch != null) {
-                            countDownLatch.await();
+                        final CountDownLatch latch = countDownLatch;
+                        if (latch != null) {
+                            if (!debugWaitLogged) {
+                                debugWaitLogged = true;
+                                android.util.Log.w("STREAMDBG", "read wait id=" + document.id + " offset=" + currentOffset + " len=" + readLength + " available=0");
+                            }
+                            // The original unbounded await() could hang forever when a
+                            // tail (moov) request never completed, which looked exactly
+                            // like "the video must be downloaded first". Bail out so
+                            // ExoPlayer reports an error and PhotoViewer falls back.
+                            if (!latch.await(15, java.util.concurrent.TimeUnit.SECONDS)) {
+                                throw new IOException("STREAMDBG wait timeout id=" + document.id + " offset=" + currentOffset + " len=" + readLength);
+                            }
                             countDownLatch = null;
                         }
                     }
@@ -187,7 +209,6 @@ public class FileStreamLoadOperation extends BaseDataSource implements FileLoadO
                                 file = new RandomAccessFile(currentFile, "r");
                                 file.seek(currentOffset);
                                 if (loadOperation.isFinished()) {
-                                    super.isNetwork = false;
                                     bytesRemaining = currentFile.length() - currentOffset;
                                     if (requestedLength != C.LENGTH_UNSET) {
                                         bytesRemaining = Math.min(bytesRemaining, requestedLength - bytesTransferred);

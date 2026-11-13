@@ -10079,14 +10079,22 @@ public class MessageObject {
         return getDialogId(messageOwner);
     }
 
-    public boolean canStreamVideo() {
-        if (hasVideoQualities()) return true;
-        TLRPC.Document document = getDocument();
-        if (document == null || document instanceof TLRPC.TL_documentEncrypted) {
-            return false;
+    // Mirrors the desktop client's streaming model: optimistically attempt a
+    // video stream even without the server's supports_streaming flag, then fall
+    // back to a full download if opening it fails. The fallback set is in-memory
+    // only, so restarting the app retries streaming again.
+    private static final java.util.Set<Long> streamingNotSupportedIds = java.util.concurrent.ConcurrentHashMap.newKeySet();
+    private static final java.util.Set<String> streamingDebugLogged = java.util.concurrent.ConcurrentHashMap.newKeySet();
+
+    private static void streamDebugOnce(long id, String branch, String detail) {
+        if (streamingDebugLogged.add(id + ":" + branch)) {
+            android.util.Log.d("STREAMDBG", "canStreamVideo " + branch + " id=" + id + " " + detail);
         }
-        if (SharedConfig.streamAllVideo) {
-            return true;
+    }
+
+    public static boolean hasStreamingFlag(TLRPC.Document document) {
+        if (document == null) {
+            return false;
         }
         for (int a = 0; a < document.attributes.size(); a++) {
             TLRPC.DocumentAttribute attribute = document.attributes.get(a);
@@ -10094,9 +10102,44 @@ public class MessageObject {
                 return attribute.supports_streaming;
             }
         }
+        return false;
+    }
+
+    public static void markStreamingNotSupported(long documentId) {
+        streamingNotSupportedIds.add(documentId);
+        android.util.Log.d("STREAMDBG", "markStreamingNotSupported id=" + documentId);
+    }
+
+    public static boolean isStreamingNotSupported(long documentId) {
+        return streamingNotSupportedIds.contains(documentId);
+    }
+
+    public boolean canStreamVideo() {
+        if (hasVideoQualities()) return true;
+        TLRPC.Document document = getDocument();
+        if (document == null || document instanceof TLRPC.TL_documentEncrypted) {
+            return false;
+        }
+        // A failed optimistic open takes priority even over the global switch,
+        // otherwise the same video would fail and show the error dialog forever.
+        if (isStreamingNotSupported(document.id)) {
+            streamDebugOnce(document.id, "fallback", "previous optimistic open failed");
+            return false;
+        }
+        if (SharedConfig.streamAllVideo) {
+            return true;
+        }
+        if (hasStreamingFlag(document)) {
+            return true;
+        }
         if (SharedConfig.streamMkv && "video/x-matroska".equals(document.mime_type)) {
             return true;
         }
+        if (document.mime_type != null && document.mime_type.startsWith("video/")) {
+            streamDebugOnce(document.id, "optimistic", "mime=" + document.mime_type + " size=" + document.size + " allVideo=" + SharedConfig.streamAllVideo);
+            return true;
+        }
+        streamDebugOnce(document.id, "refused", "mime=" + document.mime_type + " size=" + document.size);
         return false;
     }
 

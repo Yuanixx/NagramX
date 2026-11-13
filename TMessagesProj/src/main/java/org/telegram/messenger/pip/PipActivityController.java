@@ -2,13 +2,14 @@ package org.telegram.messenger.pip;
 
 import android.app.Activity;
 import android.support.v4.media.session.MediaSessionCompat;
+import android.support.v4.media.session.PlaybackStateCompat;
 import android.util.Log;
 import android.view.View;
 import android.view.ViewGroup;
 
 import androidx.annotation.Nullable;
+import androidx.media3.common.Player;
 
-import com.google.android.exoplayer2.ext.mediasession.MediaSessionConnector;
 
 import org.telegram.messenger.AndroidUtilities;
 import org.telegram.messenger.pip.activity.IPipActivityActionListener;
@@ -136,11 +137,8 @@ public class PipActivityController {
         final boolean oldMediaSession = oldSource != null && oldSource.needMediaSession;
         final boolean newMediaSession = newSource != null && newSource.needMediaSession;
         if (oldMediaSession != newMediaSession) {
-            if (mediaSessionConnector != null) {
-                mediaSessionConnector.setPlayer(null);
-                mediaSessionConnector = null;
-            }
             if (mediaSession != null) {
+                setMediaSessionPlayer(null);
                 mediaSession.setActive(false);
                 mediaSession.release();
                 mediaSession = null;
@@ -149,9 +147,10 @@ public class PipActivityController {
 
             if (newSource != null) {
                 mediaSession = new MediaSessionCompat(activity, "pip-media-session");
+                mediaSession.setFlags(MediaSessionCompat.FLAG_HANDLES_MEDIA_BUTTONS | MediaSessionCompat.FLAG_HANDLES_TRANSPORT_CONTROLS);
+                mediaSession.setCallback(mediaSessionCallback);
                 mediaSession.setQueue(null);
                 mediaSession.setActive(true);
-                mediaSessionConnector = new MediaSessionConnector(mediaSession);
 
                 // Log.i(PipSource.TAG, "[MEDIA] start media session");
             }
@@ -162,8 +161,8 @@ public class PipActivityController {
         }
 
         if (newSource != null) {
-            if (mediaSessionConnector != null) {
-                mediaSessionConnector.setPlayer(newSource.player);
+            if (mediaSession != null) {
+                setMediaSessionPlayer(newSource.player);
             }
             pipContentView.bringToFront();
             newSource.state2.onReceiveMaxPriority();
@@ -179,7 +178,121 @@ public class PipActivityController {
     }
 
     private MediaSessionCompat mediaSession;
-    MediaSessionConnector mediaSessionConnector;
+    @Nullable
+    private Player mediaSessionPlayer;
+
+    private final MediaSessionCompat.Callback mediaSessionCallback = new MediaSessionCompat.Callback() {
+        @Override
+        public void onPlay() {
+            if (mediaSessionPlayer != null) {
+                mediaSessionPlayer.play();
+            }
+        }
+
+        @Override
+        public void onPause() {
+            if (mediaSessionPlayer != null) {
+                mediaSessionPlayer.pause();
+            }
+        }
+
+        @Override
+        public void onStop() {
+            if (mediaSessionPlayer != null) {
+                mediaSessionPlayer.pause();
+            }
+        }
+
+        @Override
+        public void onSeekTo(long pos) {
+            if (mediaSessionPlayer != null) {
+                mediaSessionPlayer.seekTo(pos);
+            }
+        }
+
+        @Override
+        public void onFastForward() {
+            if (mediaSessionPlayer != null) {
+                mediaSessionPlayer.seekTo(mediaSessionPlayer.getCurrentPosition() + 10_000);
+            }
+        }
+
+        @Override
+        public void onRewind() {
+            if (mediaSessionPlayer != null) {
+                mediaSessionPlayer.seekTo(Math.max(0, mediaSessionPlayer.getCurrentPosition() - 10_000));
+            }
+        }
+    };
+
+    private final Player.Listener mediaSessionPlayerListener = new Player.Listener() {
+        @Override
+        public void onPlayWhenReadyChanged(boolean playWhenReady, int reason) {
+            updateMediaSessionPlaybackState();
+        }
+
+        @Override
+        public void onPlaybackStateChanged(int playbackState) {
+            updateMediaSessionPlaybackState();
+        }
+
+        @Override
+        public void onPositionDiscontinuity(Player.PositionInfo oldPosition, Player.PositionInfo newPosition, int reason) {
+            updateMediaSessionPlaybackState();
+        }
+
+        @Override
+        public void onPlaybackParametersChanged(androidx.media3.common.PlaybackParameters playbackParameters) {
+            updateMediaSessionPlaybackState();
+        }
+    };
+
+    private void setMediaSessionPlayer(@Nullable Player player) {
+        if (mediaSessionPlayer == player) {
+            return;
+        }
+        if (mediaSessionPlayer != null) {
+            mediaSessionPlayer.removeListener(mediaSessionPlayerListener);
+        }
+        mediaSessionPlayer = player;
+        if (mediaSessionPlayer != null) {
+            mediaSessionPlayer.addListener(mediaSessionPlayerListener);
+        }
+        updateMediaSessionPlaybackState();
+    }
+
+    private void updateMediaSessionPlaybackState() {
+        if (mediaSession == null || mediaSessionPlayer == null) {
+            return;
+        }
+        final int state;
+        switch (mediaSessionPlayer.getPlaybackState()) {
+            case Player.STATE_BUFFERING:
+                state = PlaybackStateCompat.STATE_BUFFERING;
+                break;
+            case Player.STATE_READY:
+                state = mediaSessionPlayer.isPlaying() ? PlaybackStateCompat.STATE_PLAYING : PlaybackStateCompat.STATE_PAUSED;
+                break;
+            case Player.STATE_ENDED:
+                state = PlaybackStateCompat.STATE_STOPPED;
+                break;
+            case Player.STATE_IDLE:
+            default:
+                state = PlaybackStateCompat.STATE_NONE;
+                break;
+        }
+        final long actions = PlaybackStateCompat.ACTION_PLAY
+                | PlaybackStateCompat.ACTION_PAUSE
+                | PlaybackStateCompat.ACTION_PLAY_PAUSE
+                | PlaybackStateCompat.ACTION_SEEK_TO
+                | PlaybackStateCompat.ACTION_FAST_FORWARD
+                | PlaybackStateCompat.ACTION_REWIND;
+        mediaSession.setPlaybackState(new PlaybackStateCompat.Builder()
+                .setActions(actions)
+                .setState(state, mediaSessionPlayer.getCurrentPosition(),
+                        mediaSessionPlayer.getPlaybackParameters().speed)
+                .build());
+    }
 
 
 
@@ -206,8 +319,8 @@ public class PipActivityController {
     void dispatchSourceParamsChanged(PipSource source) {
         if (maxPrioritySource == source) {
             PipUtils.applyPictureInPictureParams(activity, source);
-            if (mediaSessionConnector != null) {
-                mediaSessionConnector.setPlayer(source.player);
+            if (mediaSession != null) {
+                setMediaSessionPlayer(source.player);
             }
         }
         pipContentView.invalidate();

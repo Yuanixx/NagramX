@@ -19,10 +19,13 @@ import java.util.Objects;
 public class BuildVars {
 
     public static boolean DEBUG_VERSION = BuildConfig.BUILD_TYPE.equals("debug");
-    public static boolean LOGS_ENABLED = false;
+    // Field initialiser, not the static block below: that block only runs its
+    // body when applicationContext is already set, so depending on class-load
+    // order the flag could stay false and FileLog discarded every message.
+    public static boolean LOGS_ENABLED = true;
     public static boolean DEBUG_PRIVATE_VERSION = false;
     public static boolean USE_CLOUD_STRINGS = true;
-    public static boolean CHECK_UPDATES = true;
+    public static boolean CHECK_UPDATES = false;
     public static boolean NO_SCOPED_STORAGE = Build.VERSION.SDK_INT <= 29;
     public static String BUILD_VERSION_STRING = BuildConfig.BUILD_VERSION_STRING;
 
@@ -48,7 +51,11 @@ public class BuildVars {
         APP_HASH = BuildConfig.APP_HASH;
         if (ApplicationLoader.applicationContext != null) {
             SharedPreferences sharedPreferences = ApplicationLoader.applicationContext.getSharedPreferences("systemConfig", Context.MODE_PRIVATE);
-            LOGS_ENABLED = DEBUG_VERSION || sharedPreferences.getBoolean("logsEnabled", DEBUG_VERSION);
+            // TEMPORARY: force logging on. FileLog discards every message when
+            // this is false, so release builds recorded nothing at all and the
+            // preview diagnostics could never be captured. This also installs
+            // the uncaught-exception handler below, which writes a fatal log.
+            LOGS_ENABLED = true;
             if (LOGS_ENABLED) {
                 final Thread.UncaughtExceptionHandler pastHandler = Thread.getDefaultUncaughtExceptionHandler();
                 Thread.setDefaultUncaughtExceptionHandler((thread, exception) -> {

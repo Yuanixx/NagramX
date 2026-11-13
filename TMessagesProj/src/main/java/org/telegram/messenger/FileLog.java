@@ -571,6 +571,12 @@ public class FileLog {
     }
 
     public static void d(final String message) {
+        // Preview diagnostics bypass the global switch: the release build had it
+        // off, so these lines vanished from logcat and every capture came back
+        // empty. Scoped to the ABPV prefix so no other logging changes.
+        if (message != null && message.startsWith("ABPV")) {
+            android.util.Log.d("ABPV", message);
+        }
         if (!BuildVars.LOGS_ENABLED) {
             return;
         }

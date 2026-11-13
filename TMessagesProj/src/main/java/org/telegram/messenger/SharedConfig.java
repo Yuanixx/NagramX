@@ -308,7 +308,7 @@ public class SharedConfig {
     public static boolean roundCamera16to9 = true;
     public static boolean noSoundHintShowed = false;
     public static boolean streamMedia = true;
-    public static boolean streamAllVideo = false;
+    public static boolean streamAllVideo = true;
     public static boolean streamMkv = false;
     public static boolean saveStreamMedia = true;
     public static boolean pauseMusicOnRecord = false;
@@ -655,7 +655,7 @@ public class SharedConfig {
             pauseMusicOnRecord = preferences.getBoolean("pauseMusicOnRecord", true);
             pauseMusicOnMedia = preferences.getBoolean("pauseMusicOnMedia", false);
             forceDisableTabletMode = preferences.getBoolean("forceDisableTabletMode", false);
-            streamAllVideo = preferences.getBoolean("streamAllVideo", BuildVars.DEBUG_VERSION);
+            streamAllVideo = preferences.getBoolean("streamAllVideo", true);
             streamMkv = preferences.getBoolean("streamMkv", false);
             suggestStickers = preferences.getInt("suggestStickers", 0);
             suggestAnimatedEmoji = preferences.getBoolean("suggestAnimatedEmoji", true);

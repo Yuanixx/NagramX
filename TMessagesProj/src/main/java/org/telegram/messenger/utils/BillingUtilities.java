@@ -9,7 +9,7 @@ import androidx.core.util.Pair;
 
 import com.android.billingclient.api.AccountIdentifiers;
 import com.android.billingclient.api.Purchase;
-import com.google.android.exoplayer2.util.Util;
+import androidx.media3.common.util.Util;
 import com.google.common.base.Charsets;
 
 import org.json.JSONObject;

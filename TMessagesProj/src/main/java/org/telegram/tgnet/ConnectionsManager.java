@@ -14,7 +14,6 @@ import android.util.Base64;
 
 import androidx.annotation.Keep;
 
-import com.google.android.exoplayer2.upstream.DefaultBandwidthMeter;
 
 import com.radolyn.ayugram.utils.AyuGhostUtils;
 
@@ -41,7 +40,6 @@ import org.telegram.messenger.SharedConfig;
 import org.telegram.messenger.StatsController;
 import org.telegram.messenger.UserConfig;
 import org.telegram.messenger.Utilities;
-import org.telegram.ui.Components.VideoPlayer;
 import org.telegram.ui.LoginActivity;
 
 import java.io.ByteArrayOutputStream;
@@ -452,12 +450,6 @@ public class ConnectionsManager extends BaseController {
                         if (NaConfig.INSTANCE.getShowRPCError().Bool()) {
                             ErrorDatabase.showErrorToast(object, errorText);
                         }
-                    }
-                    if ((connectionType & ConnectionTypeDownload) != 0 && VideoPlayer.activePlayers.isEmpty()) {
-                        long ping_time = native_getCurrentPingTime(currentAccount);
-                        final long size = responseSize;
-                        final long delta = Math.max(0, (System.currentTimeMillis() - finalStartRequestTime) - ping_time);
-                        DefaultBandwidthMeter.getSingletonInstance(ApplicationLoader.applicationContext).onTransfer(size, delta);
                     }
                     if (BuildVars.DEBUG_PRIVATE_VERSION && !getUserConfig().isClientActivated() && error != null && error.code == 400 && Objects.equals(error.text, "CONNECTION_NOT_INITED")) {
                         if (BuildVars.LOGS_ENABLED) {

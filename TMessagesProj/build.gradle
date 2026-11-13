@@ -164,8 +164,11 @@ android {
         release {
             debuggable = false
             jniDebuggable = false
-            minifyEnabled = true
-            shrinkResources = true
+            // TEMPORARY: disabled to test whether R8 minification is what makes
+            // streamed-video playback crash (obfuscation can rename classes that
+            // JNI/reflection reach, which surfaces as a native abort).
+            minifyEnabled = false
+            shrinkResources = false
             multiDexEnabled = true
             proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
             matchingFallbacks = ['release', 'staging', 'debug']
@@ -176,6 +179,12 @@ android {
     sourceSets.main.jniLibs.srcDirs = ['./jni/']
 
     namespace = 'org.telegram.messenger'
+
+    compileOptions {
+        // Sources contain non-ASCII punctuation tables; javac's default platform
+        // encoding (GBK on Chinese Windows) would mis-decode them.
+        encoding = 'UTF-8'
+    }
 }
 
 androidComponents {
@@ -206,6 +215,15 @@ dependencies {
     implementation 'androidx.exifinterface:exifinterface:1.4.2'
     implementation 'androidx.dynamicanimation:dynamicanimation:1.0.0'
     implementation 'androidx.mediarouter:mediarouter:1.8.1'
+    // media3 (replaces the vendored com.google.android.exoplayer2 tree)
+    implementation 'androidx.media3:media3-exoplayer:1.11.1'
+    implementation 'androidx.media3:media3-exoplayer-hls:1.11.1'
+    implementation 'androidx.media3:media3-exoplayer-dash:1.11.1'
+    implementation 'androidx.media3:media3-exoplayer-smoothstreaming:1.11.1'
+    implementation 'androidx.media3:media3-extractor:1.11.1'
+    implementation 'androidx.media3:media3-datasource:1.11.1'
+    implementation 'androidx.media3:media3-datasource-rtmp:1.11.1'
+    implementation 'androidx.media3:media3-session:1.11.1'
     implementation 'androidx.sharetarget:sharetarget:1.2.0'
     implementation 'androidx.interpolator:interpolator:1.0.0'
     implementation 'androidx.biometric:biometric:1.1.0'

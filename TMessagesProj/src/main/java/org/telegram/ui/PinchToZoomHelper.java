@@ -28,7 +28,7 @@ import android.widget.FrameLayout;
 
 import androidx.core.graphics.ColorUtils;
 
-import com.google.android.exoplayer2.ui.AspectRatioFrameLayout;
+import org.telegram.ui.Components.AspectRatioFrameLayout;
 
 import org.telegram.messenger.AndroidUtilities;
 import org.telegram.messenger.FileLoader;
