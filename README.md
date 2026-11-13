@@ -1,27 +1,29 @@
 # Nagram X
-[![Crowdin](https://badges.crowdin.net/NagramX/localized.svg)](https://crowdin.com/project/NagramX)  
-A variant of [Nagram](https://github.com/NextAlone/Nagram) with additional features.
+
+A personal fork of the archived [NagramX](https://github.com/risin42/NagramX), continuing its development.
+Based on [Nagram](https://github.com/NextAlone/Nagram).
+
+## What's changed
+
+* Embedded player migrated to Media3: videos stream while downloading by default (with automatic fallback to a full download), an HDR mis-render fix for videos lacking color metadata, a crash workaround for a Media3 parsing defect, and streaming reliability fixes
+* Seek-bar preview fully rewritten: real frames are decoded from the (partial) local file while dragging, and several drag-related issues are fixed
+* New "ignore no-forwarding restrictions" option in Settings → General
+* New A-B loop on the seek bar: set start/end points, loop playback, with the loop range highlighted on the bar
 
 ## Download
 
-Latest versions are available through:
-* [Telegram Channel](https://t.me/NagramX) (Latest Beta)
-* [GitHub Actions](https://github.com/risin42/NagramX/actions/workflows/staging.yml) (CI Artifacts)
-* [GitHub Releases](https://github.com/risin42/NagramX/releases) (Latest Stable)
+CI builds are available as artifacts from [GitHub Actions](https://github.com/Yuanixx/NagramX/actions/workflows/staging.yml).
 
 ## Verify APK
 
-Official APKs use the following Android signing certificate:
-
-* Package name: `nu.gpu.nagram` / `nu.gpu.nagramx` (base version)
-* SHA-256: `0D:51:91:56:E8:0C:91:8C:28:C4:80:BF:D1:3F:31:6A:3B:3B:F7:22:DB:53:2F:AB:74:66:0E:C8:E5:C5:06:A1`
+Builds from this fork are signed with a different certificate than the archived original releases. Download APKs only from this repository's Actions.
 
 ## Compilation Guide
 
 1. Clone the repository with its submodules:
 
     ```bash
-    git clone --recursive --shallow-submodules https://github.com/risin42/NagramX.git NagramX
+    git clone --recursive --shallow-submodules https://github.com/Yuanixx/NagramX.git NagramX
     ```
 
     If you already cloned the repository without submodules, run:
