@@ -79,6 +79,8 @@ public class VideoPlayerSeekBar {
     private float transitionProgress;
     private int horizontalPadding;
     private int smallLineColor;
+    private float abLoopStart = -1;
+    private float abLoopEnd = -1;
 
     private int fromThumbX = 0;
     private float animateThumbProgress = 1f;
@@ -209,6 +211,22 @@ public class VideoPlayerSeekBar {
 
     public float getProgress() {
         return (float) thumbX / (float) (width - thumbWidth);
+    }
+
+    public void setAbLoop(float start, float end) {
+        abLoopStart = start;
+        abLoopEnd = end;
+        if (parentView != null) {
+            parentView.invalidate();
+        }
+    }
+
+    public void clearAbLoop() {
+        abLoopStart = -1;
+        abLoopEnd = -1;
+        if (parentView != null) {
+            parentView.invalidate();
+        }
     }
 
     public int getThumbX() {
@@ -377,6 +395,18 @@ public class VideoPlayerSeekBar {
         rect.right = horizontalPadding + AndroidUtilities.lerp(width - thumbWidth / 2f, parentView.getWidth() - horizontalPadding * 2f, transitionProgress);
         setPaintColor(selected ? backgroundSelectedColor : backgroundColor, 1f - transitionProgress);
         drawProgressBar(canvas, rect, paint);
+
+        if (abLoopStart >= 0 && abLoopEnd > abLoopStart) {
+            final float usable = width - thumbWidth;
+            final float loopLeft = horizontalPadding + thumbWidth / 2f + abLoopStart * usable;
+            final float loopRight = horizontalPadding + thumbWidth / 2f + abLoopEnd * usable;
+            final float centerY = rect.centerY();
+            paint.setColor(0x6634A8F0);
+            canvas.drawRoundRect(loopLeft, centerY - AndroidUtilities.dp(5), loopRight, centerY + AndroidUtilities.dp(5), AndroidUtilities.dp(3), AndroidUtilities.dp(3), paint);
+            paint.setColor(0xffffffff);
+            canvas.drawRect(loopLeft, centerY - AndroidUtilities.dp(7), loopLeft + AndroidUtilities.dp(1), centerY + AndroidUtilities.dp(7), paint);
+            canvas.drawRect(loopRight - AndroidUtilities.dp(1), centerY - AndroidUtilities.dp(7), loopRight, centerY + AndroidUtilities.dp(7), paint);
+        }
 
         if (bufferedAnimationValue != 1f) {
             bufferedAnimationValue += 16 / 100f;

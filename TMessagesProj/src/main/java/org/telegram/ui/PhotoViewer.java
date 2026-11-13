@@ -306,9 +306,9 @@ import org.telegram.ui.Components.VideoCompressButton;
 import org.telegram.ui.Components.VideoEditTextureView;
 import org.telegram.ui.Components.VideoForwardDrawable;
 import org.telegram.ui.Components.Mp4IndexExtractorsFactory;
-import org.telegram.ui.Components.VideoSeekFramePreview;
 import org.telegram.ui.Components.VideoPlayer;
 import org.telegram.ui.Components.VideoPlayerSeekBar;
+import org.telegram.ui.Components.VideoSeekFramePreview;
 import org.telegram.ui.Components.VideoSeekPreviewImage;
 import org.telegram.ui.Components.VideoTimelinePlayView;
 import org.telegram.ui.Components.ViewHelper;
@@ -1116,6 +1116,12 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
     private boolean playerWasPlaying;
     private boolean playerAutoStarted;
     private boolean playerLooping;
+    private boolean hasABLoop;
+    private long abLoopA = -1;
+    private long abLoopB = -1;
+    private long lastABLoopSeek;
+    private ImageView abLoopButton;
+    private ActionBarMenuSubItem abLoopItem;
     private float seekToProgressPending;
     private String shouldSavePositionForCurrentVideo;
     private String shouldSavePositionForCurrentVideoShortTerm;
@@ -1576,6 +1582,18 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
                     float progress = getCurrentVideoPosition() / (float) getVideoDuration();
                     if (shownControlsByEnd && !actionBarWasShownBeforeByEnd) {
                         progress = 0;
+                    }
+                    if (hasABLoop
+                            && !inPreview
+                            && videoTimelineViewContainer.getVisibility() != View.VISIBLE
+                            && videoPlayerSeekbar != null
+                            && !videoPlayerSeekbar.isDragging()) {
+                        final long abPosition = getABLoopPosition();
+                        final long now = SystemClock.elapsedRealtime();
+                        if (abPosition >= abLoopB && now - lastABLoopSeek > 600) {
+                            lastABLoopSeek = now;
+                            seekVideoOrWebTo(abLoopA);
+                        }
                     }
                     float bufferedProgress;
                     if (currentVideoFinishedLoading) {
@@ -2230,6 +2248,7 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
     private final static int gallery_menu_chromecast = 24;
     private final static int gallery_menu_create_sticker = 25;
     private final static int gallery_menu_delete2 = 26;
+    private final static int gallery_menu_abloop = 34;
 
     private final static int gallery_menu_paint2 = 1001;
 
@@ -3632,18 +3651,28 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
             int extraWidth;
             ignoreLayout = true;
             LayoutParams layoutParams = (LayoutParams) videoPlayerTime.getLayoutParams();
+            if (abLoopButton != null) {
+                LayoutParams abLoopParams = (LayoutParams) abLoopButton.getLayoutParams();
+                if (parentWidth > parentHeight) {
+                    // Landscape: [fullscreen 48][gap 6][AB 40][gap 8][time]
+                    abLoopParams.rightMargin = dp(48 + 6);
+                    layoutParams.rightMargin = dp(48 + 6 + 40 + 8);
+                } else {
+                    // Portrait: [AB 40][gap 8][time]
+                    abLoopParams.rightMargin = dp(12);
+                    layoutParams.rightMargin = dp(12 + 40 + 8);
+                }
+            }
             if (parentWidth > parentHeight) {
                 if (exitFullscreenButton.getVisibility() != VISIBLE) {
                     exitFullscreenButton.setVisibility(VISIBLE);
                 }
                 extraWidth = dp(48);
-                layoutParams.rightMargin = dp(47);
             } else {
                 if (exitFullscreenButton.getVisibility() != INVISIBLE) {
                     exitFullscreenButton.setVisibility(INVISIBLE);
                 }
                 extraWidth = 0;
-                layoutParams.rightMargin = dp(12);
             }
             ignoreLayout = false;
             super.onMeasure(widthMeasureSpec, heightMeasureSpec);
@@ -3706,6 +3735,9 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
         private void onProgressChanged(float progress) {
             videoPlayerTime.setAlpha(progress);
             exitFullscreenButton.setAlpha(progress);
+            if (abLoopButton != null) {
+                abLoopButton.setAlpha(progress);
+            }
             if (seekBarTransitionEnabled) {
                 videoPlayerTime.setPivotX(videoPlayerTime.getWidth());
                 videoPlayerTime.setPivotY(videoPlayerTime.getHeight());
@@ -5923,6 +5955,8 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
                     }
                     loopItem.setEnabledByColor(playerLooping, 0xFFFFFFFF, 0xFF73B4EC);
                     loopItem.setSelectorColor(playerLooping ? 0x0F73B4EC : 0x0fffffff);
+                } else if (id == gallery_menu_abloop) {
+                    onABLoopPressed();
                 } else if (id == gallery_menu_report) {
                     TLRPC.Photo photo = null;
                     if (currentFileLocation != null && currentFileLocation.photo != null) {
@@ -5992,6 +6026,8 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
         videoItem.getPopupLayout().addView(videoQualityLayout);
         loopItem = videoItem.addSubItem(gallery_menu_loop, R.drawable.menu_video_loop, LocaleController.getString(R.string.VideoPlayerLoop));
         loopItem.setSelectorColor(0x0fffffff);
+        abLoopItem = videoItem.addSubItem(gallery_menu_abloop, R.drawable.menu_video_loop, "A-B 循环");
+        abLoopItem.setSelectorColor(0x0fffffff);
         castItemButton = new CastMediaRouteButton(activityContext) {
             @Override
             public void stateUpdated(boolean connected) {
@@ -10277,6 +10313,14 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
         exitFullscreenButton.setBackground(Theme.createSelectorDrawable(Theme.ACTION_BAR_WHITE_SELECTOR_COLOR));
         exitFullscreenButton.setVisibility(View.INVISIBLE);
         videoPlayerControlFrameLayout.addView(exitFullscreenButton, LayoutHelper.createFrame(48, 48, Gravity.TOP | Gravity.RIGHT));
+        abLoopButton = new ImageView(containerView.getContext());
+        abLoopButton.setImageResource(R.drawable.round_repeat_24);
+        abLoopButton.setContentDescription("A-B 循环");
+        abLoopButton.setScaleType(ImageView.ScaleType.CENTER);
+        abLoopButton.setColorFilter(0xffffffff);
+        abLoopButton.setBackground(Theme.createSelectorDrawable(Theme.ACTION_BAR_WHITE_SELECTOR_COLOR));
+        abLoopButton.setOnClickListener(v -> onABLoopPressed());
+        videoPlayerControlFrameLayout.addView(abLoopButton, LayoutHelper.createFrame(40, 40, Gravity.TOP | Gravity.RIGHT, 0, 4, 12, 0));
         exitFullscreenButton.setOnClickListener(v -> {
             if (parentActivity == null) {
                 return;
@@ -10520,6 +10564,81 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
             placeProvider.onApplyCaption(caption);
         }
         return caption;
+    }
+
+    private long getABLoopPosition() {
+        if (photoViewerWebView != null && photoViewerWebView.isControllable()) {
+            return Math.max(0, photoViewerWebView.getCurrentPosition());
+        }
+        return videoPlayer != null ? Math.max(0, videoPlayer.getCurrentPosition()) : 0;
+    }
+
+    private void showABToast(String text) {
+        if (containerView != null) {
+            Toast.makeText(containerView.getContext(), text, Toast.LENGTH_SHORT).show();
+        }
+    }
+
+    private void updateABLoopButton() {
+        final boolean active = hasABLoop && abLoopB > abLoopA;
+        if (abLoopButton != null) {
+            abLoopButton.setImageResource(active ? R.drawable.round_repeat_one_24 : R.drawable.round_repeat_24);
+            abLoopButton.setColorFilter(active ? 0xff73b4ec : 0xffffffff);
+        }
+        if (abLoopItem != null) {
+            abLoopItem.setText(active ? "关闭区间循环" : (abLoopA >= 0 ? "设置 B 点" : "A-B 循环"));
+            abLoopItem.setEnabledByColor(active, 0xFFFFFFFF, 0xFF73B4EC);
+            abLoopItem.setSelectorColor(active ? 0x0F73B4EC : 0x0fffffff);
+        }
+        if (videoPlayerSeekbar != null) {
+            final long duration = getVideoDuration();
+            if (active && duration > 0) {
+                videoPlayerSeekbar.setAbLoop(abLoopA / (float) duration, abLoopB / (float) duration);
+            } else {
+                videoPlayerSeekbar.clearAbLoop();
+            }
+        }
+    }
+
+    private void resetABLoop() {
+        abLoopA = -1;
+        abLoopB = -1;
+        hasABLoop = false;
+        lastABLoopSeek = 0;
+        if (videoPlayerSeekbar != null) {
+            videoPlayerSeekbar.clearAbLoop();
+        }
+        updateABLoopButton();
+    }
+
+    private void onABLoopPressed() {
+        if (videoPlayer == null && (photoViewerWebView == null || !photoViewerWebView.isControllable())) {
+            return;
+        }
+        if (abLoopA < 0) {
+            abLoopA = getABLoopPosition();
+            abLoopB = -1;
+            hasABLoop = false;
+            updateABLoopButton();
+            showABToast("A 点：" + AndroidUtilities.formatShortDuration((int) (abLoopA / 1000)));
+        } else if (!hasABLoop) {
+            final long position = getABLoopPosition();
+            if (position <= abLoopA + 200) {
+                showABToast("B 点必须晚于 A 点");
+                return;
+            }
+            abLoopB = position;
+            hasABLoop = true;
+            updateABLoopButton();
+            showABToast("循环区间 " + AndroidUtilities.formatShortDuration((int) (abLoopA / 1000))
+                    + " - " + AndroidUtilities.formatShortDuration((int) (abLoopB / 1000)));
+            if (getABLoopPosition() >= abLoopB) {
+                seekVideoOrWebTo(abLoopA);
+            }
+        } else {
+            resetABLoop();
+            showABToast("已关闭区间循环");
+        }
     }
 
     private void updateVideoPlayerTime() {
@@ -11454,6 +11573,7 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
             }
         }
 
+        resetABLoop();
         Boolean savedLooping = VideoPlayer.getLooping(currentMessageObject);
         if (livePhoto) {
             playerLooping = false;
