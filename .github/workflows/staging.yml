@@ -77,7 +77,13 @@ jobs:
       - name: Set up CI signing
         if: ${{ !startsWith(runner.os, 'Windows') }}
         run: |
-          if [ ! -f TMessagesProj/release.keystore ]; then
+          # The repository ships the upstream signing key, whose password CI
+          # does not have. Replace anything that is not the cached throwaway
+          # key with a fresh one; the cache keeps that key identical between
+          # runs so CI artifacts can install over each other.
+          if ! keytool -list -keystore TMessagesProj/release.keystore \
+                 -storepass android -alias androiddebugkey >/dev/null 2>&1; then
+            rm -f TMessagesProj/release.keystore
             keytool -genkeypair -v -keystore TMessagesProj/release.keystore \
               -storepass android -keypass android -alias androiddebugkey \
               -keyalg RSA -keysize 2048 -validity 10000 \
