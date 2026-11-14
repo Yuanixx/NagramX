@@ -64,6 +64,30 @@ jobs:
       - name: Configure Android SDK Path
         run: |
           echo "sdk.dir=${ANDROID_HOME}" >> local.properties
+      # Builds on GitHub are signed with a throwaway key that lives in the
+      # actions cache, never in the repository and never in secrets. The cache
+      # keeps the key identical between runs so artifacts can install over
+      # each other. If the cache is evicted a new key is generated and the
+      # signature changes; bump the cache key below to force a deliberate one.
+      - name: Restore CI signing key
+        uses: actions/cache@v6
+        with:
+          path: TMessagesProj/release.keystore
+          key: ci-signing-key-v1
+      - name: Set up CI signing
+        if: ${{ !startsWith(runner.os, 'Windows') }}
+        run: |
+          if [ ! -f TMessagesProj/release.keystore ]; then
+            keytool -genkeypair -v -keystore TMessagesProj/release.keystore \
+              -storepass android -keypass android -alias androiddebugkey \
+              -keyalg RSA -keysize 2048 -validity 10000 \
+              -dname "CN=NagramX CI, OU=CI, O=NagramX, L=Internet, ST=Internet, C=US"
+          fi
+          {
+            echo "KEYSTORE_PASS=android"
+            echo "ALIAS_NAME=androiddebugkey"
+            echo "ALIAS_PASS=android"
+          } >> local.properties
       - name: Modify Gradle JVM Args
         run: |
           MEMORY_KB=$(awk '/MemTotal/ {print $2}' /proc/meminfo)
@@ -108,6 +132,10 @@ jobs:
         with:
           python-version: 3.12
       - name: Send to Telegram
+        # The upload job used to fail the whole run when the helper bot
+        # token is not configured. Publishing the build is optional; the
+        # artifacts above are still attached to the run.
+        continue-on-error: true
         env:
           APP_ID: ${{ secrets.APP_ID }}
           APP_HASH: ${{ secrets.APP_HASH }}
