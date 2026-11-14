@@ -53,6 +53,12 @@ public final class MediaCodecFrameDecoder implements FrameDecoder {
     private final ArrayList<MoovKeyframeParser.Keyframe> keyframes;
     /** Null for a complete local file; set for a sparse streaming .temp. */
     private final RangeAvailability availability;
+    /**
+     * Supplies keyframe bytes that are not on disk yet. Null for a complete
+     * file, for an encrypted document, or when the network layer is off; in
+     * all of those cases the decoder keeps its old skip behaviour.
+     */
+    private final RangeSupplier rangeSupplier;
     private final MediaCodec.BufferInfo bufferInfo = new MediaCodec.BufferInfo();
 
     private RandomAccessFile raf;
@@ -72,16 +78,27 @@ public final class MediaCodecFrameDecoder implements FrameDecoder {
     private long convertNanos;
     private long flushNanos;
     private byte[] sampleBytes;
+    /** One keyframe fetched from the network, waiting to be decoded. */
+    private byte[] remoteSampleBytes;
+    private long remoteSampleOffset = -1;
+    private int remoteSampleSize;
     private boolean closed;
     private volatile boolean cancelRequested;
     private volatile boolean cancelled;
 
     public MediaCodecFrameDecoder(File file, MoovKeyframeParser.TrackInfo info,
                                   RangeAvailability availability) {
+        this(file, info, availability, null);
+    }
+
+    public MediaCodecFrameDecoder(File file, MoovKeyframeParser.TrackInfo info,
+                                  RangeAvailability availability,
+                                  RangeSupplier rangeSupplier) {
         this.file = file;
         this.info = info;
         this.keyframes = info != null ? info.keyframes : new ArrayList<>();
         this.availability = availability;
+        this.rangeSupplier = rangeSupplier;
     }
 
     /**
@@ -151,6 +168,16 @@ public final class MediaCodecFrameDecoder implements FrameDecoder {
         if (availability != null) {
             final MoovKeyframeParser.Keyframe keyframe = keyframes.get(index);
             if (!availability.isAvailable(keyframe.offset, keyframe.size)) {
+                // The range is still missing locally. Ask the network layer for
+                // exactly this sample and decode it from memory; the downloader
+                // file is never touched. A null answer keeps the old behaviour.
+                final byte[] remote = fetchRemote(keyframe);
+                if (remote != null) {
+                    remoteSampleBytes = remote;
+                    remoteSampleOffset = keyframe.offset;
+                    remoteSampleSize = keyframe.size;
+                    return decodeKeyframe(index, maxWidth, maxHeight, false);
+                }
                 // A streaming .temp is sparse: bytes the downloader has not
                 // filled are zeros, and zeros would burn the codec. Skipping is
                 // not a failure; the hover retry picks the frame up when the
@@ -166,6 +193,27 @@ public final class MediaCodecFrameDecoder implements FrameDecoder {
             }
         }
         return decodeKeyframe(index, maxWidth, maxHeight, false);
+    }
+
+    /**
+     * Asks the supplier for one whole keyframe. Anything shorter is refused:
+     * a truncated sample fails inside the codec and would hide the real cause.
+     */
+    private byte[] fetchRemote(MoovKeyframeParser.Keyframe keyframe) {
+        if (rangeSupplier == null || keyframe == null || keyframe.size <= 0) {
+            return null;
+        }
+        try {
+            final byte[] bytes = rangeSupplier.fetch(keyframe.offset, keyframe.size);
+            if (bytes == null || bytes.length < keyframe.size) {
+                return null;
+            }
+            return bytes;
+        } catch (Throwable e) {
+            PreviewLog.w("SeekPreview: remote keyframe failed off=" + keyframe.offset
+                    + " size=" + keyframe.size, e);
+            return null;
+        }
     }
 
     private DecodedFrame decodeKeyframe(int keyframeIndex, int maxWidth, int maxHeight,
@@ -300,6 +348,11 @@ public final class MediaCodecFrameDecoder implements FrameDecoder {
         }
         consecutiveFailures = 0;
         decodedFrames++;
+        // The frame is out; drop the network copy. A failed attempt keeps it so
+        // the retry does not fall back to the sparse file and read zeros.
+        remoteSampleBytes = null;
+        remoteSampleOffset = -1;
+        remoteSampleSize = 0;
         return new DecodedFrame(bitmap, keyframe.timeMs, keyframeIndex);
     }
 
@@ -354,8 +407,16 @@ public final class MediaCodecFrameDecoder implements FrameDecoder {
         if (sampleBytes == null || sampleBytes.length < size) {
             sampleBytes = new byte[Math.max(size, 4 * 1024 * 1024)];
         }
-        raf.seek(keyframe.offset);
-        raf.readFully(sampleBytes, 0, size);
+        if (remoteSampleBytes != null && remoteSampleOffset == keyframe.offset
+                && remoteSampleSize == keyframe.size) {
+            // This sample came from the network; the local file still has a
+            // hole at this offset. Copy only the sample, not the rest of the
+            // fetched block.
+            System.arraycopy(remoteSampleBytes, 0, sampleBytes, 0, size);
+        } else {
+            raf.seek(keyframe.offset);
+            raf.readFully(sampleBytes, 0, size);
+        }
 
         final int nalLength = info.nalLengthSize > 0 ? info.nalLengthSize : 4;
         int p = 0;

@@ -49,8 +49,15 @@ public final class FileRangeFetcher {
     private static final int OFFSET_ALIGN = 4096;
     /** Request granularity. 256KB divides 1MB evenly, which the server requires. */
     public static final int BLOCK = 256 * 1024;
-    /** At most one range request per second, and never while the file downloads. */
-    private static final long MIN_REQUEST_GAP_MS = 1000;
+    /**
+     * Minimum gap between two range requests. While the video downloads the
+     * preview yields to playback and keeps one request per second; when the
+     * download is idle the coarse layer may fill faster.
+     */
+    private static final long MIN_REQUEST_GAP_MS_ACTIVE = 1000;
+    private static final long MIN_REQUEST_GAP_MS_IDLE = 250;
+    /** Server flood wait (420): no range request goes out before this time. */
+    private static volatile long floodCooldownUntilMs;
     private static volatile long lastRequestAt;
 
     private FileRangeFetcher() {
@@ -125,28 +132,22 @@ public final class FileRangeFetcher {
             lastFailureText[0] = "network fetch disabled";
             return null;
         }
-        // Playback owns the download connection. A range request while this
-        // document is downloading shares that connection and can trip a
-        // server-side FLOOD_PREMIUM_WAIT_*, which stalls the player. The
-        // download itself is filling the missing ranges, so the preview has no
-        // reason to compete: local passes pick the new bytes up as they arrive.
-        // Only when the download stops (paused, cancelled, finished) do the
-        // leftover gaps get fetched remotely, at most one request per second.
+        lastFailureText[0] = null;
+        // Range requests share the download connection with the video's own
+        // downloader. They are allowed while that download runs, because a
+        // preview of a range that has not arrived yet is the whole point, but
+        // they yield: one request per second while downloading, faster when
+        // the downloader is idle. A server flood wait parks every caller until
+        // the cooldown expires.
         FileLoadOperation active = null;
         try {
             active = FileLoader.getInstance(account).getLoadOperation(document);
         } catch (Throwable ignore) {
         }
-        if (active != null) {
-            lastFailureText[0] = "download active (playback priority)";
+        final boolean downloadActive = active != null;
+        if (!awaitRateSlot(downloadActive, handle)) {
             return null;
         }
-        final long now = System.currentTimeMillis();
-        if (now - lastRequestAt < MIN_REQUEST_GAP_MS) {
-            lastFailureText[0] = "throttled (1 req/s)";
-            return null;
-        }
-        lastRequestAt = now;
         // Fixed blocks, aligned down, always requested in full.
         //
         // The server accepts only limits that divide 1MB evenly (4K, 8K ... 1M),
@@ -195,6 +196,14 @@ public final class FileRangeFetcher {
         final byte[] out = new byte[(int) length];
         int filled = 0;
         for (int b = 0; b < blocks; b++) {
+            // The first block already passed the rate slot check. Every later
+            // block is a separate request, so it waits its turn and stops if a
+            // flood cooldown started in the meantime.
+            if (b > 0 && !awaitRateSlot(downloadActive, handle)) {
+                FileLog.d("ABPV: range multi-block stopped at block "
+                        + (b + 1) + "/" + blocks);
+                return null;
+            }
             final long blockAligned = aligned + (long) b * BLOCK;
             final int blockDelta = (b == 0) ? delta : 0;
             final byte[] chunk = fetchOneBlock(account, document, location,
@@ -217,12 +226,12 @@ public final class FileRangeFetcher {
     }
 
     /** Last failure text, for callers that need to classify the failure. */
-    static String failureText() {
+    public static String failureText() {
         return lastFailureText[0];
     }
 
     /** True when the failure text names a flood wait (code 420). */
-    static boolean isFloodWait(String text) {
+    public static boolean isFloodWait(String text) {
         return text != null && text.contains("FLOOD");
     }
 
@@ -257,6 +266,40 @@ public final class FileRangeFetcher {
 
     /** Last failure text of any block in the current fetch, for the ref-retry check. */
     private static final String[] lastFailureText = new String[1];
+
+    /**
+     * Waits for the next request slot. Returns false when the caller was
+     * cancelled or interrupted, or when a server flood wait is still active.
+     * The wait is bounded by the longer gap (one second) and polls in small
+     * slices so a cancelled preview does not hold the scheduler.
+     */
+    private static boolean awaitRateSlot(boolean downloadActive, FetchHandle handle) {
+        final long gap = downloadActive
+                ? MIN_REQUEST_GAP_MS_ACTIVE : MIN_REQUEST_GAP_MS_IDLE;
+        while (true) {
+            if (handle != null && handle.cancelled) {
+                lastFailureText[0] = "cancelled";
+                return false;
+            }
+            final long now = System.currentTimeMillis();
+            if (now < floodCooldownUntilMs) {
+                lastFailureText[0] = "FLOOD_COOLDOWN";
+                return false;
+            }
+            final long wait = lastRequestAt + gap - now;
+            if (wait <= 0) {
+                lastRequestAt = now;
+                return true;
+            }
+            try {
+                Thread.sleep(Math.min(50L, wait));
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                lastFailureText[0] = "interrupted";
+                return false;
+            }
+        }
+    }
 
     /**
      * Requests one whole 256KB block and returns the bytes starting at the
@@ -387,6 +430,14 @@ public final class FileRangeFetcher {
         }
         if (result[0] == null) {
             lastFailureText[0] = failure[0];
+            if (isFloodWait(failure[0])) {
+                final int seconds = parseFloodSeconds(failure[0]);
+                final long cooldownMs = (seconds > 0 ? seconds * 1000L : 1000L) + 2000L;
+                floodCooldownUntilMs = Math.max(floodCooldownUntilMs,
+                        System.currentTimeMillis() + cooldownMs);
+                FileLog.d("ABPV: range flood wait text=" + failure[0]
+                        + " cooldown=" + cooldownMs + "ms");
+            }
             FileLog.d("ABPV: range fetch failed off=" + aligned + " aligned=" + aligned
                     + " limit=" + limit + " dc=" + dcId
                     + " size=" + document.size + " reason=" + failure[0]

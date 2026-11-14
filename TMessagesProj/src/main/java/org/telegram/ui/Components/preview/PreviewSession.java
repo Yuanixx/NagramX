@@ -21,15 +21,19 @@ import android.content.Context;
 import android.net.Uri;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.SystemClock;
 
 import org.telegram.messenger.FileLoader;
 import org.telegram.tgnet.TLRPC;
+import org.telegram.ui.Components.FileRangeFetcher;
 import org.telegram.ui.Components.MoovKeyframeParser;
 
 import java.io.File;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * Owns everything that belongs to one media: the decoder choice, the
@@ -49,6 +53,15 @@ public final class PreviewSession {
     /** Preview pictures are 240x136 in landscape and 136x240 in portrait. */
     public static final int THUMB_MAX_WIDTH = 240;
     public static final int THUMB_MAX_HEIGHT = 136;
+
+    /** Hard cap on bytes the network layer may fetch for one session. */
+    private static final long REMOTE_BUDGET_BYTES = 8L * 1024 * 1024;
+    /** One range fetch must never hold the scheduler longer than this. */
+    private static final long REMOTE_FETCH_TIMEOUT_MS = 2500;
+    /** Consecutive real failures after which this session goes local-only. */
+    private static final int REMOTE_MAX_FAILURES = 3;
+    /** Server flood waits after which this session goes local-only. */
+    private static final int REMOTE_MAX_FLOODS = 2;
 
     private static final class Prepared {
         final FrameDecoder decoder;
@@ -91,6 +104,15 @@ public final class PreviewSession {
     private volatile boolean stopped;
     private volatile long planDurationMs;
     private volatile ThumbnailScheduler scheduler;
+    /** Set once in prepare() on the scheduler thread; null means local only. */
+    private RangeSupplier remoteSupplier;
+    private volatile boolean remoteDisabled;
+    private volatile int remoteFloodWaits;
+    private int remoteFailures;
+    private boolean remoteBudgetLogged;
+    private long remoteBudget = REMOTE_BUDGET_BYTES;
+    private final AtomicLong remoteBytesFetched = new AtomicLong();
+    private final AtomicInteger remoteFetchCount = new AtomicInteger();
 
     public PreviewSession(Context context, File file, long declaredSize,
                           TLRPC.Document document, int account, Listener listener) {
@@ -180,6 +202,10 @@ public final class PreviewSession {
         if (target != null) {
             target.stop();
         }
+        PreviewLog.d("SeekPreview: remote summary fetches=" + remoteFetchCount.get()
+                + " bytes=" + remoteBytesFetched.get()
+                + " floods=" + remoteFloodWaits
+                + " disabled=" + remoteDisabled);
     }
 
     private void run() {
@@ -209,7 +235,8 @@ public final class PreviewSession {
             PreviewLog.d("SeekPreview: session decoder=" + decoder.name()
                     + " duration=" + prepared.plan.durationMs
                     + " keyframes=" + (prepared.plan.keyframeTimesMs != null
-                    ? prepared.plan.keyframeTimesMs.length : 0));
+                    ? prepared.plan.keyframeTimesMs.length : 0)
+                    + " remote=" + (remoteSupplier != null && !remoteDisabled));
             worker.run();
         } catch (Throwable e) {
             PreviewLog.e("SeekPreview: session failed", e);
@@ -282,6 +309,19 @@ public final class PreviewSession {
                         }
                     }
                 }
+                // With the network layer alive a missing keyframe can still
+                // arrive even though the file did not grow. Rebuild so it is
+                // retried; the supplier disables itself after repeated
+                // failures, budget exhaustion or flood waits, so this cannot
+                // turn into an endless loop.
+                if (remoteSupplier != null && !remoteDisabled
+                        && remoteBytesFetched.get() < remoteBudget) {
+                    for (MoovKeyframeParser.Keyframe keyframe : fresh.track.keyframes) {
+                        if (!store.containsTime(keyframe.timeMs)) {
+                            return true;
+                        }
+                    }
+                }
                 return false;
             } catch (Throwable e) {
                 PreviewLog.e("SeekPreview: index refill failed", e);
@@ -336,9 +376,10 @@ public final class PreviewSession {
                 // the codec path is taken even when nothing is cached yet.
                 final RangeAvailability availability =
                         complete ? null : makeAvailability(document, account);
+                final RangeSupplier supplier = complete ? null : makeSupplier();
                 try {
                     final MediaCodecFrameDecoder decoder =
-                            new MediaCodecFrameDecoder(file, source.track, availability);
+                            new MediaCodecFrameDecoder(file, source.track, availability, supplier);
                     decoder.open();
                     if (stopped) {
                         decoder.close();
@@ -350,7 +391,9 @@ public final class PreviewSession {
                             + source.fragmented
                             + " complete=" + complete
                             + " keyframes=" + source.track.keyframes.size()
-                            + " decoder=" + decoder.name());
+                            + " decoder=" + decoder.name()
+                            + " remote=" + (supplier != null));
+                    remoteSupplier = supplier;
                     return new Prepared(decoder, buildPlan(duration, source.track),
                             !complete, availability);
                 } catch (Throwable e) {
@@ -391,6 +434,75 @@ public final class PreviewSession {
             return new Prepared(decoder, new ThumbnailScheduler.Plan(duration, null), false, null);
         }
         return null;
+    }
+
+    /**
+     * Builds the network side of the preview. It is called on the scheduler
+     * thread, inside the decoder, only after the local range probe said the
+     * bytes are not on disk. Returning null is always safe: the frame is
+     * skipped exactly as before.
+     *
+     * Budget, strike and flood counters live for one session, so opening
+     * another video starts from a clean slate and a misbehaving network can
+     * never keep the preview layer disabled forever.
+     */
+    private RangeSupplier makeSupplier() {
+        if (document == null || account < 0 || stopped) {
+            return null;
+        }
+        if (document.key != null && document.key.length > 0) {
+            PreviewLog.d("SeekPreview: remote off (encrypted document)");
+            return null;
+        }
+        if (!tw.nekomimi.nekogram.NekoConfig.videoPreviewNetworkFetch.Bool()) {
+            PreviewLog.d("SeekPreview: remote off (setting)");
+            return null;
+        }
+        return (offset, size) -> {
+            if (size <= 0 || offset < 0 || stopped || remoteDisabled) {
+                return null;
+            }
+            if (remoteBytesFetched.get() + size > remoteBudget) {
+                remoteDisabled = true;
+                if (!remoteBudgetLogged) {
+                    remoteBudgetLogged = true;
+                    PreviewLog.d("SeekPreview: remote budget reached bytes="
+                            + remoteBytesFetched.get() + " budget=" + remoteBudget);
+                }
+                return null;
+            }
+            final long started = SystemClock.elapsedRealtime();
+            final byte[] data = FileRangeFetcher.fetchSync(account, document,
+                    offset, size, REMOTE_FETCH_TIMEOUT_MS);
+            if (data == null) {
+                final String text = FileRangeFetcher.failureText();
+                if (FileRangeFetcher.isFloodWait(text)) {
+                    remoteFloodWaits++;
+                    if (remoteFloodWaits >= REMOTE_MAX_FLOODS) {
+                        remoteDisabled = true;
+                        PreviewLog.d("SeekPreview: remote off after flood wait #"
+                                + remoteFloodWaits);
+                    }
+                } else if (text == null || (!text.contains("cancel")
+                        && !text.contains("interrupt"))) {
+                    remoteFailures++;
+                    if (remoteFailures >= REMOTE_MAX_FAILURES) {
+                        remoteDisabled = true;
+                        PreviewLog.d("SeekPreview: remote off after "
+                                + remoteFailures + " failures");
+                    }
+                }
+                return null;
+            }
+            remoteFailures = 0;
+            remoteBytesFetched.addAndGet(data.length);
+            remoteFetchCount.incrementAndGet();
+            PreviewLog.d("SeekPreview: remote keyframe off=" + offset
+                    + " size=" + size + " got=" + data.length
+                    + " total=" + remoteBytesFetched.get()
+                    + " ms=" + (SystemClock.elapsedRealtime() - started));
+            return data;
+        };
     }
 
     /**
