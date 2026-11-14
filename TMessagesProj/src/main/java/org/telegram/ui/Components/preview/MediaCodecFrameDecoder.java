@@ -30,8 +30,8 @@ import org.telegram.ui.Components.MoovKeyframeParser;
 import java.io.File;
 import java.io.RandomAccessFile;
 import java.nio.ByteBuffer;
-import java.util.ArrayList;
 import java.util.Locale;
+import java.util.concurrent.CopyOnWriteArrayList;
 
 /**
  * Decodes exactly one keyframe per call by feeding that sample with
@@ -50,7 +50,13 @@ public final class MediaCodecFrameDecoder implements FrameDecoder {
 
     private final File file;
     private final MoovKeyframeParser.TrackInfo info;
-    private final ArrayList<MoovKeyframeParser.Keyframe> keyframes;
+    /**
+     * Own copy of the keyframe table, safe to append from the network thread
+     * while the decode path reads it on the scheduler thread. Kept separate
+     * from {@link MoovKeyframeParser.TrackInfo#keyframes} so the two never
+     * alias one list.
+     */
+    private final CopyOnWriteArrayList<MoovKeyframeParser.Keyframe> keyframes;
     /** Null for a complete local file; set for a sparse streaming .temp. */
     private final RangeAvailability availability;
     /**
@@ -96,17 +102,22 @@ public final class MediaCodecFrameDecoder implements FrameDecoder {
                                   RangeSupplier rangeSupplier) {
         this.file = file;
         this.info = info;
-        this.keyframes = info != null ? info.keyframes : new ArrayList<>();
+        this.keyframes = new CopyOnWriteArrayList<>();
+        if (info != null && info.keyframes != null) {
+            this.keyframes.addAll(info.keyframes);
+        }
         this.availability = availability;
         this.rangeSupplier = rangeSupplier;
     }
 
     /**
      * Adds keyframes discovered after the session was built, e.g. fragments
-     * that finished downloading while the preview is open. Called only from
-     * the scheduler thread.
+     * that finished downloading while the preview is open, or fragments the
+     * network scan found beyond the download boundary. Called from the
+     * scheduler thread and from the network thread; synchronized so two
+     * appends cannot lose each other inside the copy-on-write list.
      */
-    public void appendKeyframes(java.util.List<MoovKeyframeParser.Keyframe> extra) {
+    public synchronized void appendKeyframes(java.util.List<MoovKeyframeParser.Keyframe> extra) {
         if (extra == null || extra.isEmpty()) {
             return;
         }

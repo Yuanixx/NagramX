@@ -31,12 +31,15 @@ import org.telegram.ui.Components.FileRangeFetcher;
 import org.telegram.ui.Components.MoovKeyframeParser;
 
 import java.io.File;
+import java.io.RandomAccessFile;
 import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collections;
 import java.util.HashSet;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
-import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
@@ -73,6 +76,8 @@ public final class PreviewSession {
      * so the network layer does not fetch them while dragging either.
      */
     private static final long REMOTE_WINDOW_MIN_MS = 30_000L;
+    /** Largest block the chain scan may request when a moof refuses to fit. */
+    private static final int MAX_SCAN_FETCH_BYTES = 4 * 1024 * 1024;
     /** Consecutive real failures after which this session goes local-only. */
     private static final int REMOTE_MAX_FAILURES = 3;
     /** Server flood waits after which this session goes local-only. */
@@ -85,13 +90,21 @@ public final class PreviewSession {
         final boolean refillable;
         /** Range probe for a sparse .temp, or null for a complete file. */
         final RangeAvailability availability;
+        /**
+         * The moov probe of a fragmented streaming file, or null for a
+         * complete file or the retriever path. The block scan needs its
+         * moov boundary and track configuration to walk the chain.
+         */
+        final KeyframeSource.Result source;
 
         Prepared(FrameDecoder decoder, ThumbnailScheduler.Plan plan,
-                 boolean refillable, RangeAvailability availability) {
+                 boolean refillable, RangeAvailability availability,
+                 KeyframeSource.Result source) {
             this.decoder = decoder;
             this.plan = plan;
             this.refillable = refillable;
             this.availability = availability;
+            this.source = source;
         }
     }
 
@@ -131,12 +144,19 @@ public final class PreviewSession {
     private final AtomicInteger remoteCacheHits = new AtomicInteger();
 
     /**
-     * Keyframes the prefetch thread may download. A copy is kept because the
-     * decoder's list is appended on the scheduler thread; this one is safe to
-     * iterate from the network thread.
+     * Every keyframe the session knows about: the ones parsed from the local
+     * file plus the ones the block scan discovered beyond the download
+     * boundary. Sorted by time. Both the display rule and the prefetch
+     * target are derived from this list.
      */
-    private final CopyOnWriteArrayList<MoovKeyframeParser.Keyframe> remoteKeyframes =
-            new CopyOnWriteArrayList<>();
+    private final ArrayList<MoovKeyframeParser.Keyframe> remoteKeyframes =
+            new ArrayList<>();
+    /**
+     * Guards {@link #remoteKeyframes}. Held for microseconds only; never
+     * waited on, so it cannot stall the UI thread that reads the nearest
+     * keyframe during a drag.
+     */
+    private final Object keyframeLock = new Object();
     /** Guards the cache, the in-flight offsets and the failure counters. */
     private final Object remoteLock = new Object();
     /**
@@ -156,6 +176,19 @@ public final class PreviewSession {
     /** Incremented on every drag-position change; stale requests give up. */
     private volatile int demandGeneration;
     private volatile boolean prefetchStopped;
+    /**
+     * Chain position the block scan continues at; -1 until the local walk
+     * computed it once. Guarded by remoteLock.
+     */
+    private long remoteScanOffset = -1;
+    /** True when the scan learned the chain cannot continue. Guarded by remoteLock. */
+    private boolean remoteScanExhausted;
+    /** True while a scan block is on the wire. Guarded by remoteLock. */
+    private boolean remoteScanActive;
+    /** Bytes to fetch for one scan step; grows when a moof refuses to fit. */
+    private int remoteScanBytes = FileRangeFetcher.BLOCK;
+    /** Upper bound for the local box walk that finds the scan start. */
+    private static final int MAX_SCAN_BOXES = 4096;
 
     public PreviewSession(Context context, File file, long declaredSize,
                           TLRPC.Document document, int account, Listener listener) {
@@ -187,13 +220,25 @@ public final class PreviewSession {
     }
 
     /**
-     * Binary search only; safe on the UI thread. A frame farther away than the
-     * plan limit is refused: painting it under the requested timestamp would
-     * show a wrong moment, and a bubble with just the time is the honest state.
+     * Binary search only; safe on the UI thread.
+     *
+     * How far the painted moment may sit from the requested time follows the
+     * video itself: a frame is admitted when it is within the video's own
+     * keyframe distance, not within a fixed number of seconds. A video with
+     * a keyframe every two minutes therefore paints a frame that far away,
+     * and one with a keyframe every second paints one second away. The old
+     * fixed limit stays as the floor, so sessions without a measurable
+     * index behave exactly as before. Painting anything farther would show
+     * a wrong moment, so the bubble falls back to just the time.
      */
     public Thumbnail nearest(long timeMs) {
         final long duration = planDurationMs;
-        final long limit = Math.max(30_000L, duration > 0 ? duration / 50L : 30_000L);
+        long limit = Math.max(REMOTE_WINDOW_MIN_MS,
+                duration > 0 ? duration / 50L : REMOTE_WINDOW_MIN_MS);
+        final long gap = indexTypicalGapMs();
+        if (gap > limit) {
+            limit = gap;
+        }
         return store.nearest(timeMs, limit);
     }
 
@@ -217,8 +262,12 @@ public final class PreviewSession {
             final long syncTime = decoderFetchTimeMs;
             if (sync != null && timeMs >= 0 && syncTime >= 0) {
                 final long nearest = nearestKeyframeTime(timeMs);
-                final boolean stale = Math.abs(syncTime - timeMs) > remoteWindowLimit()
-                        || (nearest >= 0 && nearest != syncTime);
+                // The frame is stale when it is no longer the keyframe the
+                // bubble would show; with an index that is the whole rule,
+                // however far it sits.
+                final boolean stale = nearest >= 0
+                        ? nearest != syncTime
+                        : Math.abs(syncTime - timeMs) > remoteWindowLimit();
                 if (stale) {
                     sync.cancel();
                 }
@@ -227,8 +276,9 @@ public final class PreviewSession {
             final long aheadTime = prefetchTimeMs;
             if (ahead != null && timeMs >= 0 && aheadTime >= 0) {
                 final long nearest = nearestKeyframeTime(timeMs);
-                final boolean stale = Math.abs(aheadTime - timeMs) > remoteWindowLimit()
-                        || (nearest >= 0 && nearest != aheadTime);
+                final boolean stale = nearest >= 0
+                        ? nearest != aheadTime
+                        : Math.abs(aheadTime - timeMs) > remoteWindowLimit();
                 if (stale) {
                     // The finger wants another frame now; let the prefetch
                     // thread pick the new nearest instead of finishing this.
@@ -362,6 +412,14 @@ public final class PreviewSession {
                         || fresh.track.keyframes.isEmpty()) {
                     return false;
                 }
+                // Frames the block scan registered beyond the download
+                // boundary must not be counted as new here, and the plan
+                // published below has to keep them.
+                synchronized (keyframeLock) {
+                    for (MoovKeyframeParser.Keyframe keyframe : remoteKeyframes) {
+                        known.add(keyframe.timeMs);
+                    }
+                }
                 final ArrayList<MoovKeyframeParser.Keyframe> extra = new ArrayList<>();
                 for (MoovKeyframeParser.Keyframe keyframe : fresh.track.keyframes) {
                     if (keyframe != null && known.add(keyframe.timeMs)) {
@@ -370,14 +428,10 @@ public final class PreviewSession {
                 }
                 if (!extra.isEmpty()) {
                     mediaDecoder.appendKeyframes(extra);
-                    remoteKeyframes.addAll(extra);
-                    final long[] times = new long[fresh.track.keyframes.size()];
-                    for (int i = 0; i < times.length; i++) {
-                        times[i] = fresh.track.keyframes.get(i).timeMs;
-                    }
-                    prepared.plan.updateKeyframeTimes(times);
+                    addRemoteKeyframes(extra);
+                    publishPlanTimes(prepared.plan);
                     PreviewLog.d("SeekPreview: index refill +" + extra.size()
-                            + " keyframes=" + times.length);
+                            + " keyframes=" + remoteKeyframeCount());
                     return true;
                 }
                 // The index itself does not grow any more, but keyframes that
@@ -472,7 +526,7 @@ public final class PreviewSession {
                         return null;
                     }
                     remoteKeyframes.clear();
-                    remoteKeyframes.addAll(source.track.keyframes);
+                    addRemoteKeyframes(source.track.keyframes);
                     final long duration = Math.max(source.track.durationMs,
                             documentDuration);
                     PreviewLog.d("SeekPreview: MediaCodec path fragmented="
@@ -483,7 +537,7 @@ public final class PreviewSession {
                             + " remote=" + (supplier != null));
                     remoteSupplier = supplier;
                     return new Prepared(decoder, buildPlan(duration, source.track),
-                            !complete, availability);
+                            !complete, availability, source);
                 } catch (Throwable e) {
                     PreviewLog.e("SeekPreview: MediaCodec path failed, using retriever", e);
                 }
@@ -508,7 +562,7 @@ public final class PreviewSession {
                 return null;
             }
             return new Prepared(decoder, new ThumbnailScheduler.Plan(
-                    duration > 0 ? duration : documentDuration, null), false, null);
+                    duration > 0 ? duration : documentDuration, null), false, null, null);
         }
         if (uri != null) {
             PreviewLog.d("SeekPreview: retriever source uri=" + uri
@@ -519,7 +573,7 @@ public final class PreviewSession {
                 decoder.close();
                 return null;
             }
-            return new Prepared(decoder, new ThumbnailScheduler.Plan(duration, null), false, null);
+            return new Prepared(decoder, new ThumbnailScheduler.Plan(duration, null), false, null, null);
         }
         return null;
     }
@@ -554,54 +608,48 @@ public final class PreviewSession {
     }
 
     /**
-     * Finds one keyframe worth downloading ahead of the decoder. The closest
-     * missing frame to the finger wins; frames the bubble would never show are
-     * ignored. This is intentionally not a fixed count: the thread keeps
-     * picking the next useful frame while the finger is down, and stops when
-     * the window is covered, the budget is spent or the finger leaves.
+     * Finds the one keyframe worth downloading ahead of the decoder: the
+     * frame the bubble would paint right now. That is the keyframe the index
+     * holds nearest to the finger — no fixed distance, the video's own frame
+     * spacing decides. Null when that frame is already decoded, cached, in
+     * flight or fully on disk.
      */
     private MoovKeyframeParser.Keyframe choosePrefetchTargetLocked(Prepared prepared) {
         final long desired = desiredMs;
         if (desired < 0) {
             return null;
         }
-        final long window = remoteWindowLimit();
-        MoovKeyframeParser.Keyframe best = null;
-        long bestDistance = Long.MAX_VALUE;
-        for (MoovKeyframeParser.Keyframe keyframe : remoteKeyframes) {
-            if (keyframe == null || keyframe.size <= 0) {
-                continue;
-            }
-            final long distance = Math.abs(keyframe.timeMs - desired);
-            if (distance > window || distance >= bestDistance) {
-                continue;
-            }
-            if (store.containsTime(keyframe.timeMs)
-                    || remoteInFlight.contains(keyframe.offset)
-                    || cacheContainsLocked(keyframe.offset, keyframe.size)) {
-                continue;
-            }
-            if (prepared.availability != null
-                    && prepared.availability.isAvailable(keyframe.offset, keyframe.size)) {
-                // The downloader already has it; the decoder reads the file.
-                continue;
-            }
-            best = keyframe;
-            bestDistance = distance;
+        final long nearestTime = nearestKeyframeTime(desired);
+        if (nearestTime < 0) {
+            return null;
         }
-        return best;
+        final MoovKeyframeParser.Keyframe keyframe = keyframeAtTime(nearestTime);
+        if (keyframe == null || keyframe.size <= 0) {
+            return null;
+        }
+        if (store.containsTime(keyframe.timeMs)
+                || remoteInFlight.contains(keyframe.offset)
+                || cacheContainsLocked(keyframe.offset, keyframe.size)) {
+            return null;
+        }
+        if (prepared.availability != null
+                && prepared.availability.isAvailable(keyframe.offset, keyframe.size)) {
+            // The downloader already has it; the decoder reads the file.
+            return null;
+        }
+        return keyframe;
     }
 
     private void startRemotePrefetch(final Prepared prepared) {
         if (remoteSupplier == null || remoteBudget <= 0 || stopped || prefetchStopped
-                || remoteKeyframes.isEmpty()) {
+                || remoteKeyframeCount() == 0) {
             return;
         }
         final Thread thread = new Thread(() -> prefetchLoop(prepared), "seek-prefetch");
         thread.setDaemon(true);
         thread.start();
         PreviewLog.d("SeekPreview: prefetch thread started keyframes="
-                + remoteKeyframes.size() + " budget=" + remoteBudget);
+                + remoteKeyframeCount() + " budget=" + remoteBudget);
     }
 
     /**
@@ -609,10 +657,17 @@ public final class PreviewSession {
      * The decoder stays on its own thread, so it can decode cached frames while
      * the next range is already on the wire. Every fetched block stays in the
      * cache for later drags, which is what makes going back and forth cheap.
+     *
+     * When the finger sits in a hole of the index — farther from the nearest
+     * known keyframe than the video's own frame distance — the thread also
+     * walks the fragment chain beyond the download boundary: one fetched
+     * block reveals the next fragment header and usually carries that
+     * keyframe's picture with it. The finger lifting stops the walk.
      */
     private void prefetchLoop(final Prepared prepared) {
         while (!stopped && !prefetchStopped) {
             final MoovKeyframeParser.Keyframe target;
+            final boolean wantScan;
             synchronized (remoteLock) {
                 if (stopped || prefetchStopped) {
                     return;
@@ -621,63 +676,324 @@ public final class PreviewSession {
                     waitRemoteLocked(REMOTE_PREFETCH_WAIT_MS);
                     continue;
                 }
-                target = choosePrefetchTargetLocked(prepared);
-                if (target == null) {
-                    waitRemoteLocked(REMOTE_PREFETCH_WAIT_MS);
-                    continue;
-                }
                 if (decoderFetchHandle != null) {
                     // The frame the bubble needs right now wins the network
-                    // slot; prefetch only fills the time between decodes.
+                    // slot; prefetch and scan only fill the time between
+                    // decodes.
                     waitRemoteLocked(50L);
                     continue;
                 }
-                if (!budgetAllowsLocked(expectedFetchBytes(target.offset, target.size))) {
-                    waitRemoteLocked(1000L);
-                    continue;
-                }
-                if (!remoteInFlight.add(target.offset)) {
-                    waitRemoteLocked(100L);
-                    continue;
+                target = choosePrefetchTargetLocked(prepared);
+                if (target != null) {
+                    if (!budgetAllowsLocked(expectedFetchBytes(target.offset, target.size))) {
+                        waitRemoteLocked(1000L);
+                        continue;
+                    }
+                    if (!remoteInFlight.add(target.offset)) {
+                        waitRemoteLocked(100L);
+                        continue;
+                    }
+                    wantScan = false;
+                } else {
+                    wantScan = scanEligibleLocked(prepared);
+                    if (!wantScan) {
+                        waitRemoteLocked(REMOTE_PREFETCH_WAIT_MS);
+                        continue;
+                    }
                 }
             }
 
+            long scanOffset = -1;
+            int scanLength = 0;
+            if (wantScan) {
+                // The local walk that finds the scan start does file I/O, so
+                // it runs with no lock held; the result is re-validated here.
+                final long frontier = ensureScanFrontier(prepared);
+                synchronized (remoteLock) {
+                    if (stopped || prefetchStopped) {
+                        return;
+                    }
+                    if (frontier < 0 || !dragging || desiredMs < 0 || remoteDisabled
+                            || !scanEligibleLocked(prepared)) {
+                        continue;
+                    }
+                    if (!budgetAllowsLocked(expectedFetchBytes(frontier, remoteScanBytes))) {
+                        waitRemoteLocked(1000L);
+                        continue;
+                    }
+                    if (!remoteInFlight.add(frontier)) {
+                        waitRemoteLocked(100L);
+                        continue;
+                    }
+                    remoteScanActive = true;
+                    scanOffset = frontier;
+                    scanLength = remoteScanBytes;
+                }
+            }
+
+            final long fetchOffset = target != null ? target.offset : scanOffset;
+            final int fetchLength = target != null ? target.size : scanLength;
+            final long fetchTimeMs = target != null ? target.timeMs : -1;
             final FileRangeFetcher.FetchHandle handle = new FileRangeFetcher.FetchHandle();
             prefetchHandle = handle;
-            prefetchTimeMs = target.timeMs;
+            prefetchTimeMs = fetchTimeMs;
             byte[] data = null;
             String failure = null;
             final long started = SystemClock.elapsedRealtime();
             try {
                 data = FileRangeFetcher.fetchSync(account, document,
-                        target.offset, target.size, REMOTE_FETCH_TIMEOUT_MS, handle);
+                        fetchOffset, fetchLength, REMOTE_FETCH_TIMEOUT_MS, handle);
                 failure = FileRangeFetcher.failureText();
             } catch (Throwable e) {
-                PreviewLog.w("SeekPreview: prefetch failed off=" + target.offset, e);
+                PreviewLog.w("SeekPreview: prefetch failed off=" + fetchOffset, e);
             } finally {
                 synchronized (remoteLock) {
-                    remoteInFlight.remove(target.offset);
+                    remoteInFlight.remove(fetchOffset);
+                    if (target == null) {
+                        remoteScanActive = false;
+                    }
                     if (prefetchHandle == handle) {
                         prefetchHandle = null;
                         prefetchTimeMs = -1;
                     }
                     if (data != null && !stopped && !prefetchStopped) {
-                        cachePutLocked(target.offset, data);
                         remoteFailures = 0;
                         remoteBytesFetched.addAndGet(data.length);
                         remoteFetchCount.incrementAndGet();
                         remotePrefetchCount.incrementAndGet();
-                        PreviewLog.d("SeekPreview: prefetched keyframe t="
-                                + target.timeMs + " off=" + target.offset
-                                + " got=" + data.length
-                                + " total=" + remoteBytesFetched.get()
-                                + " ms=" + (SystemClock.elapsedRealtime() - started));
+                        if (target != null) {
+                            cachePutLocked(target.offset, data);
+                            PreviewLog.d("SeekPreview: prefetched keyframe t="
+                                    + target.timeMs + " off=" + target.offset
+                                    + " got=" + data.length
+                                    + " total=" + remoteBytesFetched.get()
+                                    + " ms=" + (SystemClock.elapsedRealtime() - started));
+                        }
                     } else if (!handle.isCancelled() && !stopped && !prefetchStopped) {
                         recordRemoteFailureLocked(failure);
                     }
                     remoteLock.notifyAll();
                 }
             }
+            if (target == null && data != null && !stopped && !prefetchStopped) {
+                applyScanBlock(prepared, scanOffset, scanLength, data, started);
+            }
+        }
+    }
+
+    /**
+     * True when the finger sits in a hole of the index: farther from the
+     * nearest known keyframe than the video's own frame distance. Only a
+     * fragmented streaming file has a chain to walk, and only a pressed
+     * finger may spend traffic on it.
+     */
+    private boolean scanEligibleLocked(Prepared prepared) {
+        if (remoteScanActive || remoteScanExhausted) {
+            return false;
+        }
+        final KeyframeSource.Result source = prepared.source;
+        if (source == null || !source.fragmented
+                || source.track == null || source.track.timescale <= 0) {
+            return false;
+        }
+        final long desired = desiredMs;
+        if (desired < 0) {
+            return false;
+        }
+        final long nearest = nearestKeyframeTime(desired);
+        if (nearest < 0) {
+            return false;
+        }
+        return Math.abs(desired - nearest) > indexTypicalGapMs();
+    }
+
+    /**
+     * The chain position the scan continues at. Computed once from the local
+     * file: the first top-level box the local walk could not finish marks
+     * where what the download revealed ends.
+     */
+    private long ensureScanFrontier(Prepared prepared) {
+        synchronized (remoteLock) {
+            if (remoteScanExhausted) {
+                return -1;
+            }
+            if (remoteScanOffset >= 0) {
+                return remoteScanOffset;
+            }
+        }
+        final long frontier = computeLocalFrontier(prepared);
+        if (frontier == -2) {
+            // Transient read failure; leave the frontier unknown and let the
+            // next cycle retry the walk.
+            return -1;
+        }
+        synchronized (remoteLock) {
+            if (frontier < 0) {
+                remoteScanExhausted = true;
+                PreviewLog.d("SeekPreview: scan end (no chain left)");
+                return -1;
+            }
+            if (remoteScanOffset < 0) {
+                remoteScanOffset = frontier;
+                PreviewLog.d("SeekPreview: scan start frontier=" + frontier
+                        + " gap=" + indexTypicalGapMs());
+            }
+            return remoteScanOffset;
+        }
+    }
+
+    /**
+     * Walks the top-level boxes of the local file after the moov and returns
+     * where the readable part ends. Returns -1 when the chain is over (a
+     * random access index was reached) and -2 when the walk failed and may
+     * be retried.
+     */
+    private long computeLocalFrontier(Prepared prepared) {
+        final KeyframeSource.Result source = prepared.source;
+        if (source == null || file == null) {
+            return -1;
+        }
+        RandomAccessFile raf = null;
+        try {
+            raf = new RandomAccessFile(file, "r");
+            final long length = raf.length();
+            final long limit = declaredSize > 0 ? Math.min(length, declaredSize) : length;
+            long position = source.moovOffset + source.moovSize;
+            final byte[] header = new byte[16];
+            int boxes = 0;
+            while (position + 8 <= limit && boxes++ < MAX_SCAN_BOXES) {
+                raf.seek(position);
+                if (raf.read(header, 0, 8) < 8) {
+                    return position;
+                }
+                long size = ((long) (header[0] & 0xff) << 24)
+                        | ((long) (header[1] & 0xff) << 16)
+                        | ((long) (header[2] & 0xff) << 8)
+                        | (header[3] & 0xff);
+                int headerSize = 8;
+                if (size == 1) {
+                    if (position + 16 > limit) {
+                        return position;
+                    }
+                    raf.readFully(header, 8, 8);
+                    size = ((long) (header[8] & 0xff) << 56)
+                            | ((long) (header[9] & 0xff) << 48)
+                            | ((long) (header[10] & 0xff) << 40)
+                            | ((long) (header[11] & 0xff) << 32)
+                            | ((long) (header[12] & 0xff) << 24)
+                            | ((long) (header[13] & 0xff) << 16)
+                            | ((long) (header[14] & 0xff) << 8)
+                            | (header[15] & 0xff);
+                    headerSize = 16;
+                } else if (size == 0) {
+                    // Zeros the downloader has not written yet: the chain
+                    // continues remotely at this position.
+                    return position;
+                }
+                if (size < headerSize || size > limit - position) {
+                    // The box is cut by the download boundary.
+                    return position;
+                }
+                final String type = new String(new char[]{
+                        (char) (header[4] & 0xff), (char) (header[5] & 0xff),
+                        (char) (header[6] & 0xff), (char) (header[7] & 0xff)});
+                if ("mfra".equals(type)) {
+                    // The random access index ends the chain.
+                    return -1;
+                }
+                position += size;
+            }
+            return position;
+        } catch (Throwable e) {
+            return -2;
+        } finally {
+            if (raf != null) {
+                try {
+                    raf.close();
+                } catch (Throwable ignore) {
+                }
+            }
+        }
+    }
+
+    /**
+     * Turns one fetched block into chain progress: registers the keyframes
+     * the moof headers inside it describe, hands the picture bytes to the
+     * cache, and moves the scan to where the chain continues.
+     */
+    private void applyScanBlock(Prepared prepared, long blockOffset, int requested,
+                                byte[] data, long startedMs) {
+        final KeyframeSource.Result source = prepared.source;
+        if (source == null || source.track == null
+                || !(prepared.decoder instanceof MediaCodecFrameDecoder)) {
+            return;
+        }
+        final RemoteMoofScanner.Fragment fragment = RemoteMoofScanner.scan(data,
+                blockOffset, declaredSize > 0 ? declaredSize : source.fileSize,
+                source.track.timescale, source.track.trackId);
+        boolean registered = false;
+        boolean sampleInside = false;
+        for (MoovKeyframeParser.Keyframe keyframe : fragment.keyframes) {
+            if (keyframe == null) {
+                continue;
+            }
+            if (keyframe.offset >= blockOffset
+                    && keyframe.offset + keyframe.size <= blockOffset + data.length) {
+                sampleInside = true;
+            }
+            if (registerRemoteKeyframe(keyframe)) {
+                registered = true;
+                ((MediaCodecFrameDecoder) prepared.decoder).appendKeyframes(
+                        Collections.singletonList(keyframe));
+            }
+        }
+        if (sampleInside) {
+            synchronized (remoteLock) {
+                cachePutLocked(blockOffset, data);
+            }
+        }
+        if (registered) {
+            publishPlanTimes(prepared.plan);
+            synchronized (remoteLock) {
+                remoteLock.notifyAll();
+            }
+        }
+        synchronized (remoteLock) {
+            if (fragment.exhausted) {
+                remoteScanExhausted = true;
+            } else if (fragment.truncatedMoof) {
+                if (remoteScanBytes < MAX_SCAN_FETCH_BYTES) {
+                    remoteScanBytes = Math.min(MAX_SCAN_FETCH_BYTES, remoteScanBytes * 4);
+                } else {
+                    remoteScanExhausted = true;
+                }
+            } else if (fragment.nextOffset > blockOffset) {
+                remoteScanBytes = FileRangeFetcher.BLOCK;
+                remoteScanOffset = fragment.nextOffset;
+                final long end = declaredSize > 0 ? declaredSize : source.fileSize;
+                if (remoteScanOffset >= end) {
+                    // The chain reached the declared end of the file.
+                    remoteScanExhausted = true;
+                }
+            } else {
+                // The scan made no progress; do not spin on the same block.
+                remoteScanExhausted = true;
+            }
+        }
+        PreviewLog.d("SeekPreview: scan step frontier=" + blockOffset
+                + " got=" + data.length + " want=" + requested
+                + " found=" + fragment.keyframes.size()
+                + " next=" + fragment.nextOffset
+                + " exhausted=" + fragment.exhausted
+                + " truncated=" + fragment.truncatedMoof
+                + " registered=" + registered
+                + " inside=" + sampleInside
+                + " keyframes=" + remoteKeyframeCount()
+                + " total=" + remoteBytesFetched.get()
+                + " ms=" + (SystemClock.elapsedRealtime() - startedMs));
+        if (remoteScanExhausted && (fragment.exhausted || fragment.truncatedMoof
+                || fragment.nextOffset <= blockOffset)) {
+            PreviewLog.d("SeekPreview: scan end frontier=" + blockOffset);
         }
     }
 
@@ -819,7 +1135,11 @@ public final class PreviewSession {
         }
     }
 
-    /** True while the frame is close enough to the finger to be displayed. */
+    /**
+     * True while the frame is the one the bubble would paint: the keyframe
+     * the index holds nearest to the finger. With no index the old fixed
+     * distance rule applies.
+     */
     private boolean withinRemoteWindow(long timeMs) {
         if (!dragging) {
             return true;
@@ -828,7 +1148,11 @@ public final class PreviewSession {
         if (desired < 0) {
             return true;
         }
-        return Math.abs(timeMs - desired) <= remoteWindowLimit();
+        final long nearest = nearestKeyframeTime(desired);
+        if (nearest < 0) {
+            return Math.abs(timeMs - desired) <= remoteWindowLimit();
+        }
+        return timeMs == nearest;
     }
 
     private long remoteWindowLimit() {
@@ -839,32 +1163,142 @@ public final class PreviewSession {
 
     /**
      * Presentation time of the keyframe the bubble would show for this
-     * position, or -1 when the index is not ready yet. Used to tell whether
-     * an in-flight fetch is still worth keeping.
+     * position, or -1 when no index exists. Used by the display rule, the
+     * prefetch target and the staleness checks.
      */
     private long nearestKeyframeTime(long timeMs) {
-        final int n = remoteKeyframes.size();
-        if (n == 0) {
-            return -1;
+        synchronized (keyframeLock) {
+            final int n = remoteKeyframes.size();
+            if (n == 0) {
+                return -1;
+            }
+            int lo = 0;
+            int hi = n - 1;
+            while (lo < hi) {
+                final int mid = (lo + hi) >>> 1;
+                if (remoteKeyframes.get(mid).timeMs < timeMs) {
+                    lo = mid + 1;
+                } else {
+                    hi = mid;
+                }
+            }
+            if (lo > 0) {
+                final long before = timeMs - remoteKeyframes.get(lo - 1).timeMs;
+                final long after = remoteKeyframes.get(lo).timeMs - timeMs;
+                if (before <= after) {
+                    return remoteKeyframes.get(lo - 1).timeMs;
+                }
+            }
+            return remoteKeyframes.get(lo).timeMs;
         }
-        int lo = 0;
-        int hi = n - 1;
-        while (lo < hi) {
-            final int mid = (lo + hi) >>> 1;
-            if (remoteKeyframes.get(mid).timeMs < timeMs) {
-                lo = mid + 1;
-            } else {
-                hi = mid;
+    }
+
+    /** The keyframe with exactly this presentation time, or null. */
+    private MoovKeyframeParser.Keyframe keyframeAtTime(long timeMs) {
+        synchronized (keyframeLock) {
+            int lo = 0;
+            int hi = remoteKeyframes.size() - 1;
+            while (lo <= hi) {
+                final int mid = (lo + hi) >>> 1;
+                final long t = remoteKeyframes.get(mid).timeMs;
+                if (t < timeMs) {
+                    lo = mid + 1;
+                } else if (t > timeMs) {
+                    hi = mid - 1;
+                } else {
+                    return remoteKeyframes.get(mid);
+                }
+            }
+            return null;
+        }
+    }
+
+    /** Sorted insert keyed by time; true when the frame is new to the session. */
+    private boolean registerRemoteKeyframe(MoovKeyframeParser.Keyframe keyframe) {
+        if (keyframe == null || keyframe.size <= 0) {
+            return false;
+        }
+        synchronized (keyframeLock) {
+            final int n = remoteKeyframes.size();
+            int index = 0;
+            while (index < n && remoteKeyframes.get(index).timeMs < keyframe.timeMs) {
+                index++;
+            }
+            if (index < n && remoteKeyframes.get(index).timeMs == keyframe.timeMs) {
+                return false;
+            }
+            remoteKeyframes.add(index, keyframe);
+            return true;
+        }
+    }
+
+    private void addRemoteKeyframes(List<MoovKeyframeParser.Keyframe> list) {
+        if (list == null || list.isEmpty()) {
+            return;
+        }
+        for (MoovKeyframeParser.Keyframe keyframe : list) {
+            registerRemoteKeyframe(keyframe);
+        }
+    }
+
+    private int remoteKeyframeCount() {
+        synchronized (keyframeLock) {
+            return remoteKeyframes.size();
+        }
+    }
+
+    /**
+     * The video's own keyframe distance, taken as the median gap of the
+     * known index. This is what decides whether the finger sits in a hole
+     * the scan must fill: the rule follows the file, not a fixed number.
+     */
+    private long indexTypicalGapMs() {
+        synchronized (keyframeLock) {
+            final int n = remoteKeyframes.size();
+            if (n < 2) {
+                return Math.max(REMOTE_WINDOW_MIN_MS, planDurationMs / 50L);
+            }
+            final long[] gaps = new long[n - 1];
+            for (int i = 1; i < n; i++) {
+                gaps[i - 1] = remoteKeyframes.get(i).timeMs
+                        - remoteKeyframes.get(i - 1).timeMs;
+            }
+            Arrays.sort(gaps);
+            return Math.max(1000L, gaps[gaps.length / 2]);
+        }
+    }
+
+    /**
+     * Rebuilds the plan's keyframe times as the union of what the plan
+     * already holds and every keyframe the session knows. Both the file
+     * refill and the block scan publish through here, so neither can erase
+     * the other's frames.
+     */
+    private void publishPlanTimes(ThumbnailScheduler.Plan plan) {
+        if (plan == null) {
+            return;
+        }
+        final long[] current = plan.keyframeTimesMs;
+        final ArrayList<Long> merged = new ArrayList<>();
+        synchronized (keyframeLock) {
+            for (MoovKeyframeParser.Keyframe keyframe : remoteKeyframes) {
+                merged.add(keyframe.timeMs);
             }
         }
-        if (lo > 0) {
-            final long before = timeMs - remoteKeyframes.get(lo - 1).timeMs;
-            final long after = remoteKeyframes.get(lo).timeMs - timeMs;
-            if (before <= after) {
-                return remoteKeyframes.get(lo - 1).timeMs;
+        if (current != null && current.length > 0) {
+            final HashSet<Long> seen = new HashSet<>(merged);
+            for (long time : current) {
+                if (seen.add(time)) {
+                    merged.add(time);
+                }
             }
         }
-        return remoteKeyframes.get(lo).timeMs;
+        Collections.sort(merged);
+        final long[] out = new long[merged.size()];
+        for (int i = 0; i < out.length; i++) {
+            out[i] = merged.get(i);
+        }
+        plan.updateKeyframeTimes(out);
     }
 
     /**
@@ -966,6 +1400,7 @@ public final class PreviewSession {
             remoteCache.clear();
             remoteCacheBytes = 0;
             remoteInFlight.clear();
+            remoteScanActive = false;
             remoteLock.notifyAll();
         }
     }
