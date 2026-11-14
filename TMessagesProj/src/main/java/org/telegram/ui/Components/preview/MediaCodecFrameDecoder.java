@@ -204,7 +204,8 @@ public final class MediaCodecFrameDecoder implements FrameDecoder {
             return null;
         }
         try {
-            final byte[] bytes = rangeSupplier.fetch(keyframe.offset, keyframe.size);
+            final byte[] bytes = rangeSupplier.fetch(keyframe.offset, keyframe.size,
+                    keyframe.timeMs);
             if (bytes == null || bytes.length < keyframe.size) {
                 return null;
             }

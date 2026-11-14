@@ -34,7 +34,9 @@ public interface RangeSupplier {
     /**
      * @param offset absolute byte offset of the sample in the document
      * @param size   sample size in bytes
+     * @param timeMs presentation time of this keyframe, used to prioritise
+     *               downloads around the position the finger is on
      * @return the sample bytes, or null when they cannot be obtained
      */
-    byte[] fetch(long offset, long size);
+    byte[] fetch(long offset, long size, long timeMs);
 }

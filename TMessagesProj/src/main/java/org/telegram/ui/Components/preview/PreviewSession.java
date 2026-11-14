@@ -33,6 +33,10 @@ import org.telegram.ui.Components.MoovKeyframeParser;
 import java.io.File;
 import java.util.ArrayList;
 import java.util.HashSet;
+import java.util.Iterator;
+import java.util.LinkedHashMap;
+import java.util.Map;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
@@ -62,6 +66,13 @@ public final class PreviewSession {
     private static final long REMOTE_BUDGET_METERED_BYTES = 4L * 1024 * 1024;
     /** One range fetch must never hold the scheduler longer than this. */
     private static final long REMOTE_FETCH_TIMEOUT_MS = 2500;
+    /** How often the prefetch thread re-checks the drag position. */
+    private static final long REMOTE_PREFETCH_WAIT_MS = 200;
+    /**
+     * Frames farther than this from the finger are not shown by the bubble,
+     * so the network layer does not fetch them while dragging either.
+     */
+    private static final long REMOTE_WINDOW_MIN_MS = 30_000L;
     /** Consecutive real failures after which this session goes local-only. */
     private static final int REMOTE_MAX_FAILURES = 3;
     /** Server flood waits after which this session goes local-only. */
@@ -112,11 +123,39 @@ public final class PreviewSession {
     private RangeSupplier remoteSupplier;
     private volatile boolean remoteDisabled;
     private volatile int remoteFloodWaits;
-    private int remoteFailures;
-    private boolean remoteBudgetLogged;
+    private volatile boolean remoteBudgetLogged;
     private long remoteBudget = REMOTE_BUDGET_BYTES;
     private final AtomicLong remoteBytesFetched = new AtomicLong();
     private final AtomicInteger remoteFetchCount = new AtomicInteger();
+    private final AtomicInteger remotePrefetchCount = new AtomicInteger();
+    private final AtomicInteger remoteCacheHits = new AtomicInteger();
+
+    /**
+     * Keyframes the prefetch thread may download. A copy is kept because the
+     * decoder's list is appended on the scheduler thread; this one is safe to
+     * iterate from the network thread.
+     */
+    private final CopyOnWriteArrayList<MoovKeyframeParser.Keyframe> remoteKeyframes =
+            new CopyOnWriteArrayList<>();
+    /** Guards the cache, the in-flight offsets and the failure counters. */
+    private final Object remoteLock = new Object();
+    /**
+     * Bytes already fetched from the network, keyed by the offset they start
+     * at. One request returns a whole 256KB block for a single-block sample,
+     * so several neighbouring keyframes can be served from one entry.
+     */
+    private final LinkedHashMap<Long, byte[]> remoteCache = new LinkedHashMap<>();
+    private long remoteCacheBytes;
+    private final HashSet<Long> remoteInFlight = new HashSet<>();
+    /** Guarded by remoteLock. */
+    private int remoteFailures;
+    private volatile FileRangeFetcher.FetchHandle prefetchHandle;
+    private volatile long prefetchTimeMs = -1;
+    private volatile FileRangeFetcher.FetchHandle decoderFetchHandle;
+    private volatile long decoderFetchTimeMs = -1;
+    /** Incremented on every drag-position change; stale requests give up. */
+    private volatile int demandGeneration;
+    private volatile boolean prefetchStopped;
 
     public PreviewSession(Context context, File file, long declaredSize,
                           TLRPC.Document document, int account, Listener listener) {
@@ -166,7 +205,40 @@ public final class PreviewSession {
         if (stopped) {
             return;
         }
+        final long previous = desiredMs;
         desiredMs = timeMs;
+        if (timeMs != previous) {
+            demandGeneration++;
+            // A request for the old position must not hold the decoder for
+            // its full timeout: the finger already moved somewhere else. Keep
+            // it while the nearest keyframe is still the one being fetched,
+            // otherwise a slow drag would cancel its own request every tick.
+            final FileRangeFetcher.FetchHandle sync = decoderFetchHandle;
+            final long syncTime = decoderFetchTimeMs;
+            if (sync != null && timeMs >= 0 && syncTime >= 0) {
+                final long nearest = nearestKeyframeTime(timeMs);
+                final boolean stale = Math.abs(syncTime - timeMs) > remoteWindowLimit()
+                        || (nearest >= 0 && nearest != syncTime);
+                if (stale) {
+                    sync.cancel();
+                }
+            }
+            final FileRangeFetcher.FetchHandle ahead = prefetchHandle;
+            final long aheadTime = prefetchTimeMs;
+            if (ahead != null && timeMs >= 0 && aheadTime >= 0) {
+                final long nearest = nearestKeyframeTime(timeMs);
+                final boolean stale = Math.abs(aheadTime - timeMs) > remoteWindowLimit()
+                        || (nearest >= 0 && nearest != aheadTime);
+                if (stale) {
+                    // The finger wants another frame now; let the prefetch
+                    // thread pick the new nearest instead of finishing this.
+                    ahead.cancel();
+                }
+            }
+            synchronized (remoteLock) {
+                remoteLock.notifyAll();
+            }
+        }
         final ThumbnailScheduler target = scheduler;
         if (target != null) {
             target.setDesiredPosition(timeMs);
@@ -178,6 +250,9 @@ public final class PreviewSession {
             return;
         }
         dragging = value;
+        synchronized (remoteLock) {
+            remoteLock.notifyAll();
+        }
         final ThumbnailScheduler target = scheduler;
         if (target != null) {
             target.setDragging(value);
@@ -201,12 +276,15 @@ public final class PreviewSession {
         }
         stopped = true;
         mainHandler.removeCallbacks(notifyRunnable);
+        stopRemotePrefetch();
         store.clear();
         final ThumbnailScheduler target = scheduler;
         if (target != null) {
             target.stop();
         }
         PreviewLog.d("SeekPreview: remote summary fetches=" + remoteFetchCount.get()
+                + " prefetched=" + remotePrefetchCount.get()
+                + " cacheHits=" + remoteCacheHits.get()
                 + " bytes=" + remoteBytesFetched.get()
                 + " floods=" + remoteFloodWaits
                 + " disabled=" + remoteDisabled);
@@ -241,11 +319,13 @@ public final class PreviewSession {
                     + " keyframes=" + (prepared.plan.keyframeTimesMs != null
                     ? prepared.plan.keyframeTimesMs.length : 0)
                     + " remote=" + (remoteSupplier != null && !remoteDisabled));
+            startRemotePrefetch(prepared);
             worker.run();
         } catch (Throwable e) {
             PreviewLog.e("SeekPreview: session failed", e);
         } finally {
             scheduler = null;
+            stopRemotePrefetch();
             if (decoder != null) {
                 decoder.close();
             }
@@ -290,6 +370,7 @@ public final class PreviewSession {
                 }
                 if (!extra.isEmpty()) {
                     mediaDecoder.appendKeyframes(extra);
+                    remoteKeyframes.addAll(extra);
                     final long[] times = new long[fresh.track.keyframes.size()];
                     for (int i = 0; i < times.length; i++) {
                         times[i] = fresh.track.keyframes.get(i).timeMs;
@@ -390,6 +471,8 @@ public final class PreviewSession {
                         decoder.close();
                         return null;
                     }
+                    remoteKeyframes.clear();
+                    remoteKeyframes.addAll(source.track.keyframes);
                     final long duration = Math.max(source.track.durationMs,
                             documentDuration);
                     PreviewLog.d("SeekPreview: MediaCodec path fragmented="
@@ -467,51 +550,424 @@ public final class PreviewSession {
             PreviewLog.d("SeekPreview: remote off (no traffic allowed)");
             return null;
         }
-        return (offset, size) -> {
-            if (size <= 0 || offset < 0 || stopped || remoteDisabled) {
-                return null;
+        return (offset, size, timeMs) -> fetchRemoteSync(offset, (int) size, timeMs);
+    }
+
+    /**
+     * Finds one keyframe worth downloading ahead of the decoder. The closest
+     * missing frame to the finger wins; frames the bubble would never show are
+     * ignored. This is intentionally not a fixed count: the thread keeps
+     * picking the next useful frame while the finger is down, and stops when
+     * the window is covered, the budget is spent or the finger leaves.
+     */
+    private MoovKeyframeParser.Keyframe choosePrefetchTargetLocked(Prepared prepared) {
+        final long desired = desiredMs;
+        if (desired < 0) {
+            return null;
+        }
+        final long window = remoteWindowLimit();
+        MoovKeyframeParser.Keyframe best = null;
+        long bestDistance = Long.MAX_VALUE;
+        for (MoovKeyframeParser.Keyframe keyframe : remoteKeyframes) {
+            if (keyframe == null || keyframe.size <= 0) {
+                continue;
             }
-            if (remoteBytesFetched.get() + size > remoteBudget) {
-                remoteDisabled = true;
-                if (!remoteBudgetLogged) {
-                    remoteBudgetLogged = true;
-                    PreviewLog.d("SeekPreview: remote budget reached bytes="
-                            + remoteBytesFetched.get() + " budget=" + remoteBudget);
+            final long distance = Math.abs(keyframe.timeMs - desired);
+            if (distance > window || distance >= bestDistance) {
+                continue;
+            }
+            if (store.containsTime(keyframe.timeMs)
+                    || remoteInFlight.contains(keyframe.offset)
+                    || cacheContainsLocked(keyframe.offset, keyframe.size)) {
+                continue;
+            }
+            if (prepared.availability != null
+                    && prepared.availability.isAvailable(keyframe.offset, keyframe.size)) {
+                // The downloader already has it; the decoder reads the file.
+                continue;
+            }
+            best = keyframe;
+            bestDistance = distance;
+        }
+        return best;
+    }
+
+    private void startRemotePrefetch(final Prepared prepared) {
+        if (remoteSupplier == null || remoteBudget <= 0 || stopped || prefetchStopped
+                || remoteKeyframes.isEmpty()) {
+            return;
+        }
+        final Thread thread = new Thread(() -> prefetchLoop(prepared), "seek-prefetch");
+        thread.setDaemon(true);
+        thread.start();
+        PreviewLog.d("SeekPreview: prefetch thread started keyframes="
+                + remoteKeyframes.size() + " budget=" + remoteBudget);
+    }
+
+    /**
+     * Downloads keyframe bytes ahead of the decoder while the finger is down.
+     * The decoder stays on its own thread, so it can decode cached frames while
+     * the next range is already on the wire. Every fetched block stays in the
+     * cache for later drags, which is what makes going back and forth cheap.
+     */
+    private void prefetchLoop(final Prepared prepared) {
+        while (!stopped && !prefetchStopped) {
+            final MoovKeyframeParser.Keyframe target;
+            synchronized (remoteLock) {
+                if (stopped || prefetchStopped) {
+                    return;
                 }
-                return null;
+                if (!dragging || desiredMs < 0 || remoteDisabled) {
+                    waitRemoteLocked(REMOTE_PREFETCH_WAIT_MS);
+                    continue;
+                }
+                target = choosePrefetchTargetLocked(prepared);
+                if (target == null) {
+                    waitRemoteLocked(REMOTE_PREFETCH_WAIT_MS);
+                    continue;
+                }
+                if (decoderFetchHandle != null) {
+                    // The frame the bubble needs right now wins the network
+                    // slot; prefetch only fills the time between decodes.
+                    waitRemoteLocked(50L);
+                    continue;
+                }
+                if (!budgetAllowsLocked(expectedFetchBytes(target.offset, target.size))) {
+                    waitRemoteLocked(1000L);
+                    continue;
+                }
+                if (!remoteInFlight.add(target.offset)) {
+                    waitRemoteLocked(100L);
+                    continue;
+                }
             }
+
+            final FileRangeFetcher.FetchHandle handle = new FileRangeFetcher.FetchHandle();
+            prefetchHandle = handle;
+            prefetchTimeMs = target.timeMs;
+            byte[] data = null;
+            String failure = null;
             final long started = SystemClock.elapsedRealtime();
-            final byte[] data = FileRangeFetcher.fetchSync(account, document,
-                    offset, size, REMOTE_FETCH_TIMEOUT_MS);
-            if (data == null) {
-                final String text = FileRangeFetcher.failureText();
-                if (FileRangeFetcher.isFloodWait(text)) {
-                    remoteFloodWaits++;
-                    if (remoteFloodWaits >= REMOTE_MAX_FLOODS) {
-                        remoteDisabled = true;
-                        PreviewLog.d("SeekPreview: remote off after flood wait #"
-                                + remoteFloodWaits);
+            try {
+                data = FileRangeFetcher.fetchSync(account, document,
+                        target.offset, target.size, REMOTE_FETCH_TIMEOUT_MS, handle);
+                failure = FileRangeFetcher.failureText();
+            } catch (Throwable e) {
+                PreviewLog.w("SeekPreview: prefetch failed off=" + target.offset, e);
+            } finally {
+                synchronized (remoteLock) {
+                    remoteInFlight.remove(target.offset);
+                    if (prefetchHandle == handle) {
+                        prefetchHandle = null;
+                        prefetchTimeMs = -1;
                     }
-                } else if (text == null || (!text.contains("cancel")
-                        && !text.contains("interrupt"))) {
-                    remoteFailures++;
-                    if (remoteFailures >= REMOTE_MAX_FAILURES) {
-                        remoteDisabled = true;
-                        PreviewLog.d("SeekPreview: remote off after "
-                                + remoteFailures + " failures");
+                    if (data != null && !stopped && !prefetchStopped) {
+                        cachePutLocked(target.offset, data);
+                        remoteFailures = 0;
+                        remoteBytesFetched.addAndGet(data.length);
+                        remoteFetchCount.incrementAndGet();
+                        remotePrefetchCount.incrementAndGet();
+                        PreviewLog.d("SeekPreview: prefetched keyframe t="
+                                + target.timeMs + " off=" + target.offset
+                                + " got=" + data.length
+                                + " total=" + remoteBytesFetched.get()
+                                + " ms=" + (SystemClock.elapsedRealtime() - started));
+                    } else if (!handle.isCancelled() && !stopped && !prefetchStopped) {
+                        recordRemoteFailureLocked(failure);
+                    }
+                    remoteLock.notifyAll();
+                }
+            }
+        }
+    }
+
+    private void waitRemoteLocked(long timeoutMs) {
+        try {
+            remoteLock.wait(timeoutMs);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            prefetchStopped = true;
+        }
+    }
+
+    /**
+     * Synchronous path used by the decoder. It first reuses anything the
+     * prefetch thread already downloaded; when that exact sample is still in
+     * flight it waits for it instead of issuing a duplicate request.
+     */
+    private byte[] fetchRemoteSync(long offset, int size, long timeMs) {
+        if (size <= 0 || offset < 0 || stopped || prefetchStopped || remoteDisabled) {
+            return null;
+        }
+        if (!withinRemoteWindow(timeMs)) {
+            return null;
+        }
+        final byte[] cached = cacheLookup(offset, size);
+        if (cached != null) {
+            remoteCacheHits.incrementAndGet();
+            return cached;
+        }
+
+        final int generation = demandGeneration;
+        FileRangeFetcher.FetchHandle handle = null;
+        synchronized (remoteLock) {
+            if (remoteInFlight.contains(offset)) {
+                // The prefetch thread is already downloading this exact
+                // keyframe. Wait for its result instead of paying twice.
+                final long deadline = SystemClock.elapsedRealtime() + REMOTE_FETCH_TIMEOUT_MS;
+                while (!stopped && !prefetchStopped && !remoteDisabled
+                        && generation == demandGeneration
+                        && withinRemoteWindow(timeMs)) {
+                    final byte[] ready = cacheLookupLocked(offset, size);
+                    if (ready != null) {
+                        remoteCacheHits.incrementAndGet();
+                        return ready;
+                    }
+                    if (!remoteInFlight.contains(offset)) {
+                        break;
+                    }
+                    final long remaining = deadline - SystemClock.elapsedRealtime();
+                    if (remaining <= 0L) {
+                        return null;
+                    }
+                    try {
+                        remoteLock.wait(Math.min(50L, remaining));
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                        return null;
                     }
                 }
+                if (generation != demandGeneration || !withinRemoteWindow(timeMs)) {
+                    return null;
+                }
+                if (!remoteInFlight.contains(offset)) {
+                    final byte[] ready = cacheLookupLocked(offset, size);
+                    if (ready != null) {
+                        remoteCacheHits.incrementAndGet();
+                        return ready;
+                    }
+                } else {
+                    return null;
+                }
+            }
+            if (remoteDisabled || stopped || prefetchStopped) {
                 return null;
             }
-            remoteFailures = 0;
-            remoteBytesFetched.addAndGet(data.length);
-            remoteFetchCount.incrementAndGet();
-            PreviewLog.d("SeekPreview: remote keyframe off=" + offset
-                    + " size=" + size + " got=" + data.length
-                    + " total=" + remoteBytesFetched.get()
-                    + " ms=" + (SystemClock.elapsedRealtime() - started));
-            return data;
-        };
+            if (!budgetAllowsLocked(expectedFetchBytes(offset, size))) {
+                return null;
+            }
+            if (!remoteInFlight.add(offset)) {
+                return null;
+            }
+            handle = new FileRangeFetcher.FetchHandle();
+            decoderFetchTimeMs = timeMs;
+            decoderFetchHandle = handle;
+        }
+
+        byte[] data = null;
+        String failure = null;
+        final long started = SystemClock.elapsedRealtime();
+        try {
+            data = FileRangeFetcher.fetchSync(account, document,
+                    offset, size, REMOTE_FETCH_TIMEOUT_MS, handle);
+            failure = FileRangeFetcher.failureText();
+        } catch (Throwable e) {
+            PreviewLog.w("SeekPreview: remote keyframe failed off=" + offset
+                    + " size=" + size, e);
+        } finally {
+            synchronized (remoteLock) {
+                remoteInFlight.remove(offset);
+                if (decoderFetchHandle == handle) {
+                    decoderFetchHandle = null;
+                    decoderFetchTimeMs = -1;
+                }
+                if (data != null && !stopped && !prefetchStopped) {
+                    cachePutLocked(offset, data);
+                    remoteFailures = 0;
+                    remoteBytesFetched.addAndGet(data.length);
+                    remoteFetchCount.incrementAndGet();
+                    PreviewLog.d("SeekPreview: remote keyframe off=" + offset
+                            + " size=" + size + " got=" + data.length
+                            + " total=" + remoteBytesFetched.get()
+                            + " ms=" + (SystemClock.elapsedRealtime() - started));
+                } else if (!handle.isCancelled() && !stopped) {
+                    recordRemoteFailureLocked(failure);
+                }
+                remoteLock.notifyAll();
+            }
+        }
+        return data;
+    }
+
+    /** Guarded by remoteLock. */
+    private void recordRemoteFailureLocked(String text) {
+        if (FileRangeFetcher.isFloodWait(text)) {
+            remoteFloodWaits++;
+            if (remoteFloodWaits >= REMOTE_MAX_FLOODS) {
+                remoteDisabled = true;
+                PreviewLog.d("SeekPreview: remote off after flood wait #"
+                        + remoteFloodWaits);
+            }
+        } else if (text == null || (!text.contains("cancel")
+                && !text.contains("interrupt"))) {
+            remoteFailures++;
+            if (remoteFailures >= REMOTE_MAX_FAILURES) {
+                remoteDisabled = true;
+                PreviewLog.d("SeekPreview: remote off after "
+                        + remoteFailures + " failures");
+            }
+        }
+    }
+
+    /** True while the frame is close enough to the finger to be displayed. */
+    private boolean withinRemoteWindow(long timeMs) {
+        if (!dragging) {
+            return true;
+        }
+        final long desired = desiredMs;
+        if (desired < 0) {
+            return true;
+        }
+        return Math.abs(timeMs - desired) <= remoteWindowLimit();
+    }
+
+    private long remoteWindowLimit() {
+        final long duration = planDurationMs;
+        return Math.max(REMOTE_WINDOW_MIN_MS,
+                duration > 0 ? duration / 50L : REMOTE_WINDOW_MIN_MS);
+    }
+
+    /**
+     * Presentation time of the keyframe the bubble would show for this
+     * position, or -1 when the index is not ready yet. Used to tell whether
+     * an in-flight fetch is still worth keeping.
+     */
+    private long nearestKeyframeTime(long timeMs) {
+        final int n = remoteKeyframes.size();
+        if (n == 0) {
+            return -1;
+        }
+        int lo = 0;
+        int hi = n - 1;
+        while (lo < hi) {
+            final int mid = (lo + hi) >>> 1;
+            if (remoteKeyframes.get(mid).timeMs < timeMs) {
+                lo = mid + 1;
+            } else {
+                hi = mid;
+            }
+        }
+        if (lo > 0) {
+            final long before = timeMs - remoteKeyframes.get(lo - 1).timeMs;
+            final long after = remoteKeyframes.get(lo).timeMs - timeMs;
+            if (before <= after) {
+                return remoteKeyframes.get(lo - 1).timeMs;
+            }
+        }
+        return remoteKeyframes.get(lo).timeMs;
+    }
+
+    /**
+     * One range request returns the keyframe plus the rest of its 256KB block
+     * for single-block samples. Counting the whole block keeps the budget
+     * honest even when keyframes are small.
+     */
+    private static long expectedFetchBytes(long offset, long size) {
+        final long aligned = (offset / FileRangeFetcher.BLOCK) * FileRangeFetcher.BLOCK;
+        final long delta = offset - aligned;
+        final long blocks = (delta + size + FileRangeFetcher.BLOCK - 1L)
+                / FileRangeFetcher.BLOCK;
+        return blocks * FileRangeFetcher.BLOCK;
+    }
+
+    /** Guarded by remoteLock. */
+    private boolean budgetAllowsLocked(long expected) {
+        if (remoteBytesFetched.get() + expected > remoteBudget) {
+            if (!remoteBudgetLogged) {
+                remoteBudgetLogged = true;
+                PreviewLog.d("SeekPreview: remote budget reached bytes="
+                        + remoteBytesFetched.get() + " budget=" + remoteBudget);
+            }
+            return false;
+        }
+        return true;
+    }
+
+    private byte[] cacheLookup(long offset, int size) {
+        synchronized (remoteLock) {
+            return cacheLookupLocked(offset, size);
+        }
+    }
+
+    /** Guarded by remoteLock. Returns a copy the decoder may keep. */
+    private byte[] cacheLookupLocked(long offset, int size) {
+        byte[] best = null;
+        long bestStart = -1;
+        for (Map.Entry<Long, byte[]> entry : remoteCache.entrySet()) {
+            final long start = entry.getKey();
+            final byte[] data = entry.getValue();
+            if (start <= offset && start > bestStart
+                    && offset + size <= start + data.length) {
+                best = data;
+                bestStart = start;
+            }
+        }
+        if (best == null) {
+            return null;
+        }
+        final byte[] out = new byte[size];
+        System.arraycopy(best, (int) (offset - bestStart), out, 0, size);
+        return out;
+    }
+
+    /** Guarded by remoteLock. */
+    private boolean cacheContainsLocked(long offset, int size) {
+        for (Map.Entry<Long, byte[]> entry : remoteCache.entrySet()) {
+            final long start = entry.getKey();
+            final byte[] data = entry.getValue();
+            if (start <= offset && offset + size <= start + data.length) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** Guarded by remoteLock. */
+    private void cachePutLocked(long offset, byte[] data) {
+        if (data == null || data.length == 0 || remoteBudget <= 0) {
+            return;
+        }
+        final byte[] existing = remoteCache.put(offset, data);
+        if (existing != null) {
+            remoteCacheBytes -= existing.length;
+        }
+        remoteCacheBytes += data.length;
+        while (remoteCacheBytes > remoteBudget && !remoteCache.isEmpty()) {
+            final Iterator<Map.Entry<Long, byte[]>> iterator = remoteCache.entrySet().iterator();
+            final Map.Entry<Long, byte[]> eldest = iterator.next();
+            remoteCacheBytes -= eldest.getValue().length;
+            iterator.remove();
+        }
+    }
+
+    private void stopRemotePrefetch() {
+        prefetchStopped = true;
+        final FileRangeFetcher.FetchHandle sync = decoderFetchHandle;
+        if (sync != null) {
+            sync.cancel();
+        }
+        decoderFetchTimeMs = -1;
+        final FileRangeFetcher.FetchHandle ahead = prefetchHandle;
+        if (ahead != null) {
+            ahead.cancel();
+        }
+        prefetchTimeMs = -1;
+        synchronized (remoteLock) {
+            remoteCache.clear();
+            remoteCacheBytes = 0;
+            remoteInFlight.clear();
+            remoteLock.notifyAll();
+        }
     }
 
     /**

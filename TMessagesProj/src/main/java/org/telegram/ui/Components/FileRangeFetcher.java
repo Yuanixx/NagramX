@@ -59,6 +59,8 @@ public final class FileRangeFetcher {
     /** Server flood wait (420): no range request goes out before this time. */
     private static volatile long floodCooldownUntilMs;
     private static volatile long lastRequestAt;
+    /** Makes the request gap hold even when both preview threads ask at once. */
+    private static final Object rateLock = new Object();
 
     private FileRangeFetcher() {
     }
@@ -97,7 +99,7 @@ public final class FileRangeFetcher {
          * completion callback on cancel, so this must wake the waiting thread
          * itself instead of waiting for a callback that will never come.
          */
-        void cancel() {
+        public void cancel() {
             final boolean first = !cancelled;
             cancelled = true;
             final int t = token;
@@ -115,6 +117,10 @@ public final class FileRangeFetcher {
             }
         }
 
+        public boolean isCancelled() {
+            return cancelled;
+        }
+
         private int account = -1;
     }
 
@@ -129,10 +135,10 @@ public final class FileRangeFetcher {
         // (FLOOD_PREMIUM_WAIT_*) the download stalls and the player spins.
         // With this off the preview is local-only and cannot affect playback.
         if (!tw.nekomimi.nekogram.NekoConfig.videoPreviewNetworkFetch.Bool()) {
-            lastFailureText[0] = "network fetch disabled";
+            lastFailureText.set("network fetch disabled");
             return null;
         }
-        lastFailureText[0] = null;
+        lastFailureText.set(null);
         // Range requests share the download connection with the video's own
         // downloader. They are allowed while that download runs, because a
         // preview of a range that has not arrived yet is the whole point, but
@@ -175,12 +181,12 @@ public final class FileRangeFetcher {
         if (blocks <= 1) {
             final byte[] slice = fetchOneBlock(account, document, location,
                     aligned, delta, BLOCK, timeoutMs, handle, dcId);
-            if (slice == null && allowRetry && lastFailureText[0] != null
-                    && FileRefController.isFileRefError(lastFailureText[0])) {
+            if (slice == null && allowRetry && lastFailureText.get() != null
+                    && FileRefController.isFileRefError(lastFailureText.get())) {
                 // The reference expired. Another part of the app may already
                 // have refreshed it, so resolve the location again and retry
                 // once.
-                FileLog.d("ABPV: range retry after file reference error: " + lastFailureText[0]);
+                FileLog.d("ABPV: range retry after file reference error: " + lastFailureText.get());
                 return fetchSync(account, document, offset, length, timeoutMs, false, handle);
             }
             return slice;
@@ -227,7 +233,7 @@ public final class FileRangeFetcher {
 
     /** Last failure text, for callers that need to classify the failure. */
     public static String failureText() {
-        return lastFailureText[0];
+        return lastFailureText.get();
     }
 
     /** True when the failure text names a flood wait (code 420). */
@@ -265,37 +271,42 @@ public final class FileRangeFetcher {
     }
 
     /** Last failure text of any block in the current fetch, for the ref-retry check. */
-    private static final String[] lastFailureText = new String[1];
+    private static final ThreadLocal<String> lastFailureText = new ThreadLocal<>();
 
     /**
      * Waits for the next request slot. Returns false when the caller was
      * cancelled or interrupted, or when a server flood wait is still active.
      * The wait is bounded by the longer gap (one second) and polls in small
-     * slices so a cancelled preview does not hold the scheduler.
+     * slices so a cancelled preview does not hold the scheduler. The slot is
+     * claimed under a lock: the prefetch and decoder threads share this gate,
+     * so the gap holds across both.
      */
     private static boolean awaitRateSlot(boolean downloadActive, FetchHandle handle) {
         final long gap = downloadActive
                 ? MIN_REQUEST_GAP_MS_ACTIVE : MIN_REQUEST_GAP_MS_IDLE;
         while (true) {
             if (handle != null && handle.cancelled) {
-                lastFailureText[0] = "cancelled";
+                lastFailureText.set("cancelled");
                 return false;
             }
-            final long now = System.currentTimeMillis();
-            if (now < floodCooldownUntilMs) {
-                lastFailureText[0] = "FLOOD_COOLDOWN";
-                return false;
-            }
-            final long wait = lastRequestAt + gap - now;
-            if (wait <= 0) {
-                lastRequestAt = now;
-                return true;
+            final long wait;
+            synchronized (rateLock) {
+                final long now = System.currentTimeMillis();
+                if (now < floodCooldownUntilMs) {
+                    lastFailureText.set("FLOOD_COOLDOWN");
+                    return false;
+                }
+                wait = lastRequestAt + gap - now;
+                if (wait <= 0) {
+                    lastRequestAt = now;
+                    return true;
+                }
             }
             try {
                 Thread.sleep(Math.min(50L, wait));
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
-                lastFailureText[0] = "interrupted";
+                lastFailureText.set("interrupted");
                 return false;
             }
         }
@@ -326,7 +337,7 @@ public final class FileRangeFetcher {
             handle.account = account;
             handle.latch = latch;
             if (handle.cancelled) {
-                lastFailureText[0] = "cancelled before send";
+                lastFailureText.set("cancelled before send");
                 return null;
             }
         }
@@ -407,7 +418,7 @@ public final class FileRangeFetcher {
             if (!latch.await(timeoutMs, TimeUnit.MILLISECONDS)) {
                 FileLog.d("ABPV: range fetch timeout off=" + aligned + " limit=" + limit
                         + " token=" + requestToken);
-                lastFailureText[0] = "timeout";
+                lastFailureText.set("timeout");
                 // The request is still alive in native and would keep
                 // downloading; kill it so it stops eating the download slot.
                 if (handle != null) {
@@ -422,14 +433,14 @@ public final class FileRangeFetcher {
             }
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
-            lastFailureText[0] = "interrupted";
+            lastFailureText.set("interrupted");
             if (handle != null) {
                 handle.cancel();
             }
             return null;
         }
         if (result[0] == null) {
-            lastFailureText[0] = failure[0];
+            lastFailureText.set(failure[0]);
             if (isFloodWait(failure[0])) {
                 final int seconds = parseFloodSeconds(failure[0]);
                 final long cooldownMs = (seconds > 0 ? seconds * 1000L : 1000L) + 2000L;
