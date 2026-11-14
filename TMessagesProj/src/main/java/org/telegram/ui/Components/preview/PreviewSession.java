@@ -18,6 +18,8 @@
 package org.telegram.ui.Components.preview;
 
 import android.content.Context;
+import android.net.ConnectivityManager;
+import android.net.NetworkInfo;
 import android.net.Uri;
 import android.os.Handler;
 import android.os.Looper;
@@ -56,6 +58,8 @@ public final class PreviewSession {
 
     /** Hard cap on bytes the network layer may fetch for one session. */
     private static final long REMOTE_BUDGET_BYTES = 8L * 1024 * 1024;
+    /** Metered networks get half: previews must not eat someone's data plan. */
+    private static final long REMOTE_BUDGET_METERED_BYTES = 4L * 1024 * 1024;
     /** One range fetch must never hold the scheduler longer than this. */
     private static final long REMOTE_FETCH_TIMEOUT_MS = 2500;
     /** Consecutive real failures after which this session goes local-only. */
@@ -376,6 +380,7 @@ public final class PreviewSession {
                 // the codec path is taken even when nothing is cached yet.
                 final RangeAvailability availability =
                         complete ? null : makeAvailability(document, account);
+                remoteBudget = complete ? 0 : computeRemoteBudget();
                 final RangeSupplier supplier = complete ? null : makeSupplier();
                 try {
                     final MediaCodecFrameDecoder decoder =
@@ -458,6 +463,10 @@ public final class PreviewSession {
             PreviewLog.d("SeekPreview: remote off (setting)");
             return null;
         }
+        if (remoteBudget <= 0) {
+            PreviewLog.d("SeekPreview: remote off (no traffic allowed)");
+            return null;
+        }
         return (offset, size) -> {
             if (size <= 0 || offset < 0 || stopped || remoteDisabled) {
                 return null;
@@ -503,6 +512,36 @@ public final class PreviewSession {
                     + " ms=" + (SystemClock.elapsedRealtime() - started));
             return data;
         };
+    }
+
+    /**
+     * Traffic the network layer may spend on this session. A metered network
+     * gets half and roaming gets nothing: previews are a convenience and must
+     * never turn into a background download on someone else's data plan. Any
+     * failure to read the network state falls back to the full budget, which
+     * is still bounded.
+     */
+    @SuppressWarnings("deprecation")
+    private long computeRemoteBudget() {
+        try {
+            final ConnectivityManager manager = (ConnectivityManager)
+                    context.getSystemService(Context.CONNECTIVITY_SERVICE);
+            if (manager == null) {
+                return REMOTE_BUDGET_BYTES;
+            }
+            final NetworkInfo info = manager.getActiveNetworkInfo();
+            if (info == null || !info.isConnected()) {
+                return REMOTE_BUDGET_BYTES;
+            }
+            if (info.isRoaming()) {
+                PreviewLog.d("SeekPreview: remote off (roaming)");
+                return 0;
+            }
+            return manager.isActiveNetworkMetered()
+                    ? REMOTE_BUDGET_METERED_BYTES : REMOTE_BUDGET_BYTES;
+        } catch (Throwable e) {
+            return REMOTE_BUDGET_BYTES;
+        }
     }
 
     /**
