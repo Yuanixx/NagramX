@@ -88,10 +88,6 @@ public final class PreviewSession {
     private static final int MAX_SCAN_FETCH_BYTES = 4 * 1024 * 1024;
     /** Consecutive real failures after which this session goes local-only. */
     private static final int REMOTE_MAX_FAILURES = 3;
-    /** Server flood waits after which this session parks the network layer. */
-    private static final int REMOTE_MAX_FLOODS = 2;
-    /** How long the network layer stays dark after a flood streak. */
-    private static final long REMOTE_FLOOD_COOLDOWN_MS = 60_000L;
     /** How long it stays dark after a plain failure streak. */
     private static final long REMOTE_FAILURE_COOLDOWN_MS = 30_000L;
 
@@ -151,15 +147,17 @@ public final class PreviewSession {
     /** Set once in prepare() on the scheduler thread; null means local only. */
     private RangeSupplier remoteSupplier;
     /**
-     * Wall-clock deadline of the network-layer cooldown; 0 means allowed.
-     * A flood or a failure streak parks the layer instead of disabling it for
-     * the whole session, so a free account can recover once the server calms
-     * down.
+     * Wall-clock deadline of this session's own cooldown; 0 means allowed.
+     *
+     * Only plain failures live here. A server flood wait parks every caller in
+     * {@link FileRangeFetcher} instead, because the limit belongs to the
+     * account and must survive switching videos.
      */
     private volatile long remoteDisabledUntilMs;
     /**
-     * True once a cooldown was set. The next request after the cooldown acts
-     * as the recovery probe: success clears the streak, failure parks again.
+     * True once a failure cooldown was set. The next request after the
+     * cooldown acts as the recovery probe: success clears the streak, failure
+     * parks again.
      */
     private volatile boolean remoteProbePending;
     private volatile int remoteFloodWaits;
@@ -1159,22 +1157,19 @@ public final class PreviewSession {
      *
      * Classification comes from the result status, never from its text: a
      * cancelled request and a local cooldown are not failures, while a timeout
-     * and a malformed response are.
+     * and a malformed response are. A 420 is not a session failure either:
+     * FileRangeFetcher parks every caller on its own account-wide cooldown, so
+     * this session only keeps the count for its summary line.
      */
     private void recordRemoteFailureLocked(FileRangeFetcher.FetchResult result) {
         final long now = System.currentTimeMillis();
         if (result != null && result.status == FileRangeFetcher.FetchResult.Status.FLOOD) {
             remoteFloodWaits++;
-            if (remoteFloodWaits >= REMOTE_MAX_FLOODS || remoteProbePending) {
-                // Second flood, or the recovery probe came back flooded:
-                // park the layer and wait for a clean probe later.
-                remoteDisabledUntilMs = now + REMOTE_FLOOD_COOLDOWN_MS;
-                remoteFloodWaits = 0;
-                remoteProbePending = true;
-                PreviewLog.d("SeekPreview: remote cooldown "
-                        + REMOTE_FLOOD_COOLDOWN_MS + "ms after flood");
-            }
-        } else if (result == null || result.countsAsFailure) {
+            PreviewLog.d("SeekPreview: remote flood wait " + result.floodSeconds
+                    + "s cooldown=" + FileRangeFetcher.coolingDownRemainingMs() + "ms");
+            return;
+        }
+        if (result == null || result.countsAsFailure) {
             remoteFailures++;
             if (remoteFailures >= REMOTE_MAX_FAILURES || remoteProbePending) {
                 remoteDisabledUntilMs = now + REMOTE_FAILURE_COOLDOWN_MS;
@@ -1196,8 +1191,14 @@ public final class PreviewSession {
         remoteFailures = 0;
     }
 
-    /** True while the network layer is parked after a flood or failure streak. */
+    /**
+     * True while the network layer is parked: either the account-wide flood
+     * cooldown in {@link FileRangeFetcher}, or this session's failure streak.
+     */
     private boolean isRemoteCoolingDown() {
+        if (FileRangeFetcher.isCoolingDown()) {
+            return true;
+        }
         final long until = remoteDisabledUntilMs;
         return until != 0L && System.currentTimeMillis() < until;
     }

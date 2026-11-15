@@ -154,14 +154,42 @@ public final class FileRangeFetcher {
      */
     private static final long MIN_REQUEST_GAP_MS_ACTIVE = 1000;
     private static final long MIN_REQUEST_GAP_MS_IDLE = 250;
-    /** A premium-throttled account keeps one request every two seconds. */
-    private static final long PREMIUM_MIN_GAP_MS = 2000;
-    /** Server flood wait (420): no range request goes out before this time. */
-    private static volatile long floodCooldownUntilMs;
+    /**
+     * A server flood wait (420) parks every range request until this time, no
+     * matter which video asked for it: the limit belongs to the account, not
+     * to one chat, so the state is static.
+     */
+    private static volatile long floodUntilMs;
+    /** Floods seen in a row; each one doubles the next wait. */
+    private static volatile int consecutiveFloods;
+    /** Last flood, used to forget a streak that ended long ago. */
+    private static volatile long lastFloodAtMs;
+    /** A cooldown just ended: the next request probes whether it is over. */
+    private static volatile boolean probePending;
+    /** True while that single probe request is on the wire. */
+    private static volatile boolean probeInFlight;
+    /** Any 420 keeps requests spaced out for a while after the cooldown. */
+    private static volatile long postFloodUntilMs;
+
+    /** First flood parks for at least ten seconds. */
+    private static final long FLOOD_MIN_BACKOFF_SECONDS = 10L;
+    /** No matter how many floods stack up, never park for more than five minutes. */
+    private static final long FLOOD_MAX_BACKOFF_SECONDS = 300L;
+    /** A flood separated from the previous one by this much starts a new streak. */
+    private static final long FLOOD_STREAK_WINDOW_MS = 10L * 60 * 1000;
+    /** After a flood, keep two seconds between requests instead of one. */
+    private static final long POST_FLOOD_GAP_MS = 2000L;
+    /** How long that slower pace lasts past the cooldown itself. */
+    private static final long POST_FLOOD_PENALTY_MS = 60_000L;
 
     /** True while a server flood wait is still cooling down. */
     public static boolean isCoolingDown() {
-        return System.currentTimeMillis() < floodCooldownUntilMs;
+        return System.currentTimeMillis() < floodUntilMs;
+    }
+
+    /** Milliseconds left on the server cooldown, 0 when it is over. */
+    public static long coolingDownRemainingMs() {
+        return Math.max(0L, floodUntilMs - System.currentTimeMillis());
     }
 
     private static volatile long lastRequestAt;
@@ -301,10 +329,31 @@ public final class FileRangeFetcher {
         } catch (Throwable ignore) {
         }
         final boolean downloadActive = active != null;
-        final FetchResult gate = awaitRateSlot(downloadActive, handle);
+        final boolean[] probe = new boolean[1];
+        final FetchResult gate = awaitRateSlot(downloadActive, handle, probe);
         if (gate != null) {
             return gate.rewrap(false, 0, started);
         }
+        try {
+            final FetchResult result = fetchBlocks(account, document, offset, length,
+                    timeoutMs, allowRetry, downloadActive, handle, started);
+            if (result.ok()) {
+                noteProbeSuccess();
+            }
+            return result;
+        } finally {
+            // The probe slot is released on every exit: a probe that timed out
+            // must not lock the layer until the process restarts.
+            if (probe[0]) {
+                releaseProbeSlot();
+            }
+        }
+    }
+
+    private static FetchResult fetchBlocks(int account, TLRPC.Document document,
+                                           long offset, long length, long timeoutMs,
+                                           boolean allowRetry, boolean downloadActive,
+                                           FetchHandle handle, long started) {
         // Fixed blocks, aligned down, always requested in full.
         //
         // The server accepts only limits that divide 1MB evenly (4K, 8K ... 1M),
@@ -332,16 +381,19 @@ public final class FileRangeFetcher {
         if (blocks <= 1) {
             final FetchResult slice = fetchOneBlock(account, document, location,
                     aligned, delta, blockBytes(), timeoutMs, handle, dcId, started);
-            if (!slice.ok() && allowRetry
-                    && slice.status == FetchResult.Status.ERROR
+            if (!slice.ok() && slice.status == FetchResult.Status.ERROR
                     && slice.text != null
                     && FileRefController.isFileRefError(slice.text)) {
-                // The reference expired. Another part of the app may already
-                // have refreshed it, so resolve the location again and retry
-                // once.
-                FileLog.d("ABPV: range retry after file reference error: " + slice.text);
-                return fetchSync(account, document, offset, length, timeoutMs,
-                        false, handle, started);
+                if (allowRetry) {
+                    // The reference expired. Another part of the app may
+                    // already have refreshed it, so resolve the location again
+                    // and retry once.
+                    FileLog.d("ABPV: range retry after file reference error: " + slice.text);
+                    return fetchSync(account, document, offset, length, timeoutMs,
+                            false, handle, started);
+                }
+                return failure(FetchResult.Status.RETRY_LIMIT, slice.code, -1,
+                        RETRY_LIMIT_TEXT, true, slice.requests, started);
             }
             return slice;
         }
@@ -361,7 +413,7 @@ public final class FileRangeFetcher {
             // block is a separate request, so it waits its turn and stops if a
             // flood cooldown started in the meantime.
             if (b > 0) {
-                final FetchResult next = awaitRateSlot(downloadActive, handle);
+                final FetchResult next = awaitRateSlot(downloadActive, handle, null);
                 if (next != null) {
                     FileLog.d("ABPV: range multi-block stopped at block "
                             + (b + 1) + "/" + blocks);
@@ -389,13 +441,6 @@ public final class FileRangeFetcher {
         FileLog.d("ABPV: range multi-block done off=" + offset + " got=" + filled
                 + " want=" + length + " blocks=" + blocks);
         return success(out, sent, started);
-    }
-
-    /** True when a premium-only flood wait was seen; the account is throttled. */
-    private static volatile boolean premiumSuspected;
-
-    static boolean isPremiumSuspected() {
-        return premiumSuspected;
     }
 
     /**
@@ -427,19 +472,58 @@ public final class FileRangeFetcher {
         return value;
     }
 
-    /** Parks every range request once the server answers 420. */
-    private static void applyFloodCooldown(int seconds, String text) {
-        final boolean premium = text != null && text.contains("PREMIUM");
-        final long cooldownMs = premium
-                ? Math.max(30_000L, seconds * 2000L + 2000L)
-                : (seconds > 0 ? seconds * 1000L : 1000L) + 2000L;
-        floodCooldownUntilMs = Math.max(floodCooldownUntilMs,
-                System.currentTimeMillis() + cooldownMs);
-        if (premium) {
-            premiumSuspected = true;
+    /** True when a file reference expired and the one retry did not help. */
+    private static final String RETRY_LIMIT_TEXT = "file reference retry limit";
+
+    /**
+     * Records a 420 and parks every caller.
+     *
+     * The wait the server asks for is doubled and floored at ten seconds, then
+     * doubled again for every flood in a row: 10, 20, 40 ... capped at five
+     * minutes. The account type is never guessed from the message text — every
+     * 420 follows this one rule.
+     */
+    private static void noteFloodWait(int serverSeconds) {
+        synchronized (rateLock) {
+            final long now = System.currentTimeMillis();
+            if (now - lastFloodAtMs > FLOOD_STREAK_WINDOW_MS) {
+                consecutiveFloods = 0;
+            }
+            consecutiveFloods++;
+            final int shift = Math.min(consecutiveFloods - 1, 5);
+            final long base = Math.max(serverSeconds * 2L, FLOOD_MIN_BACKOFF_SECONDS);
+            final long seconds = Math.min(FLOOD_MAX_BACKOFF_SECONDS, base * (1L << shift));
+            floodUntilMs = Math.max(floodUntilMs, now + seconds * 1000L);
+            lastFloodAtMs = now;
+            probePending = true;
+            probeInFlight = false;
+            postFloodUntilMs = Math.max(postFloodUntilMs,
+                    floodUntilMs + POST_FLOOD_PENALTY_MS);
+            FileLog.d("ABPV: flood streak=" + consecutiveFloods
+                    + " serverSec=" + serverSeconds
+                    + " backoff=" + (seconds * 1000L) + "ms until=" + floodUntilMs);
         }
-        FileLog.d("ABPV: range flood wait text=" + text
-                + " premium=" + premium + " cooldown=" + cooldownMs + "ms");
+    }
+
+    /** A request went through: the cooldown, if any, is over. */
+    private static void noteProbeSuccess() {
+        synchronized (rateLock) {
+            if (floodUntilMs != 0L || probePending || consecutiveFloods != 0) {
+                FileLog.d("ABPV: flood cleared after probe");
+            }
+            floodUntilMs = 0L;
+            probePending = false;
+            probeInFlight = false;
+            consecutiveFloods = 0;
+            lastFloodAtMs = 0L;
+        }
+    }
+
+    /** Frees the probe slot when the probe failed without a 420. */
+    private static void releaseProbeSlot() {
+        synchronized (rateLock) {
+            probeInFlight = false;
+        }
     }
 
     /**
@@ -452,13 +536,10 @@ public final class FileRangeFetcher {
      * claimed under a lock: the prefetch and decoder threads share this gate,
      * so the gap holds across both.
      */
-    private static FetchResult awaitRateSlot(boolean downloadActive, FetchHandle handle) {
+    private static FetchResult awaitRateSlot(boolean downloadActive, FetchHandle handle,
+                                             boolean[] probeGranted) {
         final long baseGap = downloadActive
                 ? MIN_REQUEST_GAP_MS_ACTIVE : MIN_REQUEST_GAP_MS_IDLE;
-        // Once the server throttles this account with a premium-only wait,
-        // keep one request every two seconds for the rest of the run.
-        final long gap = premiumSuspected
-                ? Math.max(baseGap, PREMIUM_MIN_GAP_MS) : baseGap;
         while (true) {
             if (handle != null && handle.cancelled) {
                 return failure(FetchResult.Status.CANCELLED, 0, -1,
@@ -471,12 +552,26 @@ public final class FileRangeFetcher {
             final long wait;
             synchronized (rateLock) {
                 final long now = System.currentTimeMillis();
-                if (now < floodCooldownUntilMs) {
+                if (now < floodUntilMs) {
                     return failure(FetchResult.Status.LOCAL_COOLDOWN, 0, -1,
                             "cooldown", false, 0, 0L);
                 }
+                final long gap = now < postFloodUntilMs
+                        ? Math.max(baseGap, POST_FLOOD_GAP_MS) : baseGap;
                 wait = lastRequestAt + gap - now;
                 if (wait <= 0) {
+                    if (probePending) {
+                        // One request at a time checks whether the server
+                        // accepted us back; everyone else waits for its verdict.
+                        if (probeInFlight) {
+                            return failure(FetchResult.Status.LOCAL_COOLDOWN, 0, -1,
+                                    "probe in flight", false, 0, 0L);
+                        }
+                        probeInFlight = true;
+                        if (probeGranted != null) {
+                            probeGranted[0] = true;
+                        }
+                    }
                     lastRequestAt = now;
                     return null;
                 }
@@ -648,7 +743,7 @@ public final class FileRangeFetcher {
             final String reason = failure[0] != null ? failure[0] : "unexpected response";
             if (failureCode[0] == 420) {
                 final int seconds = parseFloodSeconds(reason);
-                applyFloodCooldown(seconds, reason);
+                noteFloodWait(seconds);
                 FileLog.d("ABPV: range fetch failed off=" + aligned + " aligned=" + aligned
                         + " limit=" + limit + " dc=" + dcId
                         + " size=" + document.size + " reason=" + reason
