@@ -39,6 +39,7 @@ import java.util.ArrayList;
  *   stsd  avcC / hvcC / colr
  *   stss  sync sample numbers
  *   stts  decode time deltas
+ *   ctts  composition time offsets (B-frame reordering)
  *   stsc  sample-to-chunk mapping
  *   stco  / co64  chunk offsets
  *   stsz  sample sizes
@@ -48,7 +49,12 @@ public final class MoovKeyframeParser {
     /** One decodable entry point in the file. */
     public static final class Keyframe {
         public final long timeMs;
-        /** Exact presentation time in microseconds, when the timescale allows it. */
+        /**
+         * Presentation time in microseconds: decode time plus the ctts
+         * composition offset when the file has one. The seek bar position is
+         * expressed in this domain, so nearest-keyframe lookups must compare
+         * against it rather than the decode time.
+         */
         public long timeUs;
         public final long offset;
         public final int size;
@@ -102,6 +108,10 @@ public final class MoovKeyframeParser {
         public String codecFourcc;
         public int codedWidth;
         public int codedHeight;
+        /** True when the sample table carried a ctts composition offset box. */
+        public boolean hasCtts;
+        /** Largest composition shift seen, in milliseconds; 0 when absent. */
+        public long maxCttsShiftMs;
         public int displayWidth;
         public int displayHeight;
         public int rotationDegrees;
@@ -382,6 +392,10 @@ public final class MoovKeyframeParser {
         int[] sttsCounts = null;
         long[] sttsDeltas = null;
         int sttsEntryCount = 0;
+        long[] cttsCounts = null;
+        long[] cttsOffsets = null;
+        int cttsEntryCount = 0;
+        int cttsVersion = 0;
         int totalSamples = 0;
         int chunkCount = 0;
         int stsdStart = -1;
@@ -428,6 +442,26 @@ public final class MoovKeyframeParser {
                         } else {
                             for (int i = 0; i < count; i++) {
                                 sampleSizes[i] = buffer.getInt(body + 12 + i * 4) & 0xffffffffL;
+                            }
+                        }
+                        break;
+                    }
+                    case "ctts": {
+                        final int version = buffer.get(body) & 0xff;
+                        final int count = buffer.getInt(body + 4);
+                        if (count >= 0 && count < 4_000_000) {
+                            cttsEntryCount = count;
+                            cttsVersion = version;
+                            cttsCounts = new long[count];
+                            cttsOffsets = new long[count];
+                            for (int i = 0; i < count; i++) {
+                                cttsCounts[i] = buffer.getInt(body + 8 + i * 8)
+                                        & 0xffffffffL;
+                                // Version 0 offsets are unsigned; version 1
+                                // introduced signed values for negative gaps.
+                                cttsOffsets[i] = version == 0
+                                        ? buffer.getInt(body + 12 + i * 8) & 0xffffffffL
+                                        : buffer.getInt(body + 12 + i * 8);
                             }
                         }
                         break;
@@ -522,6 +556,32 @@ public final class MoovKeyframeParser {
         }
         info.durationMs = time * 1000L / timescale;
 
+        // Composition offsets: presentation time = decode time + ctts offset.
+        // Without a ctts table every offset is zero and presentation time
+        // equals decode time, which is the behaviour all shipped versions had.
+        long[] presentationTimes = sampleTimes;
+        long maxAbsCttsTicks = 0;
+        if (cttsCounts != null && cttsEntryCount > 0) {
+            final long[] cttsPerSample = new long[totalSamples];
+            int cttsSample = 0;
+            for (int i = 0; i < cttsEntryCount && cttsSample < totalSamples; i++) {
+                for (int k = 0; k < cttsCounts[i] && cttsSample < totalSamples; k++) {
+                    cttsPerSample[cttsSample] = cttsOffsets[i];
+                    cttsSample++;
+                }
+            }
+            presentationTimes = new long[totalSamples];
+            for (int i = 0; i < totalSamples; i++) {
+                presentationTimes[i] = sampleTimes[i] + cttsPerSample[i];
+                final long abs = Math.abs(presentationTimes[i] - sampleTimes[i]);
+                if (abs > maxAbsCttsTicks) {
+                    maxAbsCttsTicks = abs;
+                }
+            }
+            info.hasCtts = true;
+            info.maxCttsShiftMs = maxAbsCttsTicks * 1000L / timescale;
+        }
+
         final long[] sampleOffsets = new long[totalSamples];
         sample = 0;
         for (int chunk = 0; chunk < chunkCount && sample < totalSamples; chunk++) {
@@ -547,28 +607,28 @@ public final class MoovKeyframeParser {
                 if (index < 0 || index >= totalSamples) {
                     continue;
                 }
-                info.keyframes.add(makeKeyframe(info, sampleTimes, sampleOffsets,
-                        sampleSizes, index, timescale));
+                info.keyframes.add(makeKeyframe(info, presentationTimes,
+                        sampleOffsets, sampleSizes, index, timescale));
             }
         } else {
             // No stss means every sample is a sync sample.
             for (int i = 0; i < totalSamples; i++) {
-                info.keyframes.add(makeKeyframe(info, sampleTimes, sampleOffsets,
-                        sampleSizes, i, timescale));
+                info.keyframes.add(makeKeyframe(info, presentationTimes,
+                        sampleOffsets, sampleSizes, i, timescale));
             }
         }
         return info.keyframes.isEmpty() ? null : info;
     }
 
-    private static Keyframe makeKeyframe(TrackInfo info, long[] sampleTimes,
+    private static Keyframe makeKeyframe(TrackInfo info, long[] presentationTimes,
                                          long[] sampleOffsets, long[] sampleSizes,
                                          int index, long timescale) {
         final Keyframe keyframe = new Keyframe(
-                sampleTimes[index] * 1000L / timescale,
+                presentationTimes[index] * 1000L / timescale,
                 sampleOffsets[index],
                 (int) Math.min(Integer.MAX_VALUE, sampleSizes[index]),
                 index);
-        keyframe.timeUs = sampleTimes[index] * 1_000_000L / timescale;
+        keyframe.timeUs = presentationTimes[index] * 1_000_000L / timescale;
         keyframe.sampleSpan = spanBytes(sampleSizes, index, TAIL_SAMPLES);
         keyframe.tailEndOffset = tailEndOf(sampleOffsets, sampleSizes, index, TAIL_SAMPLES);
         keyframe.tailEndOffsetWide = tailEndOf(sampleOffsets, sampleSizes, index, TAIL_SAMPLES_WIDE);
