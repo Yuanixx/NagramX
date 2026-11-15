@@ -24,6 +24,7 @@ import android.graphics.Color;
 import android.graphics.Paint;
 import android.graphics.RectF;
 import android.net.Uri;
+import android.os.SystemClock;
 import android.text.TextPaint;
 import android.view.View;
 
@@ -73,6 +74,10 @@ public class VideoSeekFramePreview extends View {
     private PreviewSession session;
     private volatile PressedProvider pressedProvider;
     private volatile BufferingProvider bufferingProvider;
+    /** elapsedRealtime of the last buffering tick, 0 while playback is stable. */
+    private long lastBufferingAtMs;
+    /** elapsedRealtime of the session start; anchors the stability clock. */
+    private long previewStartedAtMs;
     private volatile long lastFrameAt;
     private boolean dragging;
     private boolean retainUriForCurrentDrag;
@@ -114,7 +119,20 @@ public class VideoSeekFramePreview extends View {
             if (current == null) {
                 return;
             }
-            current.setBuffering(isBufferingNow());
+            final boolean buffering = isBufferingNow();
+            final long aheadMs = bufferedAheadNow();
+            final long now = SystemClock.elapsedRealtime();
+            final long stableMs;
+            if (buffering) {
+                lastBufferingAtMs = now;
+                stableMs = 0;
+            } else if (lastBufferingAtMs == 0) {
+                stableMs = Math.max(0, now - previewStartedAtMs);
+            } else {
+                stableMs = Math.max(0, now - lastBufferingAtMs);
+            }
+            current.setBuffering(buffering);
+            current.setPlaybackHint(aheadMs, stableMs);
             postDelayed(this, 250);
         }
     };
@@ -471,6 +489,9 @@ public class VideoSeekFramePreview extends View {
 
     public interface BufferingProvider {
         boolean isBuffering();
+
+        /** Milliseconds of playback buffer ahead of the current position. */
+        long bufferedAheadMs();
     }
 
     private void updateBuffering() {
@@ -489,6 +510,18 @@ public class VideoSeekFramePreview extends View {
             return provider.isBuffering();
         } catch (Throwable e) {
             return false;
+        }
+    }
+
+    private long bufferedAheadNow() {
+        final BufferingProvider provider = bufferingProvider;
+        if (provider == null) {
+            return 0;
+        }
+        try {
+            return Math.max(0, provider.bufferedAheadMs());
+        } catch (Throwable e) {
+            return 0;
         }
     }
 

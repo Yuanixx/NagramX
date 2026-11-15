@@ -189,6 +189,13 @@ public class NekoConfig {
      * strictly local-only (no range request under any circumstance).
      */
     public static ConfigItem videoPreviewNetworkFetch = addConfig("videoPreviewNetworkFetch", configTypeBool, true);
+    /**
+     * Preview range-fetch aggressiveness: 0 = network layer off for new
+     * sessions, 1 = conservative (fetches pause while playback buffers),
+     * 2 = aggressive (a healthy buffer lets fetches continue). The master
+     * switch above still wins: it makes the network layer dark regardless.
+     */
+    public static ConfigItem videoPreviewFetchAggressiveness = addConfig("videoPreviewFetchAggressiveness", configTypeInt, 1);
     public static ConfigItem uploadBoost = addConfig("uploadBoost", configTypeBool, false);
     public static ConfigItem useOSMDroidMap = addConfig("useOSMDroidMap", configTypeBool, false);
     public static ConfigItem mapDriftingFixForGoogleMaps = addConfig("mapDriftingFixForGoogleMaps", configTypeBool, true);

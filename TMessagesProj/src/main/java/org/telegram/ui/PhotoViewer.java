@@ -9993,7 +9993,21 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
                 FileLog.d("ABPV: showPreview local=" + (localFile != null ? localFile.getName() + " len=" + localFile.length() : "null") + " size=" + getVideoStreamSize());
             }
             videoSeekFramePreview.setBufferingProvider(
-                    () -> videoPlayer != null && videoPlayer.isBuffering());
+                    new VideoSeekFramePreview.BufferingProvider() {
+                        @Override
+                        public boolean isBuffering() {
+                            return videoPlayer != null && videoPlayer.isBuffering();
+                        }
+
+                        @Override
+                        public long bufferedAheadMs() {
+                            if (videoPlayer == null) {
+                                return 0;
+                            }
+                            return Math.max(0, videoPlayer.getBufferedPosition()
+                                    - videoPlayer.getCurrentPosition());
+                        }
+                    });
             // Ask the seek bar whether it is pressed instead of trusting the
             // preview's own dragging flag: a single missed ACTION_UP used to
             // leave the bubble on screen until the user tapped it away.

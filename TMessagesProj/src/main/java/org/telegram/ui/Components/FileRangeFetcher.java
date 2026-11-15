@@ -58,6 +58,11 @@ public final class FileRangeFetcher {
     private static final long MIN_REQUEST_GAP_MS_IDLE = 250;
     /** Server flood wait (420): no range request goes out before this time. */
     private static volatile long floodCooldownUntilMs;
+
+    /** True while a server flood wait is still cooling down. */
+    public static boolean isCoolingDown() {
+        return System.currentTimeMillis() < floodCooldownUntilMs;
+    }
     private static volatile long lastRequestAt;
     /** Makes the request gap hold even when both preview threads ask at once. */
     private static final Object rateLock = new Object();

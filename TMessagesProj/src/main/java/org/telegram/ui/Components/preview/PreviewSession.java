@@ -30,6 +30,8 @@ import org.telegram.tgnet.TLRPC;
 import org.telegram.ui.Components.FileRangeFetcher;
 import org.telegram.ui.Components.MoovKeyframeParser;
 
+import tw.nekomimi.nekogram.NekoConfig;
+
 import java.io.File;
 import java.io.RandomAccessFile;
 import java.util.ArrayList;
@@ -71,6 +73,12 @@ public final class PreviewSession {
     private static final long REMOTE_FETCH_TIMEOUT_MS = 2500;
     /** How often the prefetch thread re-checks the drag position. */
     private static final long REMOTE_PREFETCH_WAIT_MS = 200;
+    /** Aggressive tier: the buffer must cover the next 8 seconds of playback. */
+    private static final long AGGRESSIVE_MIN_BUFFERED_AHEAD_MS = 8000;
+    /** Aggressive tier: playback must have been stall-free for 3 seconds. */
+    private static final long AGGRESSIVE_MIN_STABLE_MS = 3000;
+    /** Bound on how long the fetch gate may hold a request before letting it through. */
+    private static final long FETCH_GATE_MAX_WAIT_MS = 2000;
     /**
      * Frames farther than this from the finger are not shown by the bubble,
      * so the network layer does not fetch them while dragging either.
@@ -129,6 +137,9 @@ public final class PreviewSession {
     private volatile long desiredMs = -1;
     private volatile boolean dragging;
     private volatile boolean buffering;
+    /** Playback health hints pushed by the UI poll; read by the fetch gate. */
+    private volatile long bufferedAheadMs;
+    private volatile long playbackStableMs;
     private volatile boolean stopped;
     private volatile long planDurationMs;
     private volatile ThumbnailScheduler scheduler;
@@ -672,7 +683,7 @@ public final class PreviewSession {
                 if (stopped || prefetchStopped) {
                     return;
                 }
-                if (!dragging || desiredMs < 0 || remoteDisabled) {
+                if (!dragging || desiredMs < 0 || remoteDisabled || previewFetchBlocked()) {
                     waitRemoteLocked(REMOTE_PREFETCH_WAIT_MS);
                     continue;
                 }
@@ -714,7 +725,7 @@ public final class PreviewSession {
                         return;
                     }
                     if (frontier < 0 || !dragging || desiredMs < 0 || remoteDisabled
-                            || !scanEligibleLocked(prepared)) {
+                            || !scanEligibleLocked(prepared) || previewFetchBlocked()) {
                         continue;
                     }
                     if (!budgetAllowsLocked(expectedFetchBytes(frontier, remoteScanBytes))) {
@@ -1012,7 +1023,8 @@ public final class PreviewSession {
      * flight it waits for it instead of issuing a duplicate request.
      */
     private byte[] fetchRemoteSync(long offset, int size, long timeMs) {
-        if (size <= 0 || offset < 0 || stopped || prefetchStopped || remoteDisabled) {
+        if (size <= 0 || offset < 0 || stopped || prefetchStopped || remoteDisabled
+                || previewFetchBlocked()) {
             return null;
         }
         if (!withinRemoteWindow(timeMs)) {
@@ -1066,7 +1078,7 @@ public final class PreviewSession {
                     return null;
                 }
             }
-            if (remoteDisabled || stopped || prefetchStopped) {
+            if (remoteDisabled || stopped || prefetchStopped || previewFetchBlocked()) {
                 return null;
             }
             if (!budgetAllowsLocked(expectedFetchBytes(offset, size))) {
@@ -1433,6 +1445,34 @@ public final class PreviewSession {
         } catch (Throwable e) {
             return REMOTE_BUDGET_BYTES;
         }
+    }
+
+    /** Called from the UI poll; the aggressiveness gate reads these hints. */
+    public void setPlaybackHint(long bufferedAhead, long stableMs) {
+        bufferedAheadMs = bufferedAhead;
+        playbackStableMs = stableMs;
+    }
+
+    /**
+     * Aggressiveness gate on top of the rate/flood/budget limits already
+     * enforced by FileRangeFetcher. 0 = the network layer stays dark for this
+     * session, 1 = fetches pause while playback buffers, 2 = a healthy buffer
+     * lets fetches continue.
+     */
+    private boolean previewFetchBlocked() {
+        final int mode = NekoConfig.videoPreviewFetchAggressiveness.Int();
+        if (mode == 0) {
+            return true;
+        }
+        if (!buffering) {
+            return false;
+        }
+        if (mode == 1) {
+            return true;
+        }
+        return bufferedAheadMs < AGGRESSIVE_MIN_BUFFERED_AHEAD_MS
+                || playbackStableMs < AGGRESSIVE_MIN_STABLE_MS
+                || FileRangeFetcher.isCoolingDown();
     }
 
     /**
