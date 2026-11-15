@@ -29,6 +29,7 @@ import java.io.File;
 import java.io.RandomAccessFile;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.function.BooleanSupplier;
 
 /**
  * Fetches a small byte range of a document and returns it, without touching the
@@ -67,6 +68,8 @@ public final class FileRangeFetcher {
      */
     private static final long MIN_REQUEST_GAP_MS_ACTIVE = 1000;
     private static final long MIN_REQUEST_GAP_MS_IDLE = 250;
+    /** A premium-throttled account keeps one request every two seconds. */
+    private static final long PREMIUM_MIN_GAP_MS = 2000;
     /** Server flood wait (420): no range request goes out before this time. */
     private static volatile long floodCooldownUntilMs;
 
@@ -108,7 +111,26 @@ public final class FileRangeFetcher {
     public static final class FetchHandle {
         volatile int token;
         volatile boolean cancelled;
+        /**
+         * Optional staleness probe. When it returns true the request is
+         * dropped before it is sent and is not counted as a failure: a drag
+         * moved the finger away, so the bytes would be wasted.
+         */
+        /** Public so callers in sub-packages can install a probe. */
+        public volatile BooleanSupplier stale;
         private volatile CountDownLatch latch;
+
+        public boolean isStale() {
+            final BooleanSupplier probe = stale;
+            if (probe == null) {
+                return false;
+            }
+            try {
+                return probe.getAsBoolean();
+            } catch (Throwable e) {
+                return false;
+            }
+        }
 
         /**
          * Cancels the in-flight request. ConnectionsManager silently drops the
@@ -252,9 +274,17 @@ public final class FileRangeFetcher {
         return lastFailureText.get();
     }
 
-    /** True when the failure text names a flood wait (code 420). */
+    /** True when the failure text names a server flood wait (code 420). */
     public static boolean isFloodWait(String text) {
-        return text != null && text.contains("FLOOD");
+        return text != null && (text.contains("FLOOD_WAIT")
+                || text.contains("FLOOD_PREMIUM_WAIT"));
+    }
+
+    /** True when a premium-only flood wait was seen; the account is throttled. */
+    private static volatile boolean premiumSuspected;
+
+    static boolean isPremiumSuspected() {
+        return premiumSuspected;
     }
 
     /**
@@ -298,11 +328,19 @@ public final class FileRangeFetcher {
      * so the gap holds across both.
      */
     private static boolean awaitRateSlot(boolean downloadActive, FetchHandle handle) {
-        final long gap = downloadActive
+        final long baseGap = downloadActive
                 ? MIN_REQUEST_GAP_MS_ACTIVE : MIN_REQUEST_GAP_MS_IDLE;
+        // Once the server throttles this account with a premium-only wait,
+        // keep one request every two seconds for the rest of the run.
+        final long gap = premiumSuspected
+                ? Math.max(baseGap, PREMIUM_MIN_GAP_MS) : baseGap;
         while (true) {
             if (handle != null && handle.cancelled) {
                 lastFailureText.set("cancelled");
+                return false;
+            }
+            if (handle != null && handle.isStale()) {
+                lastFailureText.set("stale");
                 return false;
             }
             final long wait;
@@ -356,17 +394,23 @@ public final class FileRangeFetcher {
                 lastFailureText.set("cancelled before send");
                 return null;
             }
+            if (handle.isStale()) {
+                lastFailureText.set("stale");
+                return null;
+            }
         }
         final byte[][] result = new byte[1][];
         final String[] failure = new String[1];
         final String[] responseClass = new String[1];
         final int[] responseBytes = new int[1];
         final int[] failureCode = new int[1];
+        final boolean[] callbackFired = new boolean[1];
 
         FileLog.d("ABPV: range request off=" + aligned + " limit=" + limit
                 + " delta=" + delta);
 
         final int requestToken = ConnectionsManager.getInstance(account).sendRequest(request, (response, error, responseTime) -> {
+            callbackFired[0] = true;
             try {
                 if (error != null) {
                     failure[0] = error.text;
@@ -456,20 +500,37 @@ public final class FileRangeFetcher {
             return null;
         }
         if (result[0] == null) {
-            lastFailureText.set(failure[0]);
-            if (isFloodWait(failure[0])) {
-                final int seconds = parseFloodSeconds(failure[0]);
-                final long cooldownMs = (seconds > 0 ? seconds * 1000L : 1000L) + 2000L;
+            // A cancelled or dropped request leaves both fields null; name it
+            // instead of publishing a null that reads like a silent network
+            // failure. callback=0 means the completion never arrived, i.e. the
+            // request was cancelled before the server answered.
+            final String reason = failure[0] != null
+                    ? failure[0]
+                    : (callbackFired[0] ? "no-response" : "cancelled");
+            lastFailureText.set(reason);
+            if (isFloodWait(reason)) {
+                final int seconds = parseFloodSeconds(reason);
+                // A premium-only wait is the server telling a free account to
+                // slow down; it grows on repeat (7s -> 11s) and deserves a much
+                // longer park than the generic flood wait.
+                final boolean premium = reason.contains("PREMIUM");
+                final long cooldownMs = premium
+                        ? Math.max(30_000L, seconds * 2000L + 2000L)
+                        : (seconds > 0 ? seconds * 1000L : 1000L) + 2000L;
                 floodCooldownUntilMs = Math.max(floodCooldownUntilMs,
                         System.currentTimeMillis() + cooldownMs);
-                FileLog.d("ABPV: range flood wait text=" + failure[0]
-                        + " cooldown=" + cooldownMs + "ms");
+                if (premium) {
+                    premiumSuspected = true;
+                }
+                FileLog.d("ABPV: range flood wait text=" + reason
+                        + " premium=" + premium + " cooldown=" + cooldownMs + "ms");
             }
             FileLog.d("ABPV: range fetch failed off=" + aligned + " aligned=" + aligned
                     + " limit=" + limit + " dc=" + dcId
-                    + " size=" + document.size + " reason=" + failure[0]
+                    + " size=" + document.size + " reason=" + reason
                     + " code=" + failureCode[0]
-                    + " cls=" + responseClass[0] + " bytes=" + responseBytes[0]);
+                    + " cls=" + responseClass[0] + " bytes=" + responseBytes[0]
+                    + " callback=" + (callbackFired[0] ? 1 : 0));
         } else {
             FileLog.d("ABPV: range ok off=" + aligned + " aligned=" + aligned
                     + " limit=" + limit + " dc=" + dcId

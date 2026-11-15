@@ -88,8 +88,12 @@ public final class PreviewSession {
     private static final int MAX_SCAN_FETCH_BYTES = 4 * 1024 * 1024;
     /** Consecutive real failures after which this session goes local-only. */
     private static final int REMOTE_MAX_FAILURES = 3;
-    /** Server flood waits after which this session goes local-only. */
+    /** Server flood waits after which this session parks the network layer. */
     private static final int REMOTE_MAX_FLOODS = 2;
+    /** How long the network layer stays dark after a flood streak. */
+    private static final long REMOTE_FLOOD_COOLDOWN_MS = 60_000L;
+    /** How long it stays dark after a plain failure streak. */
+    private static final long REMOTE_FAILURE_COOLDOWN_MS = 30_000L;
 
     private static final class Prepared {
         final FrameDecoder decoder;
@@ -146,7 +150,18 @@ public final class PreviewSession {
     private volatile ThumbnailScheduler scheduler;
     /** Set once in prepare() on the scheduler thread; null means local only. */
     private RangeSupplier remoteSupplier;
-    private volatile boolean remoteDisabled;
+    /**
+     * Wall-clock deadline of the network-layer cooldown; 0 means allowed.
+     * A flood or a failure streak parks the layer instead of disabling it for
+     * the whole session, so a free account can recover once the server calms
+     * down.
+     */
+    private volatile long remoteDisabledUntilMs;
+    /**
+     * True once a cooldown was set. The next request after the cooldown acts
+     * as the recovery probe: success clears the streak, failure parks again.
+     */
+    private volatile boolean remoteProbePending;
     private volatile int remoteFloodWaits;
     private volatile boolean remoteBudgetLogged;
     private long remoteBudget = REMOTE_BUDGET_BYTES;
@@ -270,37 +285,14 @@ public final class PreviewSession {
         desiredMs = timeMs;
         if (timeMs != previous) {
             demandGeneration++;
-            // A request for the old position must not hold the decoder for
-            // its full timeout: the finger already moved somewhere else. Keep
-            // it while the nearest keyframe is still the one being fetched,
-            // otherwise a slow drag would cancel its own request every tick.
-            final FileRangeFetcher.FetchHandle sync = decoderFetchHandle;
-            final long syncTime = decoderFetchTimeMs;
-            if (sync != null && timeMs >= 0 && syncTime >= 0) {
-                final long nearest = nearestKeyframeTime(timeMs);
-                // The frame is stale when it is no longer the keyframe the
-                // bubble would show; with an index that is the whole rule,
-                // however far it sits.
-                final boolean stale = nearest >= 0
-                        ? nearest != syncTime
-                        : Math.abs(syncTime - timeMs) > remoteWindowLimit();
-                if (stale) {
-                    sync.cancel();
-                }
-            }
-            final FileRangeFetcher.FetchHandle ahead = prefetchHandle;
-            final long aheadTime = prefetchTimeMs;
-            if (ahead != null && timeMs >= 0 && aheadTime >= 0) {
-                final long nearest = nearestKeyframeTime(timeMs);
-                final boolean stale = nearest >= 0
-                        ? nearest != aheadTime
-                        : Math.abs(aheadTime - timeMs) > remoteWindowLimit();
-                if (stale) {
-                    // The finger wants another frame now; let the prefetch
-                    // thread pick the new nearest instead of finishing this.
-                    ahead.cancel();
-                }
-            }
+            // The request for the old position is not cancelled here. A drag
+            // changes the desired position many times per second, while one
+            // range request needs hundreds of milliseconds: cancelling on
+            // every tick meant no request ever reached the server. The handle
+            // carries a staleness probe instead (see FetchHandle.stale), which
+            // drops the request only if it has not been sent yet; an in-flight
+            // block is allowed to finish and its bytes land in the cache for
+            // the next time the finger visits this position.
             synchronized (remoteLock) {
                 remoteLock.notifyAll();
             }
@@ -353,7 +345,7 @@ public final class PreviewSession {
                 + " cacheHits=" + remoteCacheHits.get()
                 + " bytes=" + remoteBytesFetched.get()
                 + " floods=" + remoteFloodWaits
-                + " disabled=" + remoteDisabled);
+                + " cooling=" + isRemoteCoolingDown());
     }
 
     private void run() {
@@ -387,7 +379,7 @@ public final class PreviewSession {
                     + " duration=" + prepared.plan.durationMs
                     + " keyframes=" + (prepared.plan.keyframeTimesMs != null
                     ? prepared.plan.keyframeTimesMs.length : 0)
-                    + " remote=" + (remoteSupplier != null && !remoteDisabled));
+                    + " remote=" + (remoteSupplier != null && !isRemoteCoolingDown()));
             startRemotePrefetch(prepared);
             worker.run();
         } catch (Throwable e) {
@@ -472,7 +464,7 @@ public final class PreviewSession {
                 // retried; the supplier disables itself after repeated
                 // failures, budget exhaustion or flood waits, so this cannot
                 // turn into an endless loop.
-                if (remoteSupplier != null && !remoteDisabled
+                if (remoteSupplier != null && !isRemoteCoolingDown()
                         && remoteBytesFetched.get() < remoteBudget) {
                     for (MoovKeyframeParser.Keyframe keyframe : fresh.track.keyframes) {
                         if (!store.containsTime(keyframe.timeMs)) {
@@ -520,6 +512,15 @@ public final class PreviewSession {
             // whatever ranges the downloader already filled.
             if (declaredSize > 0) {
                 source = KeyframeSource.read(file);
+                if (source == null && !stopped && !isRemoteCoolingDown()
+                        && declaredSize > file.length()
+                        && NekoConfig.videoPreviewTailMoov.Bool()) {
+                    // The directory sits past the downloaded prefix (a tail
+                    // moov file). Probe the last blocks once so the range
+                    // fetcher has a keyframe table to work with; a failed
+                    // probe keeps the retriever path.
+                    source = TailMoovFetcher.fetch(document, account, declaredSize);
+                }
             }
             final boolean indexUsable = source != null && source.track != null
                     && source.track.isAvcOrHevc() && source.track.hasCodecConfig()
@@ -691,7 +692,8 @@ public final class PreviewSession {
                 if (stopped || prefetchStopped) {
                     return;
                 }
-                if (!dragging || desiredMs < 0 || remoteDisabled || previewFetchBlocked()) {
+                if (!dragging || desiredMs < 0 || isRemoteCoolingDown()
+                        || previewFetchBlocked()) {
                     waitRemoteLocked(REMOTE_PREFETCH_WAIT_MS);
                     continue;
                 }
@@ -732,7 +734,7 @@ public final class PreviewSession {
                     if (stopped || prefetchStopped) {
                         return;
                     }
-                    if (frontier < 0 || !dragging || desiredMs < 0 || remoteDisabled
+                    if (frontier < 0 || !dragging || desiredMs < 0 || isRemoteCoolingDown()
                             || !scanEligibleLocked(prepared) || previewFetchBlocked()) {
                         continue;
                     }
@@ -754,6 +756,15 @@ public final class PreviewSession {
             final int fetchLength = target != null ? target.size : scanLength;
             final long fetchTimeMs = target != null ? target.timeMs : -1;
             final FileRangeFetcher.FetchHandle handle = new FileRangeFetcher.FetchHandle();
+            if (target != null) {
+                // A drag can move dozens of times per second. Instead of
+                // cancelling the in-flight request, mark it stale: if it has
+                // not been sent yet it is dropped without counting as a
+                // failure, and if it is already on the wire it finishes and
+                // its bytes serve the timeline later.
+                final long targetTime = target.timeMs;
+                handle.stale = () -> nearestKeyframeTime(desiredMs) != targetTime;
+            }
             prefetchHandle = handle;
             prefetchTimeMs = fetchTimeMs;
             byte[] data = null;
@@ -776,7 +787,7 @@ public final class PreviewSession {
                         prefetchTimeMs = -1;
                     }
                     if (data != null && !stopped && !prefetchStopped) {
-                        remoteFailures = 0;
+                        recordRemoteSuccessLocked();
                         remoteBytesFetched.addAndGet(data.length);
                         remoteFetchCount.incrementAndGet();
                         remotePrefetchCount.incrementAndGet();
@@ -1031,7 +1042,7 @@ public final class PreviewSession {
      * flight it waits for it instead of issuing a duplicate request.
      */
     private byte[] fetchRemoteSync(long offset, int size, long timeMs) {
-        if (size <= 0 || offset < 0 || stopped || prefetchStopped || remoteDisabled
+        if (size <= 0 || offset < 0 || stopped || prefetchStopped || isRemoteCoolingDown()
                 || previewFetchBlocked()) {
             return null;
         }
@@ -1051,7 +1062,7 @@ public final class PreviewSession {
                 // The prefetch thread is already downloading this exact
                 // keyframe. Wait for its result instead of paying twice.
                 final long deadline = SystemClock.elapsedRealtime() + REMOTE_FETCH_TIMEOUT_MS;
-                while (!stopped && !prefetchStopped && !remoteDisabled
+                while (!stopped && !prefetchStopped && !isRemoteCoolingDown()
                         && generation == demandGeneration
                         && withinRemoteWindow(timeMs)) {
                     final byte[] ready = cacheLookupLocked(offset, size);
@@ -1086,7 +1097,8 @@ public final class PreviewSession {
                     return null;
                 }
             }
-            if (remoteDisabled || stopped || prefetchStopped || previewFetchBlocked()) {
+            if (isRemoteCoolingDown() || stopped || prefetchStopped
+                    || previewFetchBlocked()) {
                 return null;
             }
             if (!budgetAllowsLocked(expectedFetchBytes(offset, size))) {
@@ -1096,6 +1108,9 @@ public final class PreviewSession {
                 return null;
             }
             handle = new FileRangeFetcher.FetchHandle();
+            // Drop the request only if it has not been sent yet; a sent block
+            // finishes and its bytes stay in the cache for the next visit.
+            handle.stale = () -> generation != demandGeneration;
             decoderFetchTimeMs = timeMs;
             decoderFetchHandle = handle;
         }
@@ -1119,7 +1134,7 @@ public final class PreviewSession {
                 }
                 if (data != null && !stopped && !prefetchStopped) {
                     cachePutLocked(offset, data);
-                    remoteFailures = 0;
+                    recordRemoteSuccessLocked();
                     remoteBytesFetched.addAndGet(data.length);
                     remoteFetchCount.incrementAndGet();
                     PreviewLog.d("SeekPreview: remote keyframe off=" + offset
@@ -1137,22 +1152,48 @@ public final class PreviewSession {
 
     /** Guarded by remoteLock. */
     private void recordRemoteFailureLocked(String text) {
+        final long now = System.currentTimeMillis();
         if (FileRangeFetcher.isFloodWait(text)) {
             remoteFloodWaits++;
-            if (remoteFloodWaits >= REMOTE_MAX_FLOODS) {
-                remoteDisabled = true;
-                PreviewLog.d("SeekPreview: remote off after flood wait #"
-                        + remoteFloodWaits);
+            if (remoteFloodWaits >= REMOTE_MAX_FLOODS || remoteProbePending) {
+                // Second flood, or the recovery probe came back flooded:
+                // park the layer and wait for a clean probe later.
+                remoteDisabledUntilMs = now + REMOTE_FLOOD_COOLDOWN_MS;
+                remoteFloodWaits = 0;
+                remoteProbePending = true;
+                PreviewLog.d("SeekPreview: remote cooldown "
+                        + REMOTE_FLOOD_COOLDOWN_MS + "ms after flood");
             }
         } else if (text == null || (!text.contains("cancel")
-                && !text.contains("interrupt"))) {
+                && !text.contains("interrupt")
+                && !text.contains("stale")
+                && !text.contains("FLOOD_COOLDOWN")
+                && !text.contains("disabled"))) {
             remoteFailures++;
-            if (remoteFailures >= REMOTE_MAX_FAILURES) {
-                remoteDisabled = true;
-                PreviewLog.d("SeekPreview: remote off after "
-                        + remoteFailures + " failures");
+            if (remoteFailures >= REMOTE_MAX_FAILURES || remoteProbePending) {
+                remoteDisabledUntilMs = now + REMOTE_FAILURE_COOLDOWN_MS;
+                remoteFailures = 0;
+                remoteProbePending = true;
+                PreviewLog.d("SeekPreview: remote cooldown "
+                        + REMOTE_FAILURE_COOLDOWN_MS + "ms after failures");
             }
         }
+    }
+
+    /** Guarded by remoteLock. Clears the streak and confirms a recovery probe. */
+    private void recordRemoteSuccessLocked() {
+        if (remoteProbePending) {
+            remoteProbePending = false;
+            PreviewLog.d("SeekPreview: remote probe ok");
+        }
+        remoteFloodWaits = 0;
+        remoteFailures = 0;
+    }
+
+    /** True while the network layer is parked after a flood or failure streak. */
+    private boolean isRemoteCoolingDown() {
+        final long until = remoteDisabledUntilMs;
+        return until != 0L && System.currentTimeMillis() < until;
     }
 
     /**
