@@ -49,6 +49,17 @@ public final class FileRangeFetcher {
     private static final int OFFSET_ALIGN = 4096;
     /** Request granularity. 256KB divides 1MB evenly, which the server requires. */
     public static final int BLOCK = 256 * 1024;
+
+    /**
+     * The granularity actually used. Configurable for the 64/128KB experiment:
+     * the server only accepts limits that divide 1MB evenly, so anything else
+     * falls back to the default 256KB.
+     */
+    public static int blockBytes() {
+        final int kb = tw.nekomimi.nekogram.NekoConfig.videoPreviewFetchBlockKb.Int();
+        final int bytes = kb * 1024;
+        return (bytes > 0 && (1024 * 1024) % bytes == 0) ? bytes : BLOCK;
+    }
     /**
      * Minimum gap between two range requests. While the video downloads the
      * preview yields to playback and keeps one request per second; when the
@@ -167,13 +178,13 @@ public final class FileRangeFetcher {
         // failed request in the last capture had exactly that shape. Asking for
         // a whole 256KB block removes the whole class of problem, and the server
         // simply returns fewer bytes near the end of the file.
-        final long aligned = (offset / BLOCK) * BLOCK;
+        final long aligned = (offset / blockBytes()) * blockBytes();
         final int delta = (int) (offset - aligned);
 
         // How many whole blocks does the caller need? A keyframe can easily
         // span more than one, and a fetch that stops after the first block hands
         // the decoder a truncated payload.
-        final int blocks = (int) ((delta + length + BLOCK - 1L) / BLOCK);
+        final int blocks = (int) ((delta + length + blockBytes() - 1L) / blockBytes());
 
         final TLRPC.InputFileLocation location = resolveLocation(account, document);
         if (location == null) {
@@ -185,7 +196,7 @@ public final class FileRangeFetcher {
 
         if (blocks <= 1) {
             final byte[] slice = fetchOneBlock(account, document, location,
-                    aligned, delta, BLOCK, timeoutMs, handle, dcId);
+                    aligned, delta, blockBytes(), timeoutMs, handle, dcId);
             if (slice == null && allowRetry && lastFailureText.get() != null
                     && FileRefController.isFileRefError(lastFailureText.get())) {
                 // The reference expired. Another part of the app may already
@@ -215,10 +226,10 @@ public final class FileRangeFetcher {
                         + (b + 1) + "/" + blocks);
                 return null;
             }
-            final long blockAligned = aligned + (long) b * BLOCK;
+            final long blockAligned = aligned + (long) b * blockBytes();
             final int blockDelta = (b == 0) ? delta : 0;
             final byte[] chunk = fetchOneBlock(account, document, location,
-                    blockAligned, blockDelta, BLOCK, timeoutMs, handle, dcId);
+                    blockAligned, blockDelta, blockBytes(), timeoutMs, handle, dcId);
             if (chunk == null) {
                 FileLog.d("ABPV: range multi-block failed at block " + (b + 1) + "/" + blocks
                         + " aligned=" + blockAligned);
@@ -544,9 +555,9 @@ public final class FileRangeFetcher {
         if (document == null) {
             return;
         }
-        FileLog.d("ABPV: range probe from 0 limit=" + BLOCK + " dc=" + document.dc_id
+        FileLog.d("ABPV: range probe from 0 limit=" + blockBytes() + " dc=" + document.dc_id
                 + " size=" + document.size);
-        fetchSync(account, document, 0, BLOCK, timeoutMs);
+        fetchSync(account, document, 0, blockBytes(), timeoutMs);
     }
 
     private static TLRPC.InputFileLocation resolveLocation(int account, TLRPC.Document document) {

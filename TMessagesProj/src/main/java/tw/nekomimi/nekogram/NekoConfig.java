@@ -202,6 +202,13 @@ public class NekoConfig {
      * on screen. Writes go to cache/seek_preview and are trimmed to 64MB.
      */
     public static ConfigItem videoPreviewDiskCache = addConfig("videoPreviewDiskCache", configTypeBool, true);
+    /**
+     * Range request granularity in KB for the preview fetcher. Only values
+     * that divide 1MB evenly work (64, 128, 256...); anything else falls back
+     * to 256. Smaller blocks waste fewer bytes on sparse keyframes but issue
+     * more requests.
+     */
+    public static ConfigItem videoPreviewFetchBlockKb = addConfig("videoPreviewFetchBlockKb", configTypeInt, 256);
     public static ConfigItem uploadBoost = addConfig("uploadBoost", configTypeBool, false);
     public static ConfigItem useOSMDroidMap = addConfig("useOSMDroidMap", configTypeBool, false);
     public static ConfigItem mapDriftingFixForGoogleMaps = addConfig("mapDriftingFixForGoogleMaps", configTypeBool, true);
