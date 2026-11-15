@@ -214,7 +214,7 @@ public class NekoConfig {
      * downloaded prefix, probe the last blocks of the file once to fetch it.
      * Bounded to two request blocks; bigger atoms fall back to the retriever.
      */
-    public static ConfigItem videoPreviewTailMoov = addConfig("videoPreviewTailMoov", configTypeBool, true);
+    public static ConfigItem videoPreviewTailMoov = addConfig("videoPreviewTailMoov", configTypeBool, false);
     public static ConfigItem uploadBoost = addConfig("uploadBoost", configTypeBool, false);
     public static ConfigItem useOSMDroidMap = addConfig("useOSMDroidMap", configTypeBool, false);
     public static ConfigItem mapDriftingFixForGoogleMaps = addConfig("mapDriftingFixForGoogleMaps", configTypeBool, true);
