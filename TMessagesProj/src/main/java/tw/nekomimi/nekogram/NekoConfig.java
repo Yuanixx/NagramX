@@ -196,6 +196,12 @@ public class NekoConfig {
      * switch above still wins: it makes the network layer dark regardless.
      */
     public static ConfigItem videoPreviewFetchAggressiveness = addConfig("videoPreviewFetchAggressiveness", configTypeInt, 1);
+    /**
+     * Persists decoded preview thumbnails to the app's cache directory so the
+     * next session of the same message starts with the coarse layer already
+     * on screen. Writes go to cache/seek_preview and are trimmed to 64MB.
+     */
+    public static ConfigItem videoPreviewDiskCache = addConfig("videoPreviewDiskCache", configTypeBool, true);
     public static ConfigItem uploadBoost = addConfig("uploadBoost", configTypeBool, false);
     public static ConfigItem useOSMDroidMap = addConfig("useOSMDroidMap", configTypeBool, false);
     public static ConfigItem mapDriftingFixForGoogleMaps = addConfig("mapDriftingFixForGoogleMaps", configTypeBool, true);

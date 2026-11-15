@@ -122,6 +122,7 @@ public final class PreviewSession {
     private final TLRPC.Document document;
     private final int account;
     private final Uri uri;
+    private final PreviewDiskCache.Writer diskSink;
     private Listener listener;
     private final ThumbnailStore store = new ThumbnailStore();
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
@@ -202,7 +203,8 @@ public final class PreviewSession {
     private static final int MAX_SCAN_BOXES = 4096;
 
     public PreviewSession(Context context, File file, long declaredSize,
-                          TLRPC.Document document, int account, Listener listener) {
+                          TLRPC.Document document, int account, Listener listener,
+                          PreviewDiskCache.Writer diskSink) {
         this.context = context;
         this.file = file;
         this.declaredSize = declaredSize;
@@ -210,10 +212,12 @@ public final class PreviewSession {
         this.account = account;
         this.uri = null;
         this.listener = listener;
+        this.diskSink = diskSink;
         start();
     }
 
-    public PreviewSession(Context context, Uri uri, Listener listener) {
+    public PreviewSession(Context context, Uri uri, Listener listener,
+                          PreviewDiskCache.Writer diskSink) {
         this.context = context;
         this.file = null;
         this.declaredSize = 0;
@@ -221,6 +225,7 @@ public final class PreviewSession {
         this.account = -1;
         this.uri = uri;
         this.listener = listener;
+        this.diskSink = diskSink;
         start();
     }
 
@@ -366,7 +371,7 @@ public final class PreviewSession {
             final ThumbnailScheduler worker = new ThumbnailScheduler(
                     prepared.plan, decoder, store,
                     THUMB_MAX_WIDTH, THUMB_MAX_HEIGHT, this::onThumbnail,
-                    makeRefill(prepared));
+                    makeRefill(prepared), diskSink);
             worker.setDesiredPosition(desiredMs);
             worker.setDragging(dragging);
             worker.setBuffering(buffering);
@@ -374,6 +379,9 @@ public final class PreviewSession {
             if (stopped) {
                 worker.stop();
                 return;
+            }
+            if (diskSink != null) {
+                diskSink.loadInto(store);
             }
             PreviewLog.d("SeekPreview: session decoder=" + decoder.name()
                     + " duration=" + prepared.plan.durationMs

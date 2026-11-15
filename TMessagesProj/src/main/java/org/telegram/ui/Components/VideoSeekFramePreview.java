@@ -31,6 +31,7 @@ import android.view.View;
 import org.telegram.messenger.AndroidUtilities;
 import org.telegram.messenger.FileLog;
 import org.telegram.tgnet.TLRPC;
+import org.telegram.ui.Components.preview.PreviewDiskCache;
 import org.telegram.ui.Components.preview.PreviewLog;
 import org.telegram.ui.Components.preview.PreviewSession;
 import org.telegram.ui.Components.preview.Thumbnail;
@@ -282,10 +283,16 @@ public class VideoSeekFramePreview extends View {
         try {
             if (mediaFile != null) {
                 session = new PreviewSession(getContext(), mediaFile, mediaDeclaredSize,
-                        mediaDocument, mediaAccount, this::onSessionThumbnail);
+                        mediaDocument, mediaAccount, this::onSessionThumbnail,
+                        PreviewDiskCache.writerFor(mediaDialogId, mediaMessageId,
+                                mediaDocument != null ? mediaDocument.id : 0,
+                                mediaDeclaredSize));
             } else if (mediaUri != null) {
                 session = new PreviewSession(getContext(), mediaUri,
-                        this::onSessionThumbnail);
+                        this::onSessionThumbnail,
+                        PreviewDiskCache.writerFor(mediaDialogId, mediaMessageId,
+                                mediaDocument != null ? mediaDocument.id : 0,
+                                mediaDocument != null ? mediaDocument.size : 0));
             }
         } catch (Throwable e) {
             PreviewLog.e("SeekPreview: open session failed", e);

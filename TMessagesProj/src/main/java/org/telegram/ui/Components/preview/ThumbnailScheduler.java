@@ -112,6 +112,7 @@ public final class ThumbnailScheduler {
     private final ThumbnailStore store;
     private final Callback callback;
     private final IndexRefill indexRefill;
+    private final PreviewDiskCache.Writer diskSink;
     private final int maxWidth;
     private final int maxHeight;
 
@@ -131,7 +132,7 @@ public final class ThumbnailScheduler {
 
     public ThumbnailScheduler(Plan plan, FrameDecoder decoder, ThumbnailStore store,
                               int maxWidth, int maxHeight, Callback callback,
-                              IndexRefill refill) {
+                              IndexRefill refill, PreviewDiskCache.Writer diskSink) {
         this.plan = plan;
         this.decoder = decoder;
         this.store = store;
@@ -139,6 +140,7 @@ public final class ThumbnailScheduler {
         this.maxHeight = maxHeight;
         this.callback = callback;
         this.indexRefill = refill;
+        this.diskSink = diskSink;
         this.durationMs = plan != null ? plan.durationMs : 0;
     }
 
@@ -352,6 +354,9 @@ public final class ThumbnailScheduler {
             final Thumbnail thumbnail = new Thumbnail(frame.bitmap, frame.timeMs,
                     frame.keyframeIndex, task.tier);
             store.put(thumbnail, desired >= 0 ? desired : task.timeMs);
+            if (diskSink != null) {
+                diskSink.enqueue(frame.timeMs, frame.bitmap);
+            }
             final Callback cb;
             synchronized (lock) {
                 if (stopped) {
