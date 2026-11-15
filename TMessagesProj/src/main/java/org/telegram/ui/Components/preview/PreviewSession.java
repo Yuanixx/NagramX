@@ -799,7 +799,9 @@ public final class PreviewSession {
                                     + " total=" + remoteBytesFetched.get()
                                     + " ms=" + (SystemClock.elapsedRealtime() - started));
                         }
-                    } else if (!handle.isCancelled() && !stopped && !prefetchStopped) {
+                    } else if (!stopped && !prefetchStopped) {
+                        // Cancelled, stale and local-cooldown results carry
+                        // countsAsFailure=false, so they leave the streak alone.
                         recordRemoteFailureLocked(result);
                     }
                     remoteLock.notifyAll();
@@ -1141,7 +1143,9 @@ public final class PreviewSession {
                             + " size=" + size + " got=" + data.length
                             + " total=" + remoteBytesFetched.get()
                             + " ms=" + (SystemClock.elapsedRealtime() - started));
-                } else if (!handle.isCancelled() && !stopped) {
+                } else if (!stopped) {
+                    // The result decides whether this counts; a drag that moved
+                    // away must not move the failure streak.
                     recordRemoteFailureLocked(result);
                 }
                 remoteLock.notifyAll();

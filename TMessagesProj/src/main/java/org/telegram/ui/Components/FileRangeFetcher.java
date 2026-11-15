@@ -223,6 +223,9 @@ public final class FileRangeFetcher {
          * Cancels the in-flight request. ConnectionsManager silently drops the
          * completion callback on cancel, so this must wake the waiting thread
          * itself instead of waiting for a callback that will never come.
+         *
+         * <p>Only the caller may call this: it marks the fetch as abandoned,
+         * which tells the caller not to count it as a failure.
          */
         public void cancel() {
             final boolean first = !cancelled;
@@ -231,6 +234,29 @@ public final class FileRangeFetcher {
             if (first && t != 0) {
                 // Only actually cancel once; a second call is a no-op apart from
                 // waking the waiter.
+                try {
+                    ConnectionsManager.getInstance(account).cancelRequest(t, true);
+                } catch (Throwable ignore) {
+                }
+            }
+            final CountDownLatch l = latch;
+            if (l != null) {
+                l.countDown();
+            }
+        }
+
+        /**
+         * Stops the native request without changing the outcome.
+         *
+         * <p>Used when this class gives up on a request that must still be
+         * reported as a failure — a timeout. Routing that through
+         * {@link #cancel()} would set the cancelled flag, and the caller would
+         * then treat the timeout as an abandoned fetch and drop it from the
+         * failure streak.
+         */
+        public void abort() {
+            final int t = token;
+            if (t != 0) {
                 try {
                     ConnectionsManager.getInstance(account).cancelRequest(t, true);
                 } catch (Throwable ignore) {
@@ -585,7 +611,7 @@ public final class FileRangeFetcher {
                 // This is not a cancel: the result stays TIMEOUT so it still
                 // counts as a failure.
                 if (handle != null) {
-                    handle.cancel();
+                    handle.abort();
                 } else {
                     try {
                         ConnectionsManager.getInstance(account).cancelRequest(requestToken, true);
@@ -598,7 +624,7 @@ public final class FileRangeFetcher {
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             if (handle != null) {
-                handle.cancel();
+                handle.abort();
             }
             return failure(FetchResult.Status.CANCELLED, 0, -1,
                     "interrupted", false, 1, started);
