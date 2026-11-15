@@ -89,11 +89,12 @@ final class TailMoovFetcher {
         if (length < 16) {
             return null;
         }
-        final byte[] tail = FileRangeFetcher.fetchSync(account, document,
+        final FileRangeFetcher.FetchResult result = FileRangeFetcher.fetchSync(account, document,
                 tailStart, length, FETCH_TIMEOUT_MS, null);
-        if (tail == null || tail.length < 16) {
+        if (!result.ok() || result.data.length < 16) {
             return null;
         }
+        final byte[] tail = result.data;
         final int tag = lastIndexOfMoov(tail);
         if (tag < 4) {
             return null;

@@ -46,6 +46,91 @@ import java.util.function.BooleanSupplier;
  */
 public final class FileRangeFetcher {
 
+    /**
+     * Outcome of one range fetch.
+     *
+     * Callers must classify on {@link Status}, never on {@link #text}: the text
+     * is whatever the server or this class happened to say and is only meant
+     * for logs. {@link #countsAsFailure} spells out whether the outcome should
+     * move a failure streak, because the answer differs per exit (a cancelled
+     * request is not a failure, a malformed response is).
+     */
+    public static final class FetchResult {
+        public enum Status {
+            /** Bytes were delivered. */
+            SUCCESS,
+            /** Caller gave up, or the request was dropped before it was sent. */
+            CANCELLED,
+            /** The request was sent but no reply arrived in time. */
+            TIMEOUT,
+            /** The server answered 420; {@link #floodSeconds} carries its wait. */
+            FLOOD,
+            /** A local cooldown (server flood) is still running; nothing was sent. */
+            LOCAL_COOLDOWN,
+            /** A stale file reference survived the one retry we allow. */
+            RETRY_LIMIT,
+            /** A local switch forbids network use; nothing was sent. */
+            DISABLED,
+            /** Anything else that went wrong. */
+            ERROR
+        }
+
+        public final Status status;
+        /** The bytes, only for {@link Status#SUCCESS}. */
+        public final byte[] data;
+        /** Server error code, 420 for {@link Status#FLOOD}, otherwise 0. */
+        public final int code;
+        /** Seconds the server asked us to wait, -1 when unknown. */
+        public final int floodSeconds;
+        /** Free-form detail for logs only; never used for decisions. */
+        public final String text;
+        /** True when this outcome should count towards the failure streak. */
+        public final boolean countsAsFailure;
+        /** True when a multi-block fetch failed after some blocks landed. */
+        public final boolean partial;
+        /** Number of getFile requests actually sent. */
+        public final int requests;
+        /** Wall time of the whole fetch, retries included. */
+        public final long elapsedMs;
+
+        private FetchResult(Status status, byte[] data, int code, int floodSeconds,
+                            String text, boolean countsAsFailure, boolean partial,
+                            int requests, long startedMs) {
+            this.status = status;
+            this.data = data;
+            this.code = code;
+            this.floodSeconds = floodSeconds;
+            this.text = text;
+            this.countsAsFailure = countsAsFailure;
+            this.partial = partial;
+            this.requests = requests;
+            this.elapsedMs = startedMs > 0
+                    ? Math.max(0L, System.currentTimeMillis() - startedMs) : 0L;
+        }
+
+        public boolean ok() {
+            return status == Status.SUCCESS;
+        }
+
+        /** Same outcome with the accounting of the enclosing fetch filled in. */
+        private FetchResult rewrap(boolean newPartial, int newRequests, long startedMs) {
+            return new FetchResult(status, data, code, floodSeconds, text,
+                    countsAsFailure, newPartial, newRequests, startedMs);
+        }
+    }
+
+    private static FetchResult success(byte[] data, int requests, long startedMs) {
+        return new FetchResult(FetchResult.Status.SUCCESS, data, 0, -1, null,
+                false, false, requests, startedMs);
+    }
+
+    private static FetchResult failure(FetchResult.Status status, int code, int floodSeconds,
+                                       String text, boolean countsAsFailure, int requests,
+                                       long startedMs) {
+        return new FetchResult(status, null, code, floodSeconds, text,
+                countsAsFailure, false, requests, startedMs);
+    }
+
     /** upload.getFile requires 4KB-aligned offsets. */
     private static final int OFFSET_ALIGN = 4096;
     /** Request granularity. 256KB divides 1MB evenly, which the server requires. */
@@ -61,6 +146,7 @@ public final class FileRangeFetcher {
         final int bytes = kb * 1024;
         return (bytes > 0 && (1024 * 1024) % bytes == 0) ? bytes : BLOCK;
     }
+
     /**
      * Minimum gap between two range requests. While the video downloads the
      * preview yields to playback and keeps one request per second; when the
@@ -77,6 +163,7 @@ public final class FileRangeFetcher {
     public static boolean isCoolingDown() {
         return System.currentTimeMillis() < floodCooldownUntilMs;
     }
+
     private static volatile long lastRequestAt;
     /** Makes the request gap hold even when both preview threads ask at once. */
     private static final Object rateLock = new Object();
@@ -86,18 +173,18 @@ public final class FileRangeFetcher {
 
     /**
      * Blocking range fetch. Call from a background thread only.
-     *
-     * @return the requested bytes, or null on failure or timeout
      */
-    public static byte[] fetchSync(int account, TLRPC.Document document,
-                                   long offset, long length, long timeoutMs,
-                                   FetchHandle handle) {
-        return fetchSync(account, document, offset, length, timeoutMs, true, handle);
+    public static FetchResult fetchSync(int account, TLRPC.Document document,
+                                        long offset, long length, long timeoutMs,
+                                        FetchHandle handle) {
+        final long started = System.currentTimeMillis();
+        return fetchSync(account, document, offset, length, timeoutMs, true, handle, started);
     }
 
-    public static byte[] fetchSync(int account, TLRPC.Document document,
-                                   long offset, long length, long timeoutMs) {
-        return fetchSync(account, document, offset, length, timeoutMs, true, null);
+    public static FetchResult fetchSync(int account, TLRPC.Document document,
+                                        long offset, long length, long timeoutMs) {
+        final long started = System.currentTimeMillis();
+        return fetchSync(account, document, offset, length, timeoutMs, true, null, started);
     }
 
     /**
@@ -162,21 +249,20 @@ public final class FileRangeFetcher {
         private int account = -1;
     }
 
-    private static byte[] fetchSync(int account, TLRPC.Document document,
-                                    long offset, long length, long timeoutMs,
-                                    boolean allowRetry, FetchHandle handle) {
+    private static FetchResult fetchSync(int account, TLRPC.Document document,
+                                         long offset, long length, long timeoutMs,
+                                         boolean allowRetry, FetchHandle handle, long started) {
         if (document == null || length <= 0 || account < 0) {
-            return null;
+            return failure(FetchResult.Status.ERROR, 0, -1, "invalid-args", false, 0, started);
         }
         // Master kill switch. Range requests share the download connection with
         // the video's own downloader; when they trip a server-side flood wait
         // (FLOOD_PREMIUM_WAIT_*) the download stalls and the player spins.
         // With this off the preview is local-only and cannot affect playback.
         if (!tw.nekomimi.nekogram.NekoConfig.videoPreviewNetworkFetch.Bool()) {
-            lastFailureText.set("network fetch disabled");
-            return null;
+            return failure(FetchResult.Status.DISABLED, 0, -1,
+                    "network fetch disabled", false, 0, started);
         }
-        lastFailureText.set(null);
         // Range requests share the download connection with the video's own
         // downloader. They are allowed while that download runs, because a
         // preview of a range that has not arrived yet is the whole point, but
@@ -189,8 +275,9 @@ public final class FileRangeFetcher {
         } catch (Throwable ignore) {
         }
         final boolean downloadActive = active != null;
-        if (!awaitRateSlot(downloadActive, handle)) {
-            return null;
+        final FetchResult gate = awaitRateSlot(downloadActive, handle);
+        if (gate != null) {
+            return gate.rewrap(false, 0, started);
         }
         // Fixed blocks, aligned down, always requested in full.
         //
@@ -210,22 +297,25 @@ public final class FileRangeFetcher {
 
         final TLRPC.InputFileLocation location = resolveLocation(account, document);
         if (location == null) {
-            return null;
+            return failure(FetchResult.Status.ERROR, 0, -1, "no-location", true, 0, started);
         }
         final int dcId = document.dc_id > 0
                 ? document.dc_id
                 : ConnectionsManager.DEFAULT_DATACENTER_ID;
 
         if (blocks <= 1) {
-            final byte[] slice = fetchOneBlock(account, document, location,
-                    aligned, delta, blockBytes(), timeoutMs, handle, dcId);
-            if (slice == null && allowRetry && lastFailureText.get() != null
-                    && FileRefController.isFileRefError(lastFailureText.get())) {
+            final FetchResult slice = fetchOneBlock(account, document, location,
+                    aligned, delta, blockBytes(), timeoutMs, handle, dcId, started);
+            if (!slice.ok() && allowRetry
+                    && slice.status == FetchResult.Status.ERROR
+                    && slice.text != null
+                    && FileRefController.isFileRefError(slice.text)) {
                 // The reference expired. Another part of the app may already
                 // have refreshed it, so resolve the location again and retry
                 // once.
-                FileLog.d("ABPV: range retry after file reference error: " + lastFailureText.get());
-                return fetchSync(account, document, offset, length, timeoutMs, false, handle);
+                FileLog.d("ABPV: range retry after file reference error: " + slice.text);
+                return fetchSync(account, document, offset, length, timeoutMs,
+                        false, handle, started);
             }
             return slice;
         }
@@ -239,26 +329,32 @@ public final class FileRangeFetcher {
                 + " delta=" + delta + " blocks=" + blocks + " dc=" + dcId);
         final byte[] out = new byte[(int) length];
         int filled = 0;
+        int sent = 0;
         for (int b = 0; b < blocks; b++) {
             // The first block already passed the rate slot check. Every later
             // block is a separate request, so it waits its turn and stops if a
             // flood cooldown started in the meantime.
-            if (b > 0 && !awaitRateSlot(downloadActive, handle)) {
-                FileLog.d("ABPV: range multi-block stopped at block "
-                        + (b + 1) + "/" + blocks);
-                return null;
+            if (b > 0) {
+                final FetchResult next = awaitRateSlot(downloadActive, handle);
+                if (next != null) {
+                    FileLog.d("ABPV: range multi-block stopped at block "
+                            + (b + 1) + "/" + blocks);
+                    return next.rewrap(filled > 0, sent, started);
+                }
             }
             final long blockAligned = aligned + (long) b * blockBytes();
             final int blockDelta = (b == 0) ? delta : 0;
-            final byte[] chunk = fetchOneBlock(account, document, location,
-                    blockAligned, blockDelta, blockBytes(), timeoutMs, handle, dcId);
-            if (chunk == null) {
-                FileLog.d("ABPV: range multi-block failed at block " + (b + 1) + "/" + blocks
-                        + " aligned=" + blockAligned);
-                return null;
+            final FetchResult chunk = fetchOneBlock(account, document, location,
+                    blockAligned, blockDelta, blockBytes(), timeoutMs, handle, dcId, started);
+            sent += chunk.requests;
+            if (!chunk.ok()) {
+                FileLog.d("ABPV: range multi-block failed at block " + (b + 1)
+                        + "/" + blocks + " aligned=" + blockAligned
+                        + " status=" + chunk.status);
+                return chunk.rewrap(filled > 0, sent, started);
             }
-            final int take = Math.min(chunk.length, out.length - filled);
-            System.arraycopy(chunk, 0, out, filled, take);
+            final int take = Math.min(chunk.data.length, out.length - filled);
+            System.arraycopy(chunk.data, 0, out, filled, take);
             filled += take;
             if (filled >= out.length) {
                 break;
@@ -266,18 +362,7 @@ public final class FileRangeFetcher {
         }
         FileLog.d("ABPV: range multi-block done off=" + offset + " got=" + filled
                 + " want=" + length + " blocks=" + blocks);
-        return out;
-    }
-
-    /** Last failure text, for callers that need to classify the failure. */
-    public static String failureText() {
-        return lastFailureText.get();
-    }
-
-    /** True when the failure text names a server flood wait (code 420). */
-    public static boolean isFloodWait(String text) {
-        return text != null && (text.contains("FLOOD_WAIT")
-                || text.contains("FLOOD_PREMIUM_WAIT"));
+        return success(out, sent, started);
     }
 
     /** True when a premium-only flood wait was seen; the account is throttled. */
@@ -316,18 +401,32 @@ public final class FileRangeFetcher {
         return value;
     }
 
-    /** Last failure text of any block in the current fetch, for the ref-retry check. */
-    private static final ThreadLocal<String> lastFailureText = new ThreadLocal<>();
+    /** Parks every range request once the server answers 420. */
+    private static void applyFloodCooldown(int seconds, String text) {
+        final boolean premium = text != null && text.contains("PREMIUM");
+        final long cooldownMs = premium
+                ? Math.max(30_000L, seconds * 2000L + 2000L)
+                : (seconds > 0 ? seconds * 1000L : 1000L) + 2000L;
+        floodCooldownUntilMs = Math.max(floodCooldownUntilMs,
+                System.currentTimeMillis() + cooldownMs);
+        if (premium) {
+            premiumSuspected = true;
+        }
+        FileLog.d("ABPV: range flood wait text=" + text
+                + " premium=" + premium + " cooldown=" + cooldownMs + "ms");
+    }
 
     /**
-     * Waits for the next request slot. Returns false when the caller was
-     * cancelled or interrupted, or when a server flood wait is still active.
+     * Waits for the next request slot.
+     *
+     * @return null when the slot was claimed, otherwise the reason it was not
+     *         (cancelled, stale, interrupted, or a running flood cooldown).
      * The wait is bounded by the longer gap (one second) and polls in small
      * slices so a cancelled preview does not hold the scheduler. The slot is
      * claimed under a lock: the prefetch and decoder threads share this gate,
      * so the gap holds across both.
      */
-    private static boolean awaitRateSlot(boolean downloadActive, FetchHandle handle) {
+    private static FetchResult awaitRateSlot(boolean downloadActive, FetchHandle handle) {
         final long baseGap = downloadActive
                 ? MIN_REQUEST_GAP_MS_ACTIVE : MIN_REQUEST_GAP_MS_IDLE;
         // Once the server throttles this account with a premium-only wait,
@@ -336,44 +435,45 @@ public final class FileRangeFetcher {
                 ? Math.max(baseGap, PREMIUM_MIN_GAP_MS) : baseGap;
         while (true) {
             if (handle != null && handle.cancelled) {
-                lastFailureText.set("cancelled");
-                return false;
+                return failure(FetchResult.Status.CANCELLED, 0, -1,
+                        "cancelled", false, 0, 0L);
             }
             if (handle != null && handle.isStale()) {
-                lastFailureText.set("stale");
-                return false;
+                return failure(FetchResult.Status.CANCELLED, 0, -1,
+                        "stale", false, 0, 0L);
             }
             final long wait;
             synchronized (rateLock) {
                 final long now = System.currentTimeMillis();
                 if (now < floodCooldownUntilMs) {
-                    lastFailureText.set("FLOOD_COOLDOWN");
-                    return false;
+                    return failure(FetchResult.Status.LOCAL_COOLDOWN, 0, -1,
+                            "cooldown", false, 0, 0L);
                 }
                 wait = lastRequestAt + gap - now;
                 if (wait <= 0) {
                     lastRequestAt = now;
-                    return true;
+                    return null;
                 }
             }
             try {
                 Thread.sleep(Math.min(50L, wait));
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
-                lastFailureText.set("interrupted");
-                return false;
+                return failure(FetchResult.Status.CANCELLED, 0, -1,
+                        "interrupted", false, 0, 0L);
             }
         }
     }
 
     /**
-     * Requests one whole 256KB block and returns the bytes starting at the
-     * caller's offset (the block's leading {@code delta} bytes are stripped).
+     * Requests one whole block and returns the bytes starting at the caller's
+     * offset (the block's leading {@code delta} bytes are stripped).
      */
-    private static byte[] fetchOneBlock(int account, TLRPC.Document document,
-                                        TLRPC.InputFileLocation location,
-                                        long aligned, int delta, int limit,
-                                        long timeoutMs, FetchHandle handle, int dcId) {
+    private static FetchResult fetchOneBlock(int account, TLRPC.Document document,
+                                             TLRPC.InputFileLocation location,
+                                             long aligned, int delta, int limit,
+                                             long timeoutMs, FetchHandle handle, int dcId,
+                                             long started) {
         final TLRPC.TL_upload_getFile request = new TLRPC.TL_upload_getFile();
         request.location = location;
         request.offset = aligned;
@@ -391,12 +491,12 @@ public final class FileRangeFetcher {
             handle.account = account;
             handle.latch = latch;
             if (handle.cancelled) {
-                lastFailureText.set("cancelled before send");
-                return null;
+                return failure(FetchResult.Status.CANCELLED, 0, -1,
+                        "cancelled before send", false, 0, started);
             }
             if (handle.isStale()) {
-                lastFailureText.set("stale");
-                return null;
+                return failure(FetchResult.Status.CANCELLED, 0, -1,
+                        "stale", false, 0, started);
             }
         }
         final byte[][] result = new byte[1][];
@@ -405,6 +505,7 @@ public final class FileRangeFetcher {
         final int[] responseBytes = new int[1];
         final int[] failureCode = new int[1];
         final boolean[] callbackFired = new boolean[1];
+        final boolean[] unsupported = new boolean[1];
 
         FileLog.d("ABPV: range request off=" + aligned + " limit=" + limit
                 + " delta=" + delta);
@@ -422,6 +523,7 @@ public final class FileRangeFetcher {
                     // The file lives on a CDN; serving it needs a second request
                     // to that DC plus hash verification.
                     failure[0] = "cdn redirect (unsupported)";
+                    unsupported[0] = true;
                     return;
                 }
                 if (!(response instanceof TLRPC.TL_upload_file)) {
@@ -478,9 +580,10 @@ public final class FileRangeFetcher {
             if (!latch.await(timeoutMs, TimeUnit.MILLISECONDS)) {
                 FileLog.d("ABPV: range fetch timeout off=" + aligned + " limit=" + limit
                         + " token=" + requestToken);
-                lastFailureText.set("timeout");
                 // The request is still alive in native and would keep
                 // downloading; kill it so it stops eating the download slot.
+                // This is not a cancel: the result stays TIMEOUT so it still
+                // counts as a failure.
                 if (handle != null) {
                     handle.cancel();
                 } else {
@@ -489,55 +592,60 @@ public final class FileRangeFetcher {
                     } catch (Throwable ignore) {
                     }
                 }
-                return null;
+                return failure(FetchResult.Status.TIMEOUT, 0, -1,
+                        "timeout", true, 1, started);
             }
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
-            lastFailureText.set("interrupted");
             if (handle != null) {
                 handle.cancel();
             }
-            return null;
+            return failure(FetchResult.Status.CANCELLED, 0, -1,
+                    "interrupted", false, 1, started);
         }
         if (result[0] == null) {
-            // A cancelled or dropped request leaves both fields null; name it
-            // instead of publishing a null that reads like a silent network
-            // failure. callback=0 means the completion never arrived, i.e. the
-            // request was cancelled before the server answered.
-            final String reason = failure[0] != null
-                    ? failure[0]
-                    : (callbackFired[0] ? "no-response" : "cancelled");
-            lastFailureText.set(reason);
-            if (isFloodWait(reason)) {
+            if (!callbackFired[0]) {
+                // The completion never arrived. Either this class asked for the
+                // cancellation, or the request was dropped on the way out.
+                final boolean cancelled = handle != null && handle.isCancelled();
+                final String text = cancelled ? "cancelled" : "no-response";
+                FileLog.d("ABPV: range fetch failed off=" + aligned + " aligned=" + aligned
+                        + " limit=" + limit + " dc=" + dcId
+                        + " size=" + document.size + " reason=" + text
+                        + " code=" + failureCode[0]
+                        + " cls=" + responseClass[0] + " bytes=" + responseBytes[0]
+                        + " callback=0");
+                return failure(cancelled ? FetchResult.Status.CANCELLED
+                                : FetchResult.Status.TIMEOUT,
+                        0, -1, text, !cancelled, 1, started);
+            }
+            final String reason = failure[0] != null ? failure[0] : "unexpected response";
+            if (failureCode[0] == 420) {
                 final int seconds = parseFloodSeconds(reason);
-                // A premium-only wait is the server telling a free account to
-                // slow down; it grows on repeat (7s -> 11s) and deserves a much
-                // longer park than the generic flood wait.
-                final boolean premium = reason.contains("PREMIUM");
-                final long cooldownMs = premium
-                        ? Math.max(30_000L, seconds * 2000L + 2000L)
-                        : (seconds > 0 ? seconds * 1000L : 1000L) + 2000L;
-                floodCooldownUntilMs = Math.max(floodCooldownUntilMs,
-                        System.currentTimeMillis() + cooldownMs);
-                if (premium) {
-                    premiumSuspected = true;
-                }
-                FileLog.d("ABPV: range flood wait text=" + reason
-                        + " premium=" + premium + " cooldown=" + cooldownMs + "ms");
+                applyFloodCooldown(seconds, reason);
+                FileLog.d("ABPV: range fetch failed off=" + aligned + " aligned=" + aligned
+                        + " limit=" + limit + " dc=" + dcId
+                        + " size=" + document.size + " reason=" + reason
+                        + " code=" + failureCode[0]
+                        + " cls=" + responseClass[0] + " bytes=" + responseBytes[0]
+                        + " callback=1");
+                return failure(FetchResult.Status.FLOOD, 420, seconds,
+                        reason, true, 1, started);
             }
             FileLog.d("ABPV: range fetch failed off=" + aligned + " aligned=" + aligned
                     + " limit=" + limit + " dc=" + dcId
                     + " size=" + document.size + " reason=" + reason
                     + " code=" + failureCode[0]
                     + " cls=" + responseClass[0] + " bytes=" + responseBytes[0]
-                    + " callback=" + (callbackFired[0] ? 1 : 0));
-        } else {
-            FileLog.d("ABPV: range ok off=" + aligned + " aligned=" + aligned
-                    + " limit=" + limit + " dc=" + dcId
-                    + " cls=" + responseClass[0] + " bytes=" + responseBytes[0]
-                    + " delta=" + delta + " got=" + result[0].length);
+                    + " callback=1");
+            return failure(FetchResult.Status.ERROR, failureCode[0], -1,
+                    reason, !unsupported[0], 1, started);
         }
-        return result[0];
+        FileLog.d("ABPV: range ok off=" + aligned + " aligned=" + aligned
+                + " limit=" + limit + " dc=" + dcId
+                + " cls=" + responseClass[0] + " bytes=" + responseBytes[0]
+                + " delta=" + delta + " got=" + result[0].length);
+        return success(result[0], 1, started);
     }
 
     /**
@@ -554,7 +662,7 @@ public final class FileRangeFetcher {
      *         -2 when the range is not fully downloaded
      */
     public static int verifyAgainstLocal(int account, TLRPC.Document document, File localFile,
-                                          long offset, int length, long timeoutMs) {
+                                         long offset, int length, long timeoutMs) {
         if (document == null || localFile == null || length <= 0) {
             return -1;
         }
@@ -572,16 +680,18 @@ public final class FileRangeFetcher {
             return -2;
         }
 
-        final byte[] remote = fetchSync(account, document, offset, length, timeoutMs);
-        if (remote == null) {
-            FileLog.d("ABPV: verify failed off=" + offset + " want=" + length + " (fetch failed)");
+        final FetchResult remote = fetchSync(account, document, offset, length, timeoutMs);
+        if (!remote.ok()) {
+            FileLog.d("ABPV: verify failed off=" + offset + " want=" + length
+                    + " (fetch " + remote.status + ": " + remote.text + ")");
             return -1;
         }
+        final byte[] data = remote.data;
 
         final byte[] local;
         try (RandomAccessFile raf = new RandomAccessFile(localFile, "r")) {
             raf.seek(offset);
-            local = new byte[remote.length];
+            local = new byte[data.length];
             raf.readFully(local);
         } catch (Throwable e) {
             FileLog.e(e);
@@ -591,15 +701,15 @@ public final class FileRangeFetcher {
 
         int diff = 0;
         int firstDiff = -1;
-        for (int i = 0; i < remote.length; i++) {
-            if (remote[i] != local[i]) {
+        for (int i = 0; i < data.length; i++) {
+            if (data[i] != local[i]) {
                 diff++;
                 if (firstDiff < 0) {
                     firstDiff = i;
                 }
             }
         }
-        FileLog.d("ABPV: verify off=" + offset + " want=" + length + " got=" + remote.length
+        FileLog.d("ABPV: verify off=" + offset + " want=" + length + " got=" + data.length
                 + " available=" + available + " diff=" + diff + " firstDiff=" + firstDiff
                 + " outOfRange=" + (length - available));
         return diff;
@@ -618,7 +728,10 @@ public final class FileRangeFetcher {
         }
         FileLog.d("ABPV: range probe from 0 limit=" + blockBytes() + " dc=" + document.dc_id
                 + " size=" + document.size);
-        fetchSync(account, document, 0, blockBytes(), timeoutMs);
+        final FetchResult result = fetchSync(account, document, 0, blockBytes(), timeoutMs);
+        FileLog.d("ABPV: range probe result status=" + result.status
+                + " bytes=" + (result.data != null ? result.data.length : 0)
+                + " text=" + result.text);
     }
 
     private static TLRPC.InputFileLocation resolveLocation(int account, TLRPC.Document document) {

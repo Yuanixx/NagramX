@@ -768,12 +768,12 @@ public final class PreviewSession {
             prefetchHandle = handle;
             prefetchTimeMs = fetchTimeMs;
             byte[] data = null;
-            String failure = null;
+            FileRangeFetcher.FetchResult result = null;
             final long started = SystemClock.elapsedRealtime();
             try {
-                data = FileRangeFetcher.fetchSync(account, document,
+                result = FileRangeFetcher.fetchSync(account, document,
                         fetchOffset, fetchLength, REMOTE_FETCH_TIMEOUT_MS, handle);
-                failure = FileRangeFetcher.failureText();
+                data = result.data;
             } catch (Throwable e) {
                 PreviewLog.w("SeekPreview: prefetch failed off=" + fetchOffset, e);
             } finally {
@@ -800,7 +800,7 @@ public final class PreviewSession {
                                     + " ms=" + (SystemClock.elapsedRealtime() - started));
                         }
                     } else if (!handle.isCancelled() && !stopped && !prefetchStopped) {
-                        recordRemoteFailureLocked(failure);
+                        recordRemoteFailureLocked(result);
                     }
                     remoteLock.notifyAll();
                 }
@@ -1116,12 +1116,12 @@ public final class PreviewSession {
         }
 
         byte[] data = null;
-        String failure = null;
+        FileRangeFetcher.FetchResult result = null;
         final long started = SystemClock.elapsedRealtime();
         try {
-            data = FileRangeFetcher.fetchSync(account, document,
+            result = FileRangeFetcher.fetchSync(account, document,
                     offset, size, REMOTE_FETCH_TIMEOUT_MS, handle);
-            failure = FileRangeFetcher.failureText();
+            data = result.data;
         } catch (Throwable e) {
             PreviewLog.w("SeekPreview: remote keyframe failed off=" + offset
                     + " size=" + size, e);
@@ -1142,7 +1142,7 @@ public final class PreviewSession {
                             + " total=" + remoteBytesFetched.get()
                             + " ms=" + (SystemClock.elapsedRealtime() - started));
                 } else if (!handle.isCancelled() && !stopped) {
-                    recordRemoteFailureLocked(failure);
+                    recordRemoteFailureLocked(result);
                 }
                 remoteLock.notifyAll();
             }
@@ -1150,10 +1150,16 @@ public final class PreviewSession {
         return data;
     }
 
-    /** Guarded by remoteLock. */
-    private void recordRemoteFailureLocked(String text) {
+    /**
+     * Guarded by remoteLock.
+     *
+     * Classification comes from the result status, never from its text: a
+     * cancelled request and a local cooldown are not failures, while a timeout
+     * and a malformed response are.
+     */
+    private void recordRemoteFailureLocked(FileRangeFetcher.FetchResult result) {
         final long now = System.currentTimeMillis();
-        if (FileRangeFetcher.isFloodWait(text)) {
+        if (result != null && result.status == FileRangeFetcher.FetchResult.Status.FLOOD) {
             remoteFloodWaits++;
             if (remoteFloodWaits >= REMOTE_MAX_FLOODS || remoteProbePending) {
                 // Second flood, or the recovery probe came back flooded:
@@ -1164,11 +1170,7 @@ public final class PreviewSession {
                 PreviewLog.d("SeekPreview: remote cooldown "
                         + REMOTE_FLOOD_COOLDOWN_MS + "ms after flood");
             }
-        } else if (text == null || (!text.contains("cancel")
-                && !text.contains("interrupt")
-                && !text.contains("stale")
-                && !text.contains("FLOOD_COOLDOWN")
-                && !text.contains("disabled"))) {
+        } else if (result == null || result.countsAsFailure) {
             remoteFailures++;
             if (remoteFailures >= REMOTE_MAX_FAILURES || remoteProbePending) {
                 remoteDisabledUntilMs = now + REMOTE_FAILURE_COOLDOWN_MS;
