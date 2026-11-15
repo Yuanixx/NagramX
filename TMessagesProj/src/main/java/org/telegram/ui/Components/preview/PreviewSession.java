@@ -161,6 +161,8 @@ public final class PreviewSession {
      */
     private volatile boolean remoteProbePending;
     private volatile int remoteFloodWaits;
+    private final AtomicInteger remoteFailureTotal = new AtomicInteger();
+    private final AtomicInteger remoteTimeoutTotal = new AtomicInteger();
     private volatile boolean remoteBudgetLogged;
     private long remoteBudget = REMOTE_BUDGET_BYTES;
     private final AtomicLong remoteBytesFetched = new AtomicLong();
@@ -342,6 +344,8 @@ public final class PreviewSession {
                 + " prefetched=" + remotePrefetchCount.get()
                 + " cacheHits=" + remoteCacheHits.get()
                 + " bytes=" + remoteBytesFetched.get()
+                + " fails=" + remoteFailureTotal.get()
+                + " timeouts=" + remoteTimeoutTotal.get()
                 + " floods=" + remoteFloodWaits
                 + " cooling=" + isRemoteCoolingDown());
     }
@@ -667,7 +671,10 @@ public final class PreviewSession {
         thread.setDaemon(true);
         thread.start();
         PreviewLog.d("SeekPreview: prefetch thread started keyframes="
-                + remoteKeyframeCount() + " budget=" + remoteBudget);
+                + remoteKeyframeCount() + " budget=" + remoteBudget
+                + " block=" + FileRangeFetcher.blockBytes()
+                + " estRequests=" + (remoteBudget
+                        / Math.max(1, FileRangeFetcher.blockBytes())));
     }
 
     /**
@@ -1171,12 +1178,16 @@ public final class PreviewSession {
         }
         if (result == null || result.countsAsFailure) {
             remoteFailures++;
+            remoteFailureTotal.incrementAndGet();
+            if (result != null && result.status == FileRangeFetcher.FetchResult.Status.TIMEOUT) {
+                remoteTimeoutTotal.incrementAndGet();
+            }
             if (remoteFailures >= REMOTE_MAX_FAILURES || remoteProbePending) {
                 remoteDisabledUntilMs = now + REMOTE_FAILURE_COOLDOWN_MS;
+                PreviewLog.d("SeekPreview: remote disabled reason=failures streak="
+                        + remoteFailures + " until=" + remoteDisabledUntilMs);
                 remoteFailures = 0;
                 remoteProbePending = true;
-                PreviewLog.d("SeekPreview: remote cooldown "
-                        + REMOTE_FAILURE_COOLDOWN_MS + "ms after failures");
             }
         }
     }
@@ -1200,7 +1211,17 @@ public final class PreviewSession {
             return true;
         }
         final long until = remoteDisabledUntilMs;
-        return until != 0L && System.currentTimeMillis() < until;
+        if (until == 0L) {
+            return false;
+        }
+        if (System.currentTimeMillis() < until) {
+            return true;
+        }
+        // Latch the expiry so the log appears once and the next request can
+        // act as the probe.
+        remoteDisabledUntilMs = 0L;
+        PreviewLog.d("SeekPreview: remote disabled expired");
+        return false;
     }
 
     /**
@@ -1375,11 +1396,11 @@ public final class PreviewSession {
      * honest even when keyframes are small.
      */
     private static long expectedFetchBytes(long offset, long size) {
-        final long aligned = (offset / FileRangeFetcher.BLOCK) * FileRangeFetcher.BLOCK;
+        final int block = FileRangeFetcher.blockBytes();
+        final long aligned = (offset / block) * block;
         final long delta = offset - aligned;
-        final long blocks = (delta + size + FileRangeFetcher.BLOCK - 1L)
-                / FileRangeFetcher.BLOCK;
-        return blocks * FileRangeFetcher.BLOCK;
+        final long blocks = (delta + size + block - 1L) / block;
+        return blocks * block;
     }
 
     /** Guarded by remoteLock. */

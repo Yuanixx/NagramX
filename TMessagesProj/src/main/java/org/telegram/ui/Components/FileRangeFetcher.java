@@ -29,6 +29,7 @@ import java.io.File;
 import java.io.RandomAccessFile;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.BooleanSupplier;
 
 /**
@@ -195,6 +196,8 @@ public final class FileRangeFetcher {
     private static volatile long lastRequestAt;
     /** Makes the request gap hold even when both preview threads ask at once. */
     private static final Object rateLock = new Object();
+    /** Tags every request so its log lines can be matched up. */
+    private static final AtomicInteger requestSeq = new AtomicInteger();
 
     private FileRangeFetcher() {
     }
@@ -606,6 +609,7 @@ public final class FileRangeFetcher {
         // which is exactly what streaming by keyframe needs. It does not mean
         // "return this exact range".
         request.precise = true;
+        final int seq = requestSeq.incrementAndGet();
 
         final CountDownLatch latch = new CountDownLatch(1);
         if (handle != null) {
@@ -622,14 +626,13 @@ public final class FileRangeFetcher {
         }
         final byte[][] result = new byte[1][];
         final String[] failure = new String[1];
-        final String[] responseClass = new String[1];
         final int[] responseBytes = new int[1];
         final int[] failureCode = new int[1];
         final boolean[] callbackFired = new boolean[1];
         final boolean[] unsupported = new boolean[1];
 
-        FileLog.d("ABPV: range request off=" + aligned + " limit=" + limit
-                + " delta=" + delta);
+        FileLog.d("ABPV: range request seq=" + seq + " off=" + aligned
+                + " limit=" + limit + " delta=" + delta);
 
         final int requestToken = ConnectionsManager.getInstance(account).sendRequest(request, (response, error, responseTime) -> {
             callbackFired[0] = true;
@@ -639,7 +642,6 @@ public final class FileRangeFetcher {
                     failureCode[0] = error.code;
                     return;
                 }
-                responseClass[0] = response == null ? "null" : response.getClass().getSimpleName();
                 if (response instanceof TLRPC.TL_upload_fileCdnRedirect) {
                     // The file lives on a CDN; serving it needs a second request
                     // to that DC plus hash verification.
@@ -694,13 +696,13 @@ public final class FileRangeFetcher {
                 latch.countDown();
             }
         }
-        FileLog.d("ABPV: range token=" + requestToken + " off=" + aligned
+        FileLog.d("ABPV: range token=" + requestToken + " seq=" + seq + " off=" + aligned
                 + " limit=" + limit + " dc=" + dcId);
 
         try {
             if (!latch.await(timeoutMs, TimeUnit.MILLISECONDS)) {
-                FileLog.d("ABPV: range fetch timeout off=" + aligned + " limit=" + limit
-                        + " token=" + requestToken);
+                FileLog.d("ABPV: range fetch timeout seq=" + seq + " off=" + aligned
+                        + " limit=" + limit + " token=" + requestToken);
                 // The request is still alive in native and would keep
                 // downloading; kill it so it stops eating the download slot.
                 // This is not a cancel: the result stays TIMEOUT so it still
@@ -730,12 +732,12 @@ public final class FileRangeFetcher {
                 // cancellation, or the request was dropped on the way out.
                 final boolean cancelled = handle != null && handle.isCancelled();
                 final String text = cancelled ? "cancelled" : "no-response";
-                FileLog.d("ABPV: range fetch failed off=" + aligned + " aligned=" + aligned
-                        + " limit=" + limit + " dc=" + dcId
-                        + " size=" + document.size + " reason=" + text
-                        + " code=" + failureCode[0]
-                        + " cls=" + responseClass[0] + " bytes=" + responseBytes[0]
-                        + " callback=0");
+                FileLog.d("ABPV: range result seq=" + seq + " status="
+                        + (cancelled ? "CANCELLED" : "TIMEOUT")
+                        + " off=" + aligned + " limit=" + limit + " dc=" + dcId
+                        + " bytes=" + responseBytes[0] + " code=" + failureCode[0]
+                        + " req=1 partial=false callback=0 elapsed="
+                        + (System.currentTimeMillis() - started) + " text=" + text);
                 return failure(cancelled ? FetchResult.Status.CANCELLED
                                 : FetchResult.Status.TIMEOUT,
                         0, -1, text, !cancelled, 1, started);
@@ -744,28 +746,25 @@ public final class FileRangeFetcher {
             if (failureCode[0] == 420) {
                 final int seconds = parseFloodSeconds(reason);
                 noteFloodWait(seconds);
-                FileLog.d("ABPV: range fetch failed off=" + aligned + " aligned=" + aligned
-                        + " limit=" + limit + " dc=" + dcId
-                        + " size=" + document.size + " reason=" + reason
-                        + " code=" + failureCode[0]
-                        + " cls=" + responseClass[0] + " bytes=" + responseBytes[0]
-                        + " callback=1");
+                FileLog.d("ABPV: range result seq=" + seq + " status=FLOOD off=" + aligned
+                        + " limit=" + limit + " dc=" + dcId + " bytes=" + responseBytes[0]
+                        + " code=420 req=1 partial=false callback=1 elapsed="
+                        + (System.currentTimeMillis() - started) + " text=" + reason);
                 return failure(FetchResult.Status.FLOOD, 420, seconds,
                         reason, true, 1, started);
             }
-            FileLog.d("ABPV: range fetch failed off=" + aligned + " aligned=" + aligned
-                    + " limit=" + limit + " dc=" + dcId
-                    + " size=" + document.size + " reason=" + reason
-                    + " code=" + failureCode[0]
-                    + " cls=" + responseClass[0] + " bytes=" + responseBytes[0]
-                    + " callback=1");
+            FileLog.d("ABPV: range result seq=" + seq + " status=ERROR off=" + aligned
+                    + " limit=" + limit + " dc=" + dcId + " bytes=" + responseBytes[0]
+                    + " code=" + failureCode[0] + " req=1 partial=false callback=1"
+                    + " elapsed=" + (System.currentTimeMillis() - started)
+                    + " text=" + reason);
             return failure(FetchResult.Status.ERROR, failureCode[0], -1,
                     reason, !unsupported[0], 1, started);
         }
-        FileLog.d("ABPV: range ok off=" + aligned + " aligned=" + aligned
-                + " limit=" + limit + " dc=" + dcId
-                + " cls=" + responseClass[0] + " bytes=" + responseBytes[0]
-                + " delta=" + delta + " got=" + result[0].length);
+        FileLog.d("ABPV: range ok seq=" + seq + " off=" + aligned
+                + " limit=" + limit + " dc=" + dcId + " bytes=" + responseBytes[0]
+                + " delta=" + delta + " req=1 elapsed="
+                + (System.currentTimeMillis() - started) + " got=" + result[0].length);
         return success(result[0], 1, started);
     }
 
