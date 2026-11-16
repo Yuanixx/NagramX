@@ -269,6 +269,7 @@ import tw.nekomimi.nekogram.NekoConfig;
 import tw.nekomimi.nekogram.helpers.MonetHelper;
 import tw.nekomimi.nekogram.helpers.SettingsHelper;
 import tw.nekomimi.nekogram.helpers.remote.EmojiHelper;
+import tw.nekomimi.nekogram.helpers.remote.GithubReleaseChecker;
 import tw.nekomimi.nekogram.helpers.remote.PagePreviewRulesHelper;
 import tw.nekomimi.nekogram.helpers.remote.UpdateHelper;
 import tw.nekomimi.nekogram.settings.NekoSettingsActivity;
@@ -6071,87 +6072,17 @@ public class LaunchActivity extends BasePermissionsActivity implements INavigati
         return foundContacts;
     }
 
-    private boolean firstAppUpdateCheck = true;
     public void checkAppUpdate(boolean force, Browser.Progress progress) {
         checkAppUpdate(force, progress, false);
     }
 
     public void checkAppUpdate(boolean force, Browser.Progress progress, boolean updateAlways) {
-       /*if (!ApplicationLoader.isStandaloneBuild() && !ApplicationLoader.isBetaBuild()) {
-           return;
-       }
-       if (!force && !BuildVars.CHECK_UPDATES) {
-           return;
-       }*/
-        if (ApplicationLoader.applicationLoaderInstance.isCustomUpdate()) {
-            final BetaUpdate prevUpdate = ApplicationLoader.applicationLoaderInstance.getUpdate();
-            final boolean first = firstAppUpdateCheck;
-            firstAppUpdateCheck = false;
-            ApplicationLoader.applicationLoaderInstance.checkUpdate(force, () -> {
-                final BetaUpdate pendingUpdate = ApplicationLoader.applicationLoaderInstance.getUpdate();
-                if (progress != null) {
-                    progress.end();
-                    if (pendingUpdate == null) {
-                        BaseFragment fragment = getLastFragment();
-                        if (fragment != null) {
-                            BulletinFactory.of(fragment).createSimpleBulletin(R.raw.done, LocaleController.getString(R.string.YourVersionIsLatestNax)).show();
-                        }
-                    }
-                }
-                if (pendingUpdate != null && !ApplicationLoader.applicationLoaderInstance.isDownloadingUpdate() && (first || prevUpdate == null || pendingUpdate.higherThan(prevUpdate))) {
-                    ApplicationLoader.applicationLoaderInstance.showCustomUpdateAppPopup(LaunchActivity.this, pendingUpdate, currentAccount);
-                }
-            });
-            return;
-        }
-        if (!force && Math.abs(System.currentTimeMillis() - SharedConfig.lastUpdateCheckTime) < MessagesController.getInstance(0).updateCheckDelay * 1000) {
-            return;
-        }
-        final TLRPC.TL_help_getAppUpdate req = new TLRPC.TL_help_getAppUpdate();
-        try {
-            req.source = ApplicationLoader.applicationContext.getPackageManager().getInstallerPackageName(ApplicationLoader.applicationContext.getPackageName());
-        } catch (Exception ignore) {
-
-        }
-        if (req.source == null) {
-            req.source = "";
-        }
-        final int accountNum = currentAccount;
-        if (progress != null) progress.init();
-        UpdateHelper.getInstance().checkNewVersionAvailable((res, error) -> {
-            SharedConfig.lastUpdateCheckTime = System.currentTimeMillis();
-            SharedConfig.saveConfig();
-            AndroidUtilities.runOnUIThread(() -> {
-                if (res != null) {
-                    SharedConfig.setNewAppVersionAvailable(res);
-                    if (res.can_not_skip) {
-                        showUpdateActivity(accountNum, res, false);
-                    } else {
-
-                        ApplicationLoader.applicationLoaderInstance.showUpdateAppPopup(LaunchActivity.this, res, accountNum);
-                    }
-                } else {
-                    if (force) {
-                        BaseFragment fragment = getLastFragment();
-                        if (fragment != null) {
-                            if (error == null) {
-                                BulletinFactory.of(fragment).createSimpleBulletin(R.raw.done, LocaleController.getString(R.string.YourVersionIsLatestNax)).show();
-                            } else {
-                                AlertsCreator.createSimpleAlert(this, getString(R.string.ErrorOccurred) + "\n" + error).show();
-                            }
-                        }
-                    }
-                    SharedConfig.setNewAppVersionAvailable(null);
-                }
-                NotificationCenter.getGlobalInstance().postNotificationName(NotificationCenter.appUpdateAvailable);
-                if (progress != null) {
-                    progress.end();
-                }
-            });
-        }, updateAlways);
-        if (progress != null) {
-            progress.init();
-        }
+        // Only our own staging builds are checked. Asking Telegram's servers
+        // for an update returns the official Telegram release for this
+        // build, which is a different application.
+        SharedConfig.pendingAppUpdate = null;
+        SharedConfig.pendingAppUpdateBuildVersion = 0;
+        GithubReleaseChecker.check(this, force || updateAlways, progress);
     }
 
     public Dialog showAlertDialog(AlertDialog.Builder builder) {
@@ -7080,6 +7011,12 @@ public class LaunchActivity extends BasePermissionsActivity implements INavigati
     @Override
     protected void onResume() {
         super.onResume();
+        // Older builds stored an update offered by Telegram's servers. It
+        // points at the official Telegram app, so drop it instead of showing
+        // it again; our own updater below is the only source now.
+        SharedConfig.pendingAppUpdate = null;
+        SharedConfig.pendingAppUpdateBuildVersion = 0;
+        NotificationCenter.getGlobalInstance().postNotificationName(NotificationCenter.appUpdateAvailable);
         isResumed = true;
         pipActivityHandler.onResume();
         if (onResumeStaticCallback != null) {
