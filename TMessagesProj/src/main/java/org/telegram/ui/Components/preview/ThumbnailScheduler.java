@@ -91,12 +91,15 @@ public final class ThumbnailScheduler {
         final int tier;
         final long timeMs;
         final int keyframeIndex;
+        /** Insertion order inside a priority; binary subdivision relies on it. */
+        final long order;
 
-        Task(int priority, int tier, long timeMs, int keyframeIndex) {
+        Task(int priority, int tier, long timeMs, int keyframeIndex, long order) {
             this.priority = priority;
             this.tier = tier;
             this.timeMs = timeMs;
             this.keyframeIndex = keyframeIndex;
+            this.order = order;
         }
     }
 
@@ -104,6 +107,12 @@ public final class ThumbnailScheduler {
     private final PriorityQueue<Task> queue = new PriorityQueue<>((a, b) -> {
         if (a.priority != b.priority) {
             return Integer.compare(a.priority, b.priority);
+        }
+        // Same priority: respect the order the layers were laid out in. The
+        // coarse layer is built middle-first, quarter points next, and a time
+        // sort would silently turn it back into a left-to-right sweep.
+        if (a.order != b.order) {
+            return Long.compare(a.order, b.order);
         }
         return Long.compare(a.timeMs, b.timeMs);
     });
@@ -120,13 +129,19 @@ public final class ThumbnailScheduler {
     private boolean dragging;
     private boolean buffering;
     private long desiredMs = -1;
+    private long desiredKeyframeTime = -1;
     private long lastHoverKey = -1;
     private long lastHoverAt;
     private long durationMs;
     private long lastRefillAt;
+    private long nextTaskOrder;
+    private long decodingTimeMs = -1;
+    private long firstTaskWaitMs = -1;
+    private long firstDecodeStartedAt;
     private int failures;
     private final long startedAt = SystemClock.uptimeMillis();
     private int loggedMilestone;
+    private boolean loggedFirstTask;
     private boolean loggedFirst;
     private boolean loggedDone;
 
@@ -153,8 +168,44 @@ public final class ThumbnailScheduler {
                 return;
             }
             desiredMs = timeMs;
-            lastHoverKey = -1;
+            final long key = nearestKeyframeTimeLocked();
+            if (key != desiredKeyframeTime) {
+                desiredKeyframeTime = key;
+                lastHoverKey = -1;
+                // There is only one finger. Keeping hover tasks for positions
+                // it already left behind made the first picture come from an
+                // old moment while the current one waited in the same queue.
+                queue.removeIf(task -> task.priority == PRIORITY_HOVER
+                        && task.timeMs != key);
+            }
             lock.notifyAll();
+        }
+    }
+
+    /**
+     * True when a task for the keyframe this position would show is queued or
+     * being decoded right now. Read by the bubble to decide whether a spinner
+     * is honest; it never blocks on the worker.
+     */
+    public boolean isPendingFrameFor(long timeMs) {
+        synchronized (lock) {
+            final long[] keyframes = plan != null ? plan.keyframeTimesMs : null;
+            if (keyframes == null || keyframes.length == 0) {
+                return false;
+            }
+            final long key = keyframes[nearestIndex(keyframes, timeMs)];
+            if (store.containsTime(key)) {
+                return false;
+            }
+            if (decodingTimeMs == key) {
+                return true;
+            }
+            for (Task task : queue) {
+                if (task.timeMs == key) {
+                    return true;
+                }
+            }
+            return false;
         }
     }
 
@@ -315,6 +366,31 @@ public final class ThumbnailScheduler {
     }
 
     private void decode(Task task) {
+        synchronized (lock) {
+            if (stopped) {
+                return;
+            }
+            decodingTimeMs = task.timeMs;
+            if (!loggedFirstTask) {
+                loggedFirstTask = true;
+                firstTaskWaitMs = SystemClock.uptimeMillis() - startedAt;
+                PreviewLog.d("SeekPreview: first task t=" + task.timeMs
+                        + " tier=" + task.tier
+                        + " wait=" + firstTaskWaitMs + "ms");
+            }
+        }
+        try {
+            decodeTask(task);
+        } finally {
+            synchronized (lock) {
+                if (decodingTimeMs == task.timeMs) {
+                    decodingTimeMs = -1;
+                }
+            }
+        }
+    }
+
+    private void decodeTask(Task task) {
         try {
             synchronized (lock) {
                 if (stopped) {
@@ -323,6 +399,11 @@ public final class ThumbnailScheduler {
             }
             if (store.containsTime(task.timeMs)) {
                 return;
+            }
+            synchronized (lock) {
+                if (firstDecodeStartedAt == 0) {
+                    firstDecodeStartedAt = SystemClock.uptimeMillis();
+                }
             }
             final FrameDecoder.DecodedFrame frame = decoder.decodeAt(
                     task.timeMs, maxWidth, maxHeight);
@@ -366,9 +447,16 @@ public final class ThumbnailScheduler {
                 final int count = store.size();
                 if (!loggedFirst) {
                     loggedFirst = true;
+                    final long now = SystemClock.uptimeMillis();
+                    final long decodeMs = firstDecodeStartedAt > 0
+                            ? now - firstDecodeStartedAt : 0L;
                     PreviewLog.d("SeekPreview: first thumbnail in "
-                            + (SystemClock.uptimeMillis() - startedAt) + "ms"
-                            + " decoder=" + decoder.name());
+                            + (now - startedAt) + "ms"
+                            + " (queueWait=" + firstTaskWaitMs + "ms"
+                            + " decode=" + decodeMs + "ms"
+                            + " t=" + thumbnail.timeMs
+                            + " tier=" + task.tier
+                            + " decoder=" + decoder.name() + ")");
                 }
                 if (count >= 24 && loggedMilestone < 24) {
                     loggedMilestone = 24;
@@ -466,6 +554,12 @@ public final class ThumbnailScheduler {
             index = -1;
             key = desiredMs;
         }
+        if (key != desiredKeyframeTime) {
+            desiredKeyframeTime = key;
+            lastHoverKey = -1;
+            queue.removeIf(task -> task.priority == PRIORITY_HOVER
+                    && task.timeMs != key);
+        }
         if (store.containsTime(key)) {
             lastHoverKey = key;
             return;
@@ -480,7 +574,8 @@ public final class ThumbnailScheduler {
                 return;
             }
         }
-        queue.add(new Task(PRIORITY_HOVER, Thumbnail.TIER_FINE, key, index));
+        queue.add(new Task(PRIORITY_HOVER, Thumbnail.TIER_FINE, key, index,
+                nextTaskOrder++));
         lastHoverKey = key;
         lastHoverAt = now;
     }
@@ -519,6 +614,15 @@ public final class ThumbnailScheduler {
         return lo;
     }
 
+    /** Locked helper: the keyframe the finger currently wants, or -1. */
+    private long nearestKeyframeTimeLocked() {
+        final long[] keyframes = plan != null ? plan.keyframeTimesMs : null;
+        if (keyframes == null || keyframes.length == 0 || desiredMs < 0) {
+            return -1;
+        }
+        return keyframes[nearestIndex(keyframes, desiredMs)];
+    }
+
     private void buildQueueLocked() {
         // A refill rebuild must not drop an in-flight hover task: a finger
         // holding still would silently lose its priority decode until the
@@ -533,9 +637,9 @@ public final class ThumbnailScheduler {
         final long[] keyframes = plan != null ? plan.keyframeTimesMs : null;
         if (keyframes != null && keyframes.length > 0) {
             final boolean[] used = new boolean[keyframes.length];
-            int chosen = addEvenKeyframesLocked(PRIORITY_COARSE, Thumbnail.TIER_COARSE,
+            int chosen = addBisectedKeyframesLocked(PRIORITY_COARSE, Thumbnail.TIER_COARSE,
                     keyframes, used, COARSE_COUNT);
-            chosen += addEvenKeyframesLocked(PRIORITY_MID, Thumbnail.TIER_MID,
+            chosen += addBisectedKeyframesLocked(PRIORITY_MID, Thumbnail.TIER_MID,
                     keyframes, used, MID_COUNT);
             final int total = Math.min(MAX_THUMBNAILS, keyframes.length);
             final int remaining = Math.max(0, total - chosen);
@@ -547,17 +651,17 @@ public final class ThumbnailScheduler {
                         unchosen[cursor++] = i;
                     }
                 }
-                final int[] picks = evenIndices(unchosen.length, remaining);
+                final int[] picks = bisectIndices(unchosen.length, remaining);
                 for (int pick : picks) {
                     final int index = unchosen[pick];
                     queue.add(new Task(PRIORITY_FINE, Thumbnail.TIER_FINE,
-                            keyframes[index], index));
+                            keyframes[index], index, nextTaskOrder++));
                 }
             }
         } else if (durationMs > 0) {
-            addEvenTimesLocked(PRIORITY_COARSE, Thumbnail.TIER_COARSE, COARSE_COUNT);
-            addEvenTimesLocked(PRIORITY_MID, Thumbnail.TIER_MID, MID_COUNT);
-            addEvenTimesLocked(PRIORITY_FINE, Thumbnail.TIER_FINE, RETRIEVER_FINE_COUNT);
+            addBisectedTimesLocked(PRIORITY_COARSE, Thumbnail.TIER_COARSE, COARSE_COUNT);
+            addBisectedTimesLocked(PRIORITY_MID, Thumbnail.TIER_MID, MID_COUNT);
+            addBisectedTimesLocked(PRIORITY_FINE, Thumbnail.TIER_FINE, RETRIEVER_FINE_COUNT);
         }
         queue.addAll(hovers);
         PreviewLog.d("SeekPreview: plan duration=" + durationMs
@@ -565,9 +669,9 @@ public final class ThumbnailScheduler {
                 + " tasks=" + queue.size());
     }
 
-    private int addEvenKeyframesLocked(int priority, int tier, long[] keyframes,
-                                       boolean[] used, int desiredCount) {
-        final int[] picks = evenIndices(keyframes.length,
+    private int addBisectedKeyframesLocked(int priority, int tier, long[] keyframes,
+                                           boolean[] used, int desiredCount) {
+        final int[] picks = bisectIndices(keyframes.length,
                 Math.min(desiredCount, keyframes.length));
         int added = 0;
         for (int index : picks) {
@@ -575,34 +679,70 @@ public final class ThumbnailScheduler {
                 continue;
             }
             used[index] = true;
-            queue.add(new Task(priority, tier, keyframes[index], index));
+            queue.add(new Task(priority, tier, keyframes[index], index,
+                    nextTaskOrder++));
             added++;
         }
         return added;
     }
 
-    private void addEvenTimesLocked(int priority, int tier, int desiredCount) {
+    private void addBisectedTimesLocked(int priority, int tier, int desiredCount) {
         final long span = Math.max(1L, durationMs - 1L);
         final int count = (int) Math.min(desiredCount, span + 1L);
-        final Set<Long> seen = new HashSet<>();
+        final long[] times = new long[count];
         for (int i = 0; i < count; i++) {
-            final long time = count <= 1 ? 0L
+            times[i] = count <= 1 ? 0L
                     : Math.round(i * (double) span / (count - 1));
+        }
+        final int[] picks = bisectIndices(count, count);
+        final Set<Long> seen = new HashSet<>();
+        for (int index : picks) {
+            final long time = times[index];
             if (seen.add(time)) {
-                queue.add(new Task(priority, tier, time, -1));
+                queue.add(new Task(priority, tier, time, -1, nextTaskOrder++));
             }
         }
     }
 
-    private static int[] evenIndices(int count, int desired) {
+    /**
+     * Middle first, then the two quarter points, then eighths, and so on.
+     * The old helper walked the index from left to right, so a finger at
+     * minute 3 still got minute 0 painted first.
+     */
+    private static int[] bisectIndices(int count, int desired) {
         final int n = Math.max(1, Math.min(desired, count));
         final int[] out = new int[n];
         if (n == 1) {
-            out[0] = 0;
+            out[0] = count / 2;
             return out;
         }
-        for (int i = 0; i < n; i++) {
-            out[i] = (int) Math.round(i * (count - 1.0) / (n - 1.0));
+        final boolean[] used = new boolean[count];
+        final java.util.ArrayDeque<int[]> ranges = new java.util.ArrayDeque<>();
+        ranges.add(new int[]{0, count - 1});
+        int position = 0;
+        while (!ranges.isEmpty() && position < n) {
+            final int[] range = ranges.poll();
+            final int lo = range[0];
+            final int hi = range[1];
+            if (lo > hi) {
+                continue;
+            }
+            final int mid = (lo + hi) >>> 1;
+            if (!used[mid]) {
+                used[mid] = true;
+                out[position++] = mid;
+            }
+            if (lo < mid) {
+                ranges.add(new int[]{lo, mid - 1});
+            }
+            if (mid < hi) {
+                ranges.add(new int[]{mid + 1, hi});
+            }
+        }
+        for (int i = 0; position < n && i < count; i++) {
+            if (!used[i]) {
+                out[position++] = i;
+            }
         }
         return out;
     }
