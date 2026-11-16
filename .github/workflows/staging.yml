@@ -172,8 +172,14 @@ jobs:
           META=TMessagesProj/build/outputs/apk/staging/output-metadata.json
           VERSION_NAME=$(jq -r '.elements[0].versionName' "$META")
           VERSION_CODE=$(jq -r '.elements[0].versionCode' "$META")
-          ARM64=$(basename "$(ls TMessagesProj/build/outputs/apk/staging/*-arm64-v8a.apk | head -n1)")
-          UNIVERSAL=$(basename "$(ls TMessagesProj/build/outputs/apk/staging/*-universal.apk | head -n1)")
+          ARM64="NagramX-${VERSION_NAME}-arm64-v8a.apk"
+          UNIVERSAL="NagramX-${VERSION_NAME}-universal.apk"
+          # Upload copies with plain names: GitHub rewrites characters such as
+          # parentheses in asset names, which would break the URLs below.
+          rm -rf mirror
+          mkdir -p mirror
+          cp "$(ls TMessagesProj/build/outputs/apk/staging/*-arm64-v8a.apk | head -n1)" "mirror/$ARM64"
+          cp "$(ls TMessagesProj/build/outputs/apk/staging/*-universal.apk | head -n1)" "mirror/$UNIVERSAL"
           BUILD_TIMESTAMP="${BUILD_TIMESTAMP:-0}"
           jq -n \
             --arg version "$VERSION_NAME" \
@@ -184,15 +190,15 @@ jobs:
             --arg arm64 "$ARM64" \
             --arg universal "$UNIVERSAL" \
             '{version:$version, versionCode:$versionCode, commit:$commit, builtAt:$builtAt, notes:$notes, arm64:$arm64, universal:$universal}' \
-            > update.json
+            > mirror/update.json
           gh release delete staging --repo "$MIRROR" --yes --cleanup-tag=false 2>/dev/null || true
           gh release create staging \
             --repo "$MIRROR" \
             --title "Staging build" \
             --notes-file notes.md \
-            TMessagesProj/build/outputs/apk/staging/*-arm64-v8a.apk \
-            TMessagesProj/build/outputs/apk/staging/*-universal.apk \
-            update.json
+            "mirror/$ARM64" \
+            "mirror/$UNIVERSAL" \
+            mirror/update.json
       - name: Upload Artifacts
         uses: actions/upload-artifact@v7
         with:
