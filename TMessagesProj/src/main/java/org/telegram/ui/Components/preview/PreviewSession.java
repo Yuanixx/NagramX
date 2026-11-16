@@ -88,8 +88,10 @@ public final class PreviewSession {
     private static final int MAX_SCAN_FETCH_BYTES = 4 * 1024 * 1024;
     /** Consecutive real failures after which this session goes local-only. */
     private static final int REMOTE_MAX_FAILURES = 3;
-    /** How long it stays dark after a plain failure streak. */
+    /** How long it stays dark after the first plain failure streak. */
     private static final long REMOTE_FAILURE_COOLDOWN_MS = 30_000L;
+    /** Repeated streaks double the wait, up to five minutes. */
+    private static final long REMOTE_FAILURE_COOLDOWN_MAX_MS = 5L * 60L * 1000L;
 
     private static final class Prepared {
         final FrameDecoder decoder;
@@ -196,6 +198,8 @@ public final class PreviewSession {
     private final HashSet<Long> remoteInFlight = new HashSet<>();
     /** Guarded by remoteLock. */
     private int remoteFailures;
+    /** Consecutive failure cooldowns; drives the exponential backoff. */
+    private volatile int remoteCooldownStreak;
     private volatile FileRangeFetcher.FetchHandle prefetchHandle;
     private volatile long prefetchTimeMs = -1;
     private volatile FileRangeFetcher.FetchHandle decoderFetchHandle;
@@ -258,6 +262,24 @@ public final class PreviewSession {
      */
     public Thumbnail nearest(long timeMs) {
         return store.nearest(timeMs);
+    }
+
+    /** The bubble only uses a frame within this distance of the finger. */
+    public Thumbnail nearest(long timeMs, long maxDistanceMs) {
+        return store.nearest(timeMs, maxDistanceMs);
+    }
+
+    /** max(1.5s, 5% of duration), widened for very short videos. */
+    public long maxFrameDistanceMs() {
+        final long duration = planDurationMs > 0 ? planDurationMs : documentDurationMs();
+        if (duration <= 0L) {
+            return 1500L;
+        }
+        long limit = Math.max(1500L, duration / 20L);
+        if (duration < 10_000L) {
+            limit = Math.max(limit, duration / 2L);
+        }
+        return limit;
     }
 
     public int thumbnailCount() {
@@ -415,6 +437,7 @@ public final class PreviewSession {
                     prepared.plan, decoder, store,
                     THUMB_MAX_WIDTH, THUMB_MAX_HEIGHT, this::onThumbnail,
                     makeRefill(prepared), diskSink);
+            worker.setDownloadPercent(this::downloadedPercent);
             worker.setDesiredPosition(desiredMs);
             worker.setDragging(dragging);
             worker.setBuffering(buffering);
@@ -535,6 +558,20 @@ public final class PreviewSession {
         return stopped;
     }
 
+    /** Diagnostic only: 0..100, how much of the declared file is local. */
+    private long downloadedPercent() {
+        if (declaredSize <= 0L || document == null || account < 0) {
+            return 100L;
+        }
+        try {
+            final long got = FileLoader.getInstance(account)
+                    .getDownloadedLengthFast(document, 0, declaredSize);
+            return Math.max(0L, Math.min(100L, got * 100L / declaredSize));
+        } catch (Throwable e) {
+            return 0L;
+        }
+    }
+
     private long documentDurationMs() {
         if (document == null || document.attributes == null) {
             return 0;
@@ -572,6 +609,26 @@ public final class PreviewSession {
                     // probe keeps the retriever path.
                     source = TailMoovFetcher.fetch(document, account, declaredSize);
                 }
+            }
+            final int keyframeCount = source != null && source.track != null
+                    ? source.track.keyframes.size() : 0;
+            final long docDuration = documentDuration;
+            final boolean shortMode = file != null
+                    && keyframeCount < 12
+                    && docDuration > 0L && docDuration <= 60_000L;
+            if (shortMode) {
+                // A handful of keyframes cannot paint a short timeline. Decode
+                // even moments locally instead of spending a network request.
+                PreviewLog.d("SeekPreview: short mode duration=" + docDuration
+                        + " keyframes=" + keyframeCount
+                        + " size=" + declaredSize + "/" + file.length());
+                remoteBudget = 0;
+                final ShortVideoFrameDecoder shortDecoder = new ShortVideoFrameDecoder(
+                        file, declaredSize, document, account, docDuration);
+                final ThumbnailScheduler.Plan plan =
+                        new ThumbnailScheduler.Plan(docDuration, null);
+                plan.setUniformStep(750L);
+                return new Prepared(shortDecoder, plan, false, null, null);
             }
             final boolean indexUsable = source != null && source.track != null
                     && source.track.isAvcOrHevc() && source.track.hasCodecConfig()
@@ -1232,9 +1289,16 @@ public final class PreviewSession {
                 remoteTimeoutTotal.incrementAndGet();
             }
             if (remoteFailures >= REMOTE_MAX_FAILURES || remoteProbePending) {
-                remoteDisabledUntilMs = now + REMOTE_FAILURE_COOLDOWN_MS;
+                long cooldown = REMOTE_FAILURE_COOLDOWN_MS;
+                for (int i = 0; i < remoteCooldownStreak
+                        && cooldown < REMOTE_FAILURE_COOLDOWN_MAX_MS; i++) {
+                    cooldown = Math.min(REMOTE_FAILURE_COOLDOWN_MAX_MS, cooldown * 2L);
+                }
+                remoteCooldownStreak = Math.min(remoteCooldownStreak + 1, 8);
+                remoteDisabledUntilMs = now + cooldown;
                 PreviewLog.d("SeekPreview: remote disabled reason=failures streak="
-                        + remoteFailures + " until=" + remoteDisabledUntilMs);
+                        + remoteFailures + " cooldown=" + cooldown
+                        + "ms until=" + remoteDisabledUntilMs);
                 remoteFailures = 0;
                 remoteProbePending = true;
             }
@@ -1249,6 +1313,7 @@ public final class PreviewSession {
         }
         remoteFloodWaits = 0;
         remoteFailures = 0;
+        remoteCooldownStreak = 0;
     }
 
     /**

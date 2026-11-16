@@ -44,15 +44,48 @@ public final class Thumbnail {
      */
     public final int keyframeIndex;
     public final int tier;
+    /** 8x8 colour fingerprint, used by diagnostics to spot duplicate frames. */
+    public final long fingerprint;
 
     public Thumbnail(Bitmap bitmap, long timeMs, int keyframeIndex, int tier) {
         this.bitmap = bitmap;
         this.timeMs = timeMs;
         this.keyframeIndex = keyframeIndex;
         this.tier = tier;
+        this.fingerprint = fingerprintOf(bitmap);
     }
 
     public int byteCount() {
         return bitmap != null ? bitmap.getByteCount() : 0;
+    }
+
+    private static long fingerprintOf(Bitmap bitmap) {
+        if (bitmap == null || bitmap.isRecycled()) {
+            return 0L;
+        }
+        final Bitmap small = Bitmap.createScaledBitmap(bitmap, 8, 8, false);
+        if (small == null) {
+            return 0L;
+        }
+        try {
+            final int[] pixels = new int[64];
+            small.getPixels(pixels, 0, 8, 0, 0, 8, 8);
+            long hash = 0xcbf29ce484222325L;
+            for (int pixel : pixels) {
+                final int r = (pixel >> 16) & 0xff;
+                final int g = (pixel >> 8) & 0xff;
+                final int b = pixel & 0xff;
+                hash = (hash ^ (r >> 3)) * 0x100000001b3L;
+                hash = (hash ^ (g >> 3)) * 0x100000001b3L;
+                hash = (hash ^ (b >> 3)) * 0x100000001b3L;
+            }
+            return hash;
+        } catch (Throwable ignore) {
+            return 0L;
+        } finally {
+            if (small != bitmap && !small.isRecycled()) {
+                small.recycle();
+            }
+        }
     }
 }

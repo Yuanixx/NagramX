@@ -23,6 +23,7 @@ import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.PriorityQueue;
 import java.util.Set;
+import java.util.function.LongSupplier;
 
 /**
  * Single worker that fills the thumbnail store from coarse to fine.
@@ -57,10 +58,16 @@ public final class ThumbnailScheduler {
         public final long durationMs;
         /** Sorted keyframe presentation times, or null when unknown. */
         volatile long[] keyframeTimesMs;
+        /** >0 for short local videos: evenly spaced frames, no keyframe tiers. */
+        long uniformStepMs;
 
         public Plan(long durationMs, long[] keyframeTimesMs) {
             this.durationMs = durationMs;
             this.keyframeTimesMs = keyframeTimesMs;
+        }
+
+        public void setUniformStep(long stepMs) {
+            uniformStepMs = stepMs > 0 ? stepMs : 0L;
         }
 
         /** Scheduler thread only; the array is replaced wholesale. */
@@ -144,6 +151,8 @@ public final class ThumbnailScheduler {
     private boolean loggedFirstTask;
     private boolean loggedFirst;
     private boolean loggedDone;
+    private LongSupplier downloadPercent;
+    private long lastSummaryAt;
 
     public ThumbnailScheduler(Plan plan, FrameDecoder decoder, ThumbnailStore store,
                               int maxWidth, int maxHeight, Callback callback,
@@ -157,6 +166,11 @@ public final class ThumbnailScheduler {
         this.indexRefill = refill;
         this.diskSink = diskSink;
         this.durationMs = plan != null ? plan.durationMs : 0;
+    }
+
+    /** Diagnostic: download progress used by the periodic store summary. */
+    public void setDownloadPercent(LongSupplier supplier) {
+        downloadPercent = supplier;
     }
 
     public void setDesiredPosition(long timeMs) {
@@ -276,11 +290,16 @@ public final class ThumbnailScheduler {
         while (true) {
             Task task = null;
             boolean refillDue = false;
+            boolean summaryDue = false;
             synchronized (lock) {
                 if (stopped) {
                     return;
                 }
                 final long now = SystemClock.uptimeMillis();
+                if (now - lastSummaryAt >= 5000L) {
+                    lastSummaryAt = now;
+                    summaryDue = true;
+                }
                 if (dragging) {
                     maybeScheduleHoverLocked(now);
                     final Task head = queue.peek();
@@ -343,6 +362,9 @@ public final class ThumbnailScheduler {
                     task = queue.poll();
                 }
             }
+            if (summaryDue) {
+                logStoreSummary();
+            }
             if (refillDue) {
                 boolean grew = false;
                 try {
@@ -363,6 +385,23 @@ public final class ThumbnailScheduler {
                 decode(task);
             }
         }
+    }
+
+    /** Periodic diagnostic: tells a coverage gap from duplicate decoding. */
+    private void logStoreSummary() {
+        final ThumbnailStore.Snapshot snapshot = store.snapshot();
+        final Thumbnail[] items = snapshot.items;
+        final java.util.HashSet<Long> fingerprints = new java.util.HashSet<>();
+        for (Thumbnail item : items) {
+            fingerprints.add(item.fingerprint);
+        }
+        final long first = items.length > 0 ? items[0].timeMs : -1L;
+        final long last = items.length > 0 ? items[items.length - 1].timeMs : -1L;
+        final int percent = downloadPercent != null ? (int) downloadPercent.getAsLong() : 100;
+        PreviewLog.d("SeekPreview: store summary frames=" + items.length
+                + " distinct=" + fingerprints.size()
+                + " range=" + first + ".." + last
+                + " downloaded=" + percent + "%");
     }
 
     private void decode(Task task) {
@@ -435,6 +474,8 @@ public final class ThumbnailScheduler {
             final Thumbnail thumbnail = new Thumbnail(frame.bitmap, frame.timeMs,
                     frame.keyframeIndex, task.tier);
             store.put(thumbnail, desired >= 0 ? desired : task.timeMs);
+            PreviewLog.d("SeekPreview: frame idx=" + frame.keyframeIndex
+                    + " t=" + frame.timeMs + " fp=" + thumbnail.fingerprint);
             if (diskSink != null) {
                 diskSink.enqueue(frame.timeMs, frame.bitmap);
             }
@@ -635,7 +676,9 @@ public final class ThumbnailScheduler {
         }
         queue.clear();
         final long[] keyframes = plan != null ? plan.keyframeTimesMs : null;
-        if (keyframes != null && keyframes.length > 0) {
+        if (plan != null && plan.uniformStepMs > 0) {
+            addUniformTimesLocked();
+        } else if (keyframes != null && keyframes.length > 0) {
             final boolean[] used = new boolean[keyframes.length];
             int chosen = addBisectedKeyframesLocked(PRIORITY_COARSE, Thumbnail.TIER_COARSE,
                     keyframes, used, COARSE_COUNT);
@@ -684,6 +727,25 @@ public final class ThumbnailScheduler {
             added++;
         }
         return added;
+    }
+
+    /** Evenly spaced local frames for a short video; no keyframe tiers. */
+    private void addUniformTimesLocked() {
+        if (durationMs <= 0) {
+            return;
+        }
+        final long end = Math.max(0L, durationMs - 100L);
+        long step = Math.max(1L, plan.uniformStepMs);
+        long count = end / step + 1L;
+        if (count > 80L) {
+            step = Math.max(step, (end + 79L) / 80L);
+            count = end / step + 1L;
+        }
+        for (long i = 0; i < count; i++) {
+            final long time = Math.min(end, i * step);
+            queue.add(new Task(PRIORITY_COARSE, Thumbnail.TIER_COARSE, time, -1,
+                    nextTaskOrder++));
+        }
     }
 
     private void addBisectedTimesLocked(int priority, int tier, int desiredCount) {

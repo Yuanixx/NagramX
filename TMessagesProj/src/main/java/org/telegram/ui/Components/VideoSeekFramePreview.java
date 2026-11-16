@@ -384,8 +384,14 @@ public class VideoSeekFramePreview extends View {
             // will pick the right picture.
             return;
         }
-        final Thumbnail thumbnail = current.nearest(requestedPosition);
+        final Thumbnail thumbnail = current.nearest(requestedPosition,
+                current.maxFrameDistanceMs());
         if (thumbnail == null) {
+            // Far outside the allowed window: drop the old picture and keep
+            // only the time instead of showing an unrelated frame.
+            if (frame != null) {
+                setFrame(null, requestedPosition, false);
+            }
             return;
         }
         final boolean closer = displayedThumbTimeMs < 0
@@ -451,7 +457,7 @@ public class VideoSeekFramePreview extends View {
             FileLog.d("ABPV: requestFrame no session pos=" + positionMs);
             return;
         }
-        final Thumbnail thumbnail = current.nearest(positionMs);
+        final Thumbnail thumbnail = current.nearest(positionMs, current.maxFrameDistanceMs());
         if (thumbnail != null) {
             final boolean closer = displayedThumbTimeMs < 0
                     || Math.abs(thumbnail.timeMs - positionMs)

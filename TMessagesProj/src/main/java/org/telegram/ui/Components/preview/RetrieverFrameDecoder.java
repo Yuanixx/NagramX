@@ -343,8 +343,8 @@ public final class RetrieverFrameDecoder implements FrameDecoder {
         return new DecodedFrame(bitmap, timeMs, -1);
     }
 
-    private static Bitmap fetchScaledFrame(MediaMetadataRetriever retriever, long timeUs,
-                                           int option, int targetW, int targetH) {
+    static Bitmap fetchScaledFrame(MediaMetadataRetriever retriever, long timeUs,
+                                   int option, int targetW, int targetH) {
         if (retriever == null || targetW <= 0 || targetH <= 0) {
             return null;
         }
@@ -384,7 +384,7 @@ public final class RetrieverFrameDecoder implements FrameDecoder {
         }
     }
 
-    private static Bitmap toRgb565(Bitmap bitmap) {
+    static Bitmap toRgb565(Bitmap bitmap) {
         if (bitmap == null || bitmap.getConfig() == Bitmap.Config.RGB_565) {
             return bitmap;
         }
