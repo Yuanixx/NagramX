@@ -118,6 +118,24 @@ public final class ThumbnailStore {
             }
             return null;
         }
+
+        /** 1-based position of this exact time in the sorted store, or 0. */
+        public int ordinalOf(long timeMs) {
+            int lo = 0;
+            int hi = items.length - 1;
+            while (lo <= hi) {
+                final int mid = (lo + hi) >>> 1;
+                final long t = items[mid].timeMs;
+                if (t < timeMs) {
+                    lo = mid + 1;
+                } else if (t > timeMs) {
+                    hi = mid - 1;
+                } else {
+                    return mid + 1;
+                }
+            }
+            return 0;
+        }
     }
 
     private static final Comparator<Thumbnail> BY_TIME =
@@ -138,6 +156,11 @@ public final class ThumbnailStore {
 
     public Thumbnail nearest(long timeMs, long maxDistanceMs) {
         return snapshot.nearest(timeMs, maxDistanceMs);
+    }
+
+    /** 1-based sorted position of an exact thumbnail time, or 0. */
+    public int ordinalOf(long timeMs) {
+        return snapshot.ordinalOf(timeMs);
     }
 
     public boolean containsTime(long timeMs) {

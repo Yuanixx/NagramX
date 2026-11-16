@@ -251,30 +251,79 @@ public final class PreviewSession {
     }
 
     /**
-     * Binary search only; safe on the UI thread.
-     *
-     * How far the painted moment may sit from the requested time follows the
-     * video itself: a frame is admitted when it is within the video's own
-     * keyframe distance, not within a fixed number of seconds. A video with
-     * a keyframe every two minutes therefore paints a frame that far away,
-     * and one with a keyframe every second paints one second away. The old
-     * fixed limit stays as the floor, so sessions without a measurable
-     * index behave exactly as before. Painting anything farther would show
-     * a wrong moment, so the bubble falls back to just the time.
+     * The closest picture in the store, with no distance limit. A frame from
+     * the next keyframe interval is still useful while the exact one is on
+     * its way; the view marks it as approximate instead of hiding it. Only an
+     * empty store returns null (the bubble then shows just the time).
      */
     public Thumbnail nearest(long timeMs) {
-        final long duration = planDurationMs;
-        long limit = Math.max(REMOTE_WINDOW_MIN_MS,
-                duration > 0 ? duration / 50L : REMOTE_WINDOW_MIN_MS);
-        final long gap = indexTypicalGapMs();
-        if (gap > limit) {
-            limit = gap;
-        }
-        return store.nearest(timeMs, limit);
+        return store.nearest(timeMs);
     }
 
     public int thumbnailCount() {
         return store.size();
+    }
+
+    /** 1-based sorted position of an exact thumbnail time, or 0. */
+    public int thumbnailOrdinal(long timeMs) {
+        return store.ordinalOf(timeMs);
+    }
+
+    /**
+     * The keyframe interval around this position. It is the gap between the
+     * two neighbours that bracket the finger, so a locally sparse GOP is not
+     * judged by the whole file's statistics. Returns a conservative fallback
+     * when no usable index exists.
+     */
+    public long keyframeGapAt(long timeMs) {
+        synchronized (keyframeLock) {
+            final int n = remoteKeyframes.size();
+            if (n < 2) {
+                return Math.max(2000L, planDurationMs / 200L);
+            }
+            int lo = 0;
+            int hi = n - 1;
+            while (lo < hi) {
+                final int mid = (lo + hi) >>> 1;
+                if (remoteKeyframes.get(mid).timeMs < timeMs) {
+                    lo = mid + 1;
+                } else {
+                    hi = mid;
+                }
+            }
+            if (lo >= n) {
+                return Math.max(1L, remoteKeyframes.get(n - 1).timeMs
+                        - remoteKeyframes.get(n - 2).timeMs);
+            }
+            if (remoteKeyframes.get(lo).timeMs == timeMs) {
+                if (lo + 1 < n) {
+                    return Math.max(1L, remoteKeyframes.get(lo + 1).timeMs
+                            - remoteKeyframes.get(lo).timeMs);
+                }
+                if (lo > 0) {
+                    return Math.max(1L, remoteKeyframes.get(lo).timeMs
+                            - remoteKeyframes.get(lo - 1).timeMs);
+                }
+                return Math.max(2000L, planDurationMs / 200L);
+            }
+            if (lo == 0) {
+                return Math.max(1L, remoteKeyframes.get(1).timeMs
+                        - remoteKeyframes.get(0).timeMs);
+            }
+            return Math.max(1L, remoteKeyframes.get(lo).timeMs
+                    - remoteKeyframes.get(lo - 1).timeMs);
+        }
+    }
+
+    /**
+     * True when the scheduler still has a task for the keyframe this position
+     * would show. The spinner is only allowed on screen while this is true:
+     * some sparse regions will never get a closer frame, and a permanent
+     * spinner would be a lie.
+     */
+    public boolean isExactFramePending(long timeMs) {
+        final ThumbnailScheduler target = scheduler;
+        return target != null && target.isPendingFrameFor(timeMs);
     }
 
     public void setDesiredPosition(long timeMs) {

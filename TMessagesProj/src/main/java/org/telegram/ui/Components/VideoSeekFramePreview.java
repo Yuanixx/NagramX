@@ -17,6 +17,7 @@
 
 package org.telegram.ui.Components;
 
+import android.animation.ValueAnimator;
 import android.content.Context;
 import android.graphics.Bitmap;
 import android.graphics.Canvas;
@@ -30,6 +31,8 @@ import android.view.View;
 
 import org.telegram.messenger.AndroidUtilities;
 import org.telegram.messenger.FileLog;
+import org.telegram.messenger.LocaleController;
+import org.telegram.messenger.R;
 import org.telegram.tgnet.TLRPC;
 import org.telegram.ui.Components.preview.PreviewDiskCache;
 import org.telegram.ui.Components.preview.PreviewLog;
@@ -53,7 +56,13 @@ public class VideoSeekFramePreview extends View {
     private final Paint bitmapPaint = new Paint(Paint.FILTER_BITMAP_FLAG);
     private final Paint bgPaint = new Paint();
     private final TextPaint textPaint = new TextPaint(Paint.ANTI_ALIAS_FLAG);
+    private final Paint scrimPaint = new Paint();
+    private final Paint badgeBgPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private final TextPaint badgeTextPaint = new TextPaint(Paint.ANTI_ALIAS_FLAG);
+    private final Paint spinnerPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final RectF dstRect = new RectF();
+    private final RectF badgeRect = new RectF();
+    private final RectF spinnerRect = new RectF();
 
     private Bitmap frame;
     /** True only for an external bitmap, which this view owns and may recycle. */
@@ -62,6 +71,16 @@ public class VideoSeekFramePreview extends View {
     private int timeWidth;
     private int previewWidth;
     private int previewHeight;
+    /** Presentation time of the picture on screen, -1 when it is unknown. */
+    private long displayedThumbTimeMs = -1;
+    private int displayedOrdinal;
+    private boolean displayedApprox;
+    private boolean awaitingExact;
+    /** Incremented for every new press, so a late frame cannot cross gestures. */
+    private int gestureSeq;
+    private int requestGestureSeq;
+    private float frameAlpha = 1f;
+    private ValueAnimator frameFade;
 
     private Uri mediaUri;
     private File mediaFile;
@@ -138,12 +157,50 @@ public class VideoSeekFramePreview extends View {
         }
     };
 
+    /**
+     * The scheduler queues the finger task shortly after a position change,
+     * so the first query can run before it exists. Re-check while an
+     * approximate picture is on screen; the spinner is only painted when a
+     * task for the exact keyframe is really queued or decoding.
+     */
+    private final Runnable pendingRunnable = new Runnable() {
+        @Override
+        public void run() {
+            final PreviewSession current = session;
+            if (current == null || getVisibility() != VISIBLE
+                    || requestedPosition < 0 || !isPressedNow()) {
+                return;
+            }
+            if (!displayedApprox) {
+                if (awaitingExact) {
+                    awaitingExact = false;
+                    invalidate();
+                }
+                return;
+            }
+            final boolean pending = current.isExactFramePending(requestedPosition);
+            if (pending != awaitingExact) {
+                awaitingExact = pending;
+                FileLog.d("ABPV: pending exact=" + pending + " pos=" + requestedPosition);
+                invalidate();
+            }
+            postDelayed(this, pending ? 150L : 250L);
+        }
+    };
+
     public VideoSeekFramePreview(Context context) {
         super(context);
         setVisibility(INVISIBLE);
         bgPaint.setColor(0x99000000);
         textPaint.setColor(Color.WHITE);
         textPaint.setTextSize(AndroidUtilities.dp(13));
+        scrimPaint.setColor(0x66000000);
+        badgeBgPaint.setColor(0xCC000000);
+        badgeTextPaint.setColor(Color.WHITE);
+        badgeTextPaint.setTextSize(AndroidUtilities.dp(10));
+        spinnerPaint.setColor(0xCCFFFFFF);
+        spinnerPaint.setStyle(Paint.Style.STROKE);
+        spinnerPaint.setStrokeWidth(AndroidUtilities.dp(2));
     }
 
     public void setMediaFile(File file, long totalStreamSize, TLRPC.Document document, int account) {
@@ -318,12 +375,26 @@ public class VideoSeekFramePreview extends View {
 
     /** Main thread: a worker added a picture, so the bubble may need to update. */
     private void onSessionThumbnail() {
-        if (session == null || !isPressedNow() || requestedPosition < 0) {
+        final PreviewSession current = session;
+        if (current == null || !isPressedNow() || requestedPosition < 0) {
             return;
         }
-        final Thumbnail thumbnail = session.nearest(requestedPosition);
-        if (thumbnail != null && thumbnail.bitmap != frame) {
-            setFrame(thumbnail.bitmap, requestedPosition, false);
+        if (gestureSeq != requestGestureSeq) {
+            // The finger belongs to a newer gesture; its own requestFrame
+            // will pick the right picture.
+            return;
+        }
+        final Thumbnail thumbnail = current.nearest(requestedPosition);
+        if (thumbnail == null) {
+            return;
+        }
+        final boolean closer = displayedThumbTimeMs < 0
+                || Math.abs(thumbnail.timeMs - requestedPosition)
+                < Math.abs(displayedThumbTimeMs - requestedPosition);
+        if (thumbnail.bitmap != frame && closer) {
+            showThumbnail(current, thumbnail, requestedPosition);
+        } else {
+            updateApproxState(current, thumbnail, requestedPosition);
         }
     }
 
@@ -374,6 +445,7 @@ public class VideoSeekFramePreview extends View {
             current.setDesiredPosition(positionMs);
         }
         requestedPosition = positionMs;
+        requestGestureSeq = gestureSeq;
         updateTimeLabel(positionMs);
         if (current == null) {
             FileLog.d("ABPV: requestFrame no session pos=" + positionMs);
@@ -381,24 +453,95 @@ public class VideoSeekFramePreview extends View {
         }
         final Thumbnail thumbnail = current.nearest(positionMs);
         if (thumbnail != null) {
-            if (thumbnail.bitmap != frame) {
-                FileLog.d("ABPV: nearest t=" + thumbnail.timeMs
-                        + " tier=" + thumbnail.tier
-                        + " storeSize=" + current.thumbnailCount()
-                        + " pos=" + positionMs);
-                setFrame(thumbnail.bitmap, positionMs, false);
+            final boolean closer = displayedThumbTimeMs < 0
+                    || Math.abs(thumbnail.timeMs - positionMs)
+                    < Math.abs(displayedThumbTimeMs - positionMs);
+            if (thumbnail.bitmap != frame && closer) {
+                showThumbnail(current, thumbnail, positionMs);
+            } else {
+                updateApproxState(current, thumbnail, positionMs);
             }
         } else if (frame != null) {
-            // Nothing decoded close enough to this position: keeping the
-            // previous picture under the new timestamp would show the wrong
-            // moment, so drop to a time-only bubble.
-            FileLog.d("ABPV: nearest too far, dropping frame pos=" + positionMs
-                    + " storeSize=" + current.thumbnailCount());
+            // The store is completely empty (not merely far away): there is
+            // no picture to keep under this timestamp.
+            FileLog.d("ABPV: store empty, dropping frame pos=" + positionMs);
             setFrame(null, positionMs, false);
         } else if (logRequest) {
             FileLog.d("ABPV: nearest=null storeSize=" + current.thumbnailCount()
                     + " pos=" + positionMs);
         }
+    }
+
+    /**
+     * Paints a picture and records which moment it really shows. A newer
+     * picture is faded in only when it is closer to the finger than the one
+     * already on screen, so a slow old decode cannot replace a good frame.
+     */
+    private void showThumbnail(PreviewSession current, Thumbnail thumbnail, long positionMs) {
+        final boolean hadFrame = frame != null && !frame.isRecycled();
+        displayedThumbTimeMs = thumbnail.timeMs;
+        displayedOrdinal = current.thumbnailOrdinal(thumbnail.timeMs);
+        displayedApprox = isApproximate(current, thumbnail, positionMs);
+        awaitingExact = displayedApprox && current.isExactFramePending(positionMs);
+        setFrame(thumbnail.bitmap, positionMs, false);
+        if (hadFrame) {
+            startFrameFade();
+        } else {
+            frameAlpha = 1f;
+        }
+        FileLog.d("ABPV: show #" + displayedOrdinal + "/" + current.thumbnailCount()
+                + " t=" + thumbnail.timeMs
+                + " pos=" + positionMs
+                + " diff=" + (thumbnail.timeMs - positionMs)
+                + " approx=" + displayedApprox
+                + " pending=" + awaitingExact
+                + " tier=" + thumbnail.tier);
+        if (displayedApprox) {
+            removeCallbacks(pendingRunnable);
+            postDelayed(pendingRunnable, 120L);
+        }
+    }
+
+    /** Updates the badge/spinner without replacing the bitmap. */
+    private void updateApproxState(PreviewSession current, Thumbnail thumbnail, long positionMs) {
+        final boolean approx = isApproximate(current, thumbnail, positionMs);
+        final boolean pending = approx && current.isExactFramePending(positionMs);
+        if (approx == displayedApprox && pending == awaitingExact) {
+            return;
+        }
+        displayedApprox = approx;
+        awaitingExact = pending;
+        FileLog.d("ABPV: update #" + current.thumbnailOrdinal(thumbnail.timeMs)
+                + "/" + current.thumbnailCount()
+                + " t=" + thumbnail.timeMs
+                + " pos=" + positionMs
+                + " diff=" + (thumbnail.timeMs - positionMs)
+                + " approx=" + approx
+                + " pending=" + pending);
+        invalidate();
+        if (approx) {
+            removeCallbacks(pendingRunnable);
+            postDelayed(pendingRunnable, 120L);
+        }
+    }
+
+    private boolean isApproximate(PreviewSession current, Thumbnail thumbnail, long positionMs) {
+        final long gap = current.keyframeGapAt(positionMs);
+        return gap > 0 && Math.abs(thumbnail.timeMs - positionMs) > gap;
+    }
+
+    private void startFrameFade() {
+        if (frameFade != null) {
+            frameFade.cancel();
+        }
+        frameAlpha = 0f;
+        frameFade = ValueAnimator.ofFloat(0f, 1f);
+        frameFade.setDuration(140L);
+        frameFade.addUpdateListener(animation -> {
+            frameAlpha = (float) animation.getAnimatedValue();
+            invalidate();
+        });
+        frameFade.start();
     }
 
     /**
@@ -417,7 +560,14 @@ public class VideoSeekFramePreview extends View {
         }
         lastFrameAt = System.currentTimeMillis();
         requestedPosition = positionMs;
+        requestGestureSeq = gestureSeq;
         updateTimeLabel(positionMs);
+        displayedThumbTimeMs = positionMs;
+        displayedOrdinal = 0;
+        displayedApprox = false;
+        awaitingExact = false;
+        FileLog.d("ABPV: show external t=" + positionMs + " pos=" + positionMs
+                + " approx=false pending=false");
         setFrame(externalBitmap, positionMs, true);
         if (getVisibility() != VISIBLE) {
             setAlpha(1f);
@@ -444,6 +594,7 @@ public class VideoSeekFramePreview extends View {
         loggedUriRetention = false;
         requestedPosition = -1;
         removeCallbacks(staleRunnable);
+        removeCallbacks(pendingRunnable);
         final PreviewSession current = session;
         if (current != null) {
             current.setDragging(false);
@@ -475,12 +626,16 @@ public class VideoSeekFramePreview extends View {
 
     /** Public so the viewer can report gesture state. */
     public void setDragging(boolean value) {
+        if (value && !dragging) {
+            gestureSeq++;
+        }
         dragging = value;
         if (value) {
             lastFrameAt = System.currentTimeMillis();
         } else {
             retainUriForCurrentDrag = false;
             loggedUriRetention = false;
+            removeCallbacks(pendingRunnable);
         }
         final PreviewSession current = session;
         if (current != null) {
@@ -536,6 +691,7 @@ public class VideoSeekFramePreview extends View {
     protected void onDetachedFromWindow() {
         closeSession();
         removeCallbacks(staleRunnable);
+        removeCallbacks(pendingRunnable);
         dropFrame();
         if (getVisibility() != INVISIBLE) {
             hide("detachedFromWindow");
@@ -556,6 +712,8 @@ public class VideoSeekFramePreview extends View {
         PreviewLog.d("SeekPreview: hide reason=" + reason
                 + " dragging=" + dragging
                 + " visible=" + (getVisibility() == VISIBLE));
+        removeCallbacks(pendingRunnable);
+        cancelFrameFade();
         animate().cancel();
         setVisibility(INVISIBLE);
     }
@@ -572,6 +730,7 @@ public class VideoSeekFramePreview extends View {
             frameOwned = owned;
         }
         if (bitmap == null) {
+            resetDisplayState();
             invalidate();
             return;
         }
@@ -591,7 +750,25 @@ public class VideoSeekFramePreview extends View {
 
     private void dropFrame() {
         releaseFrame();
+        resetDisplayState();
         invalidate();
+    }
+
+    private void resetDisplayState() {
+        displayedThumbTimeMs = -1;
+        displayedOrdinal = 0;
+        displayedApprox = false;
+        awaitingExact = false;
+        frameAlpha = 1f;
+        cancelFrameFade();
+        removeCallbacks(pendingRunnable);
+    }
+
+    private void cancelFrameFade() {
+        if (frameFade != null) {
+            frameFade.cancel();
+            frameFade = null;
+        }
     }
 
     @Override
@@ -606,9 +783,10 @@ public class VideoSeekFramePreview extends View {
         final int width = getWidth();
         final int height = getHeight();
         final int videoHeight = frameTime != null ? height - AndroidUtilities.dp(22) : height;
+        final int radius = AndroidUtilities.dp(6);
 
         dstRect.set(0, 0, width, height);
-        canvas.drawRoundRect(dstRect, AndroidUtilities.dp(6), AndroidUtilities.dp(6), bgPaint);
+        canvas.drawRoundRect(dstRect, radius, radius, bgPaint);
 
         final Bitmap picture = frame;
         if (picture != null && !picture.isRecycled()) {
@@ -624,8 +802,40 @@ public class VideoSeekFramePreview extends View {
                         (videoHeight - drawHeight) / 2f,
                         (width + drawWidth) / 2f,
                         (videoHeight + drawHeight) / 2f);
+                bitmapPaint.setAlpha((int) (255f * frameAlpha));
                 canvas.drawBitmap(picture, null, dstRect, bitmapPaint);
+                bitmapPaint.setAlpha(255);
+                if (displayedApprox) {
+                    canvas.drawRoundRect(dstRect, radius, radius, scrimPaint);
+                }
             }
+        }
+
+        if (displayedApprox && picture != null && !picture.isRecycled()) {
+            final String label = LocaleController.getString(R.string.NaxPreviewApproximate);
+            final int badgeWidth = (int) Math.ceil(badgeTextPaint.measureText(label))
+                    + AndroidUtilities.dp(10);
+            final int badgeHeight = AndroidUtilities.dp(18);
+            final float right = width - AndroidUtilities.dp(6);
+            badgeRect.set(right - badgeWidth, AndroidUtilities.dp(6),
+                    right, AndroidUtilities.dp(6) + badgeHeight);
+            canvas.drawRoundRect(badgeRect, AndroidUtilities.dp(4), AndroidUtilities.dp(4),
+                    badgeBgPaint);
+            canvas.drawText(label,
+                    badgeRect.left + AndroidUtilities.dp(5),
+                    badgeRect.top + AndroidUtilities.dp(13),
+                    badgeTextPaint);
+        }
+
+        if (awaitingExact) {
+            final float centerX = width - AndroidUtilities.dp(16);
+            final float centerY = videoHeight - AndroidUtilities.dp(16);
+            final float spinnerRadius = AndroidUtilities.dp(8);
+            spinnerRect.set(centerX - spinnerRadius, centerY - spinnerRadius,
+                    centerX + spinnerRadius, centerY + spinnerRadius);
+            final int start = (int) ((SystemClock.uptimeMillis() / 4L) % 360L);
+            canvas.drawArc(spinnerRect, start, 280, false, spinnerPaint);
+            postInvalidateOnAnimation();
         }
 
         if (frameTime != null) {
