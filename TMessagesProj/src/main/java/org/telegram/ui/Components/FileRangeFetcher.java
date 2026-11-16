@@ -340,7 +340,10 @@ public final class FileRangeFetcher {
         try {
             final FetchResult result = fetchBlocks(account, document, offset, length,
                     timeoutMs, allowRetry, downloadActive, handle, started);
-            if (result.ok()) {
+            // Only the probe may reopen the gate. A request that was already in
+            // flight when another thread got a 420 must not erase that fresh
+            // cooldown just because it happened to finish successfully.
+            if (result.ok() && probe[0]) {
                 noteProbeSuccess();
             }
             return result;
@@ -388,12 +391,20 @@ public final class FileRangeFetcher {
                     && slice.text != null
                     && FileRefController.isFileRefError(slice.text)) {
                 if (allowRetry) {
+                    if (isCoolingDown()) {
+                        // A flood started while this block was in flight; do
+                        // not spend the retry on a request that will be refused.
+                        return failure(FetchResult.Status.LOCAL_COOLDOWN, 0, -1,
+                                "cooldown", false, slice.requests, started);
+                    }
                     // The reference expired. Another part of the app may
                     // already have refreshed it, so resolve the location again
-                    // and retry once.
+                    // and retry once. This stays inside the same fetch: going
+                    // back through fetchSync would claim a second rate slot and,
+                    // for the probe request, collide with its own probe slot.
                     FileLog.d("ABPV: range retry after file reference error: " + slice.text);
-                    return fetchSync(account, document, offset, length, timeoutMs,
-                            false, handle, started);
+                    return fetchBlocks(account, document, offset, length, timeoutMs,
+                            false, downloadActive, handle, started);
                 }
                 return failure(FetchResult.Status.RETRY_LIMIT, slice.code, -1,
                         RETRY_LIMIT_TEXT, true, slice.requests, started);
