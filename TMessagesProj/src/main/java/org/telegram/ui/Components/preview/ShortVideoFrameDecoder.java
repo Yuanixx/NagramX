@@ -40,7 +40,6 @@ import java.util.Collections;
 public final class ShortVideoFrameDecoder implements FrameDecoder {
 
     private static final long WAIT_SLICE_MS = 200L;
-    private static final long WAIT_LIMIT_MS = 60_000L;
     private static final int FRAME_WIDTH = 160;
     private static final int FRAME_HEIGHT = 90;
 
@@ -77,22 +76,22 @@ public final class ShortVideoFrameDecoder implements FrameDecoder {
         }
         cancelRequested = false;
         cancelled = false;
-        final long waitStarted = SystemClock.uptimeMillis();
-        while (!RetrieverFrameDecoder.isFileComplete(file, declaredSize, document, account)) {
+        while (!closed
+                && !RetrieverFrameDecoder.isFileComplete(file, declaredSize, document, account)) {
             if (cancelRequested) {
                 cancelled = true;
                 return null;
             }
             final long now = SystemClock.uptimeMillis();
-            if (now - waitStarted > WAIT_LIMIT_MS) {
-                if (lastWaitLog == 0L || now - lastWaitLog >= 5000L) {
-                    lastWaitLog = now;
-                    PreviewLog.d("SeekPreview: short video still downloading "
-                            + downloadedPercent() + "%");
-                }
-                return null;
+            if (lastWaitLog == 0L || now - lastWaitLog >= 5000L) {
+                lastWaitLog = now;
+                PreviewLog.d("SeekPreview: short video still downloading "
+                        + downloadedPercent() + "%");
             }
             SystemClock.sleep(WAIT_SLICE_MS);
+        }
+        if (closed) {
+            return null;
         }
         if (!ensureOpen()) {
             return null;

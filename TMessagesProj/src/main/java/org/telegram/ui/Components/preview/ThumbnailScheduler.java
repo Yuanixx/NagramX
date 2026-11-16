@@ -451,6 +451,14 @@ public final class ThumbnailScheduler {
                     synchronized (lock) {
                         failures++;
                     }
+                } else {
+                    // A short decoder waiting for a download can be interrupted
+                    // by a drag. Put the task back so the frame is not lost.
+                    synchronized (lock) {
+                        if (!stopped && !(dragging && task.priority == PRIORITY_HOVER)) {
+                            queue.add(task);
+                        }
+                    }
                 }
                 return;
             }
