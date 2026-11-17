@@ -41,20 +41,18 @@ public final class FragmentIndexRules {
      * restarting every seek at byte 0.
      *
      * @param len        number of bytes actually readable (here the file length)
-     * @param docSize    declared document size
+     * @param docSize    declared document size. Kept for call-site/signature compatibility;
+     *                   not used by the rule itself. At the only production call site
+     *                   (FragmentIndexBuilder.scan), this is reached only under {@code complete},
+     *                   which already implies {@code len == docSize}, so a {@code len < docSize}
+     *                   branch here would be unreachable. The growing-prefix case is decided by
+     *                   {@code complete == false} before this rule is consulted.
      * @param validEnd   byte offset where the last complete top-level box ends
      * @param maxTail    maximum tolerated trailing bytes for a genuinely complete file
      */
     public static boolean shouldTreatAsPartial(long len, long docSize, long validEnd, long maxTail) {
         if (validEnd < 0 || validEnd > len) {
             return true;
-        }
-        // A prefix that is still shorter than the declared size is already partial by
-        // construction (complete=false is decided from len==docSize); the tail test below is
-        // only meaningful for a file that claims to be complete. Using docSize here also makes
-        // the parameter real rather than dead.
-        if (docSize > 0 && len < docSize) {
-            return false;
         }
         return len - validEnd > maxTail;
     }

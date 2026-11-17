@@ -394,29 +394,29 @@ public final class PreviewRulesTest {
     }
 
     private static void testSparseTailDowngrade() {
+        final long maxTail = org.telegram.messenger.FragmentIndexRules.MAX_TAIL_BYTES;
         // A genuinely complete file: box chain ends at the declared size, no downgrade.
-        check(!PreviewRules.shouldTreatAsPartial(1000L, 1000L, 1000L, 64L),
+        check(!PreviewRules.shouldTreatAsPartial(1000L, 1000L, 1000L, maxTail),
                 "a file whose boxes reach EOF is complete");
         // A complete file with the usual small trailing padding is still complete.
-        check(!PreviewRules.shouldTreatAsPartial(1000L, 1000L, 980L, 64L),
+        check(!PreviewRules.shouldTreatAsPartial(1000L, 1000L, 980L, maxTail),
                 "small trailing bytes are tolerated");
         // The 44:22 case: file length == docSize (pre-allocated) but box chain ends at 24%,
         // leaving a huge zero tail. Must be downgraded to partial, not rejected as complete.
-        check(PreviewRules.shouldTreatAsPartial(326398043L, 326398043L, 79168189L, 64L),
+        check(PreviewRules.shouldTreatAsPartial(326398043L, 326398043L, 79168189L, maxTail),
                 "a pre-allocated sparse temp with a huge zero tail is partial");
         // A growing prefix whose boxes reach its own length is genuinely partial already
-        // (complete=false is decided by len<docSize); this helper must not re-flag it.
-        check(!PreviewRules.shouldTreatAsPartial(79168189L, 326398043L, 79168189L, 64L),
+        // (complete=false is decided by len<docSize before this rule runs); no re-flag needed.
+        check(!PreviewRules.shouldTreatAsPartial(79168189L, 326398043L, 79168189L, maxTail),
                 "a prefix with a clean tail needs no downgrade");
         // Invalid / inconsistent inputs degrade to partial conservatively.
-        check(PreviewRules.shouldTreatAsPartial(1000L, 1000L, 1200L, 64L),
+        check(PreviewRules.shouldTreatAsPartial(1000L, 1000L, 1200L, maxTail),
                 "validEnd beyond length is inconsistent -> partial");
-        check(PreviewRules.shouldTreatAsPartial(1000L, 1000L, -1L, 64L),
+        check(PreviewRules.shouldTreatAsPartial(1000L, 1000L, -1L, maxTail),
                 "unknown validEnd -> partial");
-        // docSize now participates: a still-growing prefix (len < docSize) is already partial
-        // by construction and must not be re-flagged by the tail-distance rule.
-        check(!PreviewRules.shouldTreatAsPartial(90_000_000L, 326_398_043L, 80_000_000L, 64L),
-                "a growing prefix is partial already, docSize makes the tail check a no-op");
+        // No assertion for the len<docSize case: docSize is not used by this rule (see
+        // FragmentIndexRules javadoc). The growing-prefix decision is made by `complete` in
+        // FragmentIndexBuilder.build(), which this pure function does not see.
     }
 
     private static void testPartialCacheKeyTracksGrowth() {
