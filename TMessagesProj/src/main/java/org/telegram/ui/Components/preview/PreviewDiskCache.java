@@ -24,10 +24,14 @@ import org.telegram.messenger.ApplicationLoader;
 
 import java.io.File;
 import java.io.FileOutputStream;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Comparator;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
+import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.RejectedExecutionHandler;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * Disk persistence for preview thumbnails, so a video that was previewed once
@@ -41,20 +45,42 @@ import java.util.concurrent.Executors;
  * timeline. The parser reports the actual presentation time of the decoded
  * keyframe, which is what the file name records.
  *
- * All writes go through a single-threaded executor: the decode thread only
- * hands off the bitmap and never touches the disk. The bitmap stays referenced
- * until the JPEG is encoded, which is safe because {@link ThumbnailStore}
- * never recycles bitmaps.
+ * All writes go through one shared daemon thread with a bounded queue: the
+ * decode thread only hands off the bitmap and never touches the disk. The
+ * bitmap stays referenced until the JPEG is encoded, which is safe because
+ * {@link ThumbnailStore} never recycles bitmaps. A full queue drops the
+ * frame and logs it once; a stuck disk must not grow memory forever.
  */
 public final class PreviewDiskCache {
 
     private static final String DIR_NAME = "seek_preview";
     /** Total budget across all sessions; evicted oldest-session first. */
     private static final long MAX_TOTAL_BYTES = 64L * 1024 * 1024;
-    /** Matches the in-memory cap of ThumbnailScheduler (240 frames). */
-    private static final int MAX_FRAMES_PER_SESSION = 240;
+    /** How many persisted frames a reopening session loads back. */
+    private static final int LOAD_FRAMES = 60;
+    private static final int WRITE_QUEUE_CAPACITY = 64;
     private static final int JPEG_QUALITY = 70;
     private static final long TRIM_INTERVAL_MS = 30_000;
+
+    private static final AtomicBoolean WRITE_DROP_LOGGED = new AtomicBoolean();
+    private static final ThreadPoolExecutor WRITE_EXECUTOR = new ThreadPoolExecutor(
+            1, 1, 0L, TimeUnit.MILLISECONDS,
+            new ArrayBlockingQueue<>(WRITE_QUEUE_CAPACITY),
+            runnable -> {
+                final Thread thread = new Thread(runnable, "seek-preview-disk-write");
+                thread.setDaemon(true);
+                thread.setPriority(Thread.MIN_PRIORITY);
+                return thread;
+            },
+            new RejectedExecutionHandler() {
+                @Override
+                public void rejectedExecution(Runnable runnable,
+                                              ThreadPoolExecutor executor) {
+                    if (WRITE_DROP_LOGGED.compareAndSet(false, true)) {
+                        PreviewLog.d("SeekPreview: disk write queue full, dropping frames");
+                    }
+                }
+            });
 
     private static final Object trimLock = new Object();
     private static volatile long lastTrimAt;
@@ -171,7 +197,6 @@ public final class PreviewDiskCache {
         private final File dir;
         private final long documentId;
         private final long declaredSize;
-        private final ExecutorService executor = Executors.newSingleThreadExecutor();
 
         Writer(File dir, long documentId, long declaredSize) {
             this.dir = dir;
@@ -180,49 +205,83 @@ public final class PreviewDiskCache {
             this.dir.mkdirs();
         }
 
-        /** Hands a decoded frame off to the disk thread. Never blocks. */
+        /** Hands a decoded frame off to the shared disk thread. Never blocks. */
         public void enqueue(long timeMs, Bitmap bitmap) {
             if (bitmap == null || bitmap.isRecycled()) {
                 return;
             }
-            executor.execute(() -> writeOne(timeMs, bitmap));
+            WRITE_EXECUTOR.execute(() -> writeOne(timeMs, bitmap));
         }
 
         /**
          * Reads the persisted frames of this session into the store on a
-         * low-priority background thread. Frames land in the coarse tier, so
-         * the scheduler's containsTime check skips re-decoding them.
+         * low-priority background thread. Frames land in the fine tier so the
+         * memory budget can evict them, and the sixty nearest the playback
+         * position are loaded first, so reopening a long video does not fill
+         * the store with frames around minute zero.
          */
-        public void loadInto(ThumbnailStore store) {
-            final File[] files = dir.listFiles();
-            if (files == null || files.length == 0) {
+        public void loadInto(ThumbnailStore store, long desiredMs) {
+            final File[] all = dir.listFiles();
+            if (all == null || all.length == 0) {
                 return;
             }
-            Arrays.sort(files, Comparator.comparingLong(PreviewDiskCache::posMsOf));
+            final ArrayList<File> files = new ArrayList<>(all.length);
+            for (File file : all) {
+                if (posMsOf(file) >= 0) {
+                    files.add(file);
+                }
+            }
+            if (files.isEmpty()) {
+                return;
+            }
+            final long focus = desiredMs >= 0 ? desiredMs : 0L;
+            files.sort(Comparator.comparingLong(
+                    file -> Math.abs(posMsOf(file) - focus)));
+            final int count = Math.min(LOAD_FRAMES, files.size());
+            final ArrayList<File> load = new ArrayList<>(files.subList(0, count));
             final Thread reader = new Thread(() -> {
                 int loaded = 0;
-                for (File file : files) {
-                    if (store.size() >= MAX_FRAMES_PER_SESSION) {
-                        break;
-                    }
+                for (File file : load) {
                     final long posMs = posMsOf(file);
                     if (posMs < 0) {
                         continue;
                     }
-                    final Bitmap bitmap = BitmapFactory.decodeFile(file.getAbsolutePath());
+                    final Bitmap bitmap = decodeForStore(file);
                     if (bitmap == null) {
                         file.delete();
                         continue;
                     }
-                    store.put(new Thumbnail(bitmap, posMs, -1, Thumbnail.TIER_COARSE),
-                            posMs);
+                    store.put(new Thumbnail(bitmap, posMs, -1, Thumbnail.TIER_FINE),
+                            focus);
                     loaded++;
                 }
                 PreviewLog.d("SeekPreview: disk cache loaded " + loaded
-                        + " of " + files.length + " frames");
+                        + " of " + all.length + " frames near=" + focus + "ms");
             }, "seek-preview-disk");
             reader.setPriority(Thread.MIN_PRIORITY);
             reader.start();
+        }
+
+        /**
+         * RGB_565 halves the memory of the coarse layer. Legacy frames that
+         * were stored larger than the preview box are downsampled while
+         * decoding instead of being shrunk after a full-size allocation.
+         */
+        private static Bitmap decodeForStore(File file) {
+            final BitmapFactory.Options bounds = new BitmapFactory.Options();
+            bounds.inJustDecodeBounds = true;
+            BitmapFactory.decodeFile(file.getAbsolutePath(), bounds);
+            int sample = 1;
+            if (bounds.outWidth > 0 && bounds.outHeight > 0) {
+                while (bounds.outWidth / (sample * 2) >= PreviewSession.THUMB_MAX_WIDTH
+                        && bounds.outHeight / (sample * 2) >= PreviewSession.THUMB_MAX_HEIGHT) {
+                    sample *= 2;
+                }
+            }
+            final BitmapFactory.Options options = new BitmapFactory.Options();
+            options.inPreferredConfig = Bitmap.Config.RGB_565;
+            options.inSampleSize = sample;
+            return BitmapFactory.decodeFile(file.getAbsolutePath(), options);
         }
 
         private void writeOne(long timeMs, Bitmap bitmap) {

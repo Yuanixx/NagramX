@@ -55,6 +55,14 @@ public interface FrameDecoder {
     /** Aborts an in-flight decode if the implementation can do so safely. */
     void cancel();
 
+    /**
+     * Clears the cancel flag before a new decode. The scheduler calls this
+     * inside its decode gate, in the same critical section that checks
+     * whether the session was stopped, so a concurrent {@link #cancel()}
+     * can never be erased by a late reset.
+     */
+    void resetCancel();
+
     /** True when the last decode ended because {@link #cancel()} was called. */
     boolean wasCancelled();
 

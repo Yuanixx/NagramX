@@ -17,7 +17,11 @@
 
 package org.telegram.ui.Components.preview;
 
+import android.net.ConnectivityManager;
+import android.net.NetworkInfo;
+
 import org.telegram.messenger.ApplicationLoader;
+import org.telegram.tgnet.ConnectionsManager;
 import org.telegram.tgnet.TLRPC;
 import org.telegram.ui.Components.FileRangeFetcher;
 import org.telegram.ui.Components.MoovKeyframeParser;
@@ -30,24 +34,26 @@ import java.nio.file.Files;
  * Fetches the moov atom of a video whose directory sits past the downloaded
  * prefix (a "tail moov" file).
  *
- * <p>Without this, a partial .temp whose first bytes do not contain moov falls
- * straight to {@link RetrieverFrameDecoder}: there is no keyframe table, so
- * the range fetcher has nothing to ask for. The probe is deliberately small —
- * at most two request blocks from the end of the declared size — because a
- * 1–8MB moov would cost dozens of range requests and easily trip the
- * account's premium throttling. Files with a bigger moov keep using the
- * retriever; the log says so instead of silently degrading.
+ * <p>The window always reaches the declared end of the file; the old block
+ * alignment dropped the final partial block and could never see an atom that
+ * lived there. The probe starts with the last two blocks, moves the window
+ * back while no atom header is visible, and stops at eight blocks (2MB).
+ * Once the header is found, a cut atom is completed with one exact prefix
+ * request. Nothing is retried: a failed or oversized probe keeps the
+ * retriever path.
  *
- * <p>Successful atoms are cached next to the app cache, so reopening the same
- * message costs no request at all.
+ * <p>The probe is skipped on metered or roaming networks, for encrypted
+ * documents, when the network layer is off and when aggressiveness is zero.
+ * Successful atoms are cached by {@code (dc_id, document.id, size)}, so
+ * reopening the same message costs no request at all.
  */
 final class TailMoovFetcher {
 
     private static final String CACHE_DIR = "moov_cache";
-    /** Two blocks are enough for the small moov atoms used by short videos. */
-    private static final int MAX_TAIL_BLOCKS = 2;
-    private static final long MAX_MOOV_BYTES = 64L * 1024 * 1024;
-    private static final long FETCH_TIMEOUT_MS = 2500;
+    /** One probe must never take longer than this in total. */
+    private static final long TOTAL_BUDGET_MS = 12_000L;
+    /** Per-request ceiling; the budget above may shorten it. */
+    private static final long FETCH_TIMEOUT_MS = 2500L;
 
     private TailMoovFetcher() {
     }
@@ -55,7 +61,14 @@ final class TailMoovFetcher {
     /** Returns a parsed source, or null when the probe gave up. */
     static KeyframeSource.Result fetch(TLRPC.Document document, int account,
                                        long declaredSize) {
-        if (document == null || declaredSize <= 0) {
+        if (document == null || account < 0 || declaredSize <= 0) {
+            return null;
+        }
+        if (document.key != null && document.key.length > 0) {
+            PreviewLog.d("SeekPreview: tail moov skipped (encrypted)");
+            return null;
+        }
+        if (!networkAllowed()) {
             return null;
         }
         final File cacheFile = cacheFileFor(document, declaredSize);
@@ -70,6 +83,7 @@ final class TailMoovFetcher {
         final MoovKeyframeParser.TrackInfo track = MoovKeyframeParser.parseTrack(moov);
         if (track == null || track.keyframes.isEmpty()) {
             cacheFile.delete();
+            PreviewLog.d("SeekPreview: tail moov parse failed size=" + moov.length);
             return null;
         }
         PreviewLog.d("SeekPreview: tail moov ok size=" + moov.length
@@ -78,60 +92,152 @@ final class TailMoovFetcher {
                 declaredSize - moov.length, moov.length, declaredSize);
     }
 
-    /** Reads at most two blocks from the end and cuts the moov atom out of it. */
+    /**
+     * Probes backwards without retries. The first read covers the last two
+     * blocks; every later read prepends more blocks, up to the eight-block
+     * cap. Any failure ends the probe and leaves the retriever in charge.
+     */
     private static byte[] probeTail(TLRPC.Document document, int account,
                                     long declaredSize) {
+        final long deadline = System.currentTimeMillis() + TOTAL_BUDGET_MS;
         final int block = FileRangeFetcher.blockBytes();
-        final long window = (long) block * MAX_TAIL_BLOCKS;
-        final long tailStart = Math.max(0L,
-                ((declaredSize - window) / block) * block);
-        final int length = (int) Math.min(declaredSize - tailStart, window);
-        if (length < 16) {
-            return null;
-        }
-        final FileRangeFetcher.FetchResult result = FileRangeFetcher.fetchSync(account, document,
-                tailStart, length, FETCH_TIMEOUT_MS, null);
-        if (!result.ok() || result.data.length < 16) {
-            return null;
-        }
-        final byte[] tail = result.data;
-        final int tag = lastIndexOfMoov(tail);
-        if (tag < 4) {
-            return null;
-        }
-        final long moovSize = readU32(tail, tag - 4);
-        if (moovSize < 16 || moovSize > MAX_MOOV_BYTES) {
-            return null;
-        }
-        final int headerOffset = tag - 4;
-        if (headerOffset + moovSize > tail.length) {
-            // The atom starts inside the window but is longer than it; asking
-            // for the rest would cost many requests, so give up loudly.
-            PreviewLog.d("SeekPreview: tail moov too large size=" + moovSize
-                    + " window=" + length);
-            return null;
-        }
-        final byte[] moov = new byte[(int) moovSize];
-        System.arraycopy(tail, headerOffset, moov, 0, (int) moovSize);
-        return moov;
-    }
+        byte[] data = null;
+        long dataStart = 0L;
+        int blocks = TailMoovLocator.INITIAL_BLOCKS;
+        while (blocks <= TailMoovLocator.MAX_BLOCKS) {
+            final long start = TailMoovLocator.windowStart(declaredSize, blocks, block);
+            if (data == null) {
+                final int length = (int) Math.min(declaredSize - start,
+                        (long) blocks * block);
+                final byte[] fetched = fetchRange(document, account, start, length, deadline);
+                if (fetched == null) {
+                    PreviewLog.d("SeekPreview: tail moov probe failed at " + length + " bytes");
+                    return null;
+                }
+                data = fetched;
+                dataStart = start;
+            } else if (start < dataStart) {
+                // Only the new prefix goes on the wire; the tail is reused.
+                final int length = (int) Math.min(dataStart - start, Integer.MAX_VALUE);
+                final byte[] prefix = fetchRange(document, account, start, length, deadline);
+                if (prefix == null) {
+                    PreviewLog.d("SeekPreview: tail moov expansion failed at "
+                            + blocks + " blocks");
+                    return null;
+                }
+                data = TailMoovLocator.combine(prefix, data);
+                dataStart = start;
+            } else {
+                // The window already covers the whole file, so more blocks
+                // cannot reveal anything new.
+                break;
+            }
 
-    /** Scans backwards: a tail moov ends at the end of the file. */
-    private static int lastIndexOfMoov(byte[] data) {
-        for (int i = data.length - 4; i >= 4; i--) {
-            if (data[i] == 'm' && data[i + 1] == 'o'
-                    && data[i + 2] == 'o' && data[i + 3] == 'v') {
-                return i;
+            final TailMoovLocator.Analysis result = TailMoovLocator.analyze(
+                    data, dataStart, declaredSize, block);
+            switch (result.kind) {
+                case COMPLETE:
+                    return result.moov;
+                case NEED_PREFIX: {
+                    final byte[] prefix = fetchRange(document, account,
+                            result.missingOffset, result.missingLength, deadline);
+                    if (prefix == null) {
+                        PreviewLog.d("SeekPreview: tail moov prefix failed size="
+                                + result.moovSize);
+                        return null;
+                    }
+                    final byte[] combined = TailMoovLocator.combine(data, prefix);
+                    final TailMoovLocator.Analysis done = TailMoovLocator.analyze(
+                            combined, dataStart, declaredSize, block);
+                    if (done.kind == TailMoovLocator.Kind.COMPLETE) {
+                        return done.moov;
+                    }
+                    PreviewLog.d("SeekPreview: tail moov still incomplete kind="
+                            + done.kind);
+                    return null;
+                }
+                case TOO_LARGE:
+                    PreviewLog.d("SeekPreview: tail moov too large size="
+                            + result.moovSize + " blocks=" + result.blocks);
+                    return null;
+                case INVALID:
+                    PreviewLog.d("SeekPreview: tail moov invalid header");
+                    return null;
+                case NOT_FOUND:
+                default:
+                    if (dataStart <= 0L) {
+                        PreviewLog.d("SeekPreview: tail moov not found in "
+                                + data.length + " bytes");
+                        return null;
+                    }
+                    blocks += 2;
+                    break;
             }
         }
-        return -1;
+        PreviewLog.d("SeekPreview: tail moov not found in "
+                + TailMoovLocator.MAX_BLOCKS + " blocks");
+        return null;
     }
 
-    private static long readU32(byte[] data, int offset) {
-        return ((data[offset] & 0xffL) << 24)
-                | ((data[offset + 1] & 0xffL) << 16)
-                | ((data[offset + 2] & 0xffL) << 8)
-                | (data[offset + 3] & 0xffL);
+    /** One range read with no retry, clamped to what is left of the budget. */
+    private static byte[] fetchRange(TLRPC.Document document, int account,
+                                     long offset, int length, long deadline) {
+        if (length <= 0) {
+            return null;
+        }
+        final long remaining = deadline - System.currentTimeMillis();
+        if (remaining <= 0L) {
+            return null;
+        }
+        try {
+            final FileRangeFetcher.FetchResult result = FileRangeFetcher.fetchSync(
+                    account, document, offset, length,
+                    Math.min(FETCH_TIMEOUT_MS, remaining), remaining, null);
+            return result.ok() ? result.data : null;
+        } catch (Throwable e) {
+            PreviewLog.w("SeekPreview: tail moov read failed off=" + offset, e);
+            return null;
+        }
+    }
+
+    /**
+     * Previews are optional traffic: no mobile data, no roaming, no traffic
+     * when the user turned the layer off.
+     */
+    @SuppressWarnings("deprecation")
+    private static boolean networkAllowed() {
+        if (!tw.nekomimi.nekogram.NekoConfig.videoPreviewNetworkFetch.Bool()) {
+            PreviewLog.d("SeekPreview: tail moov skipped (setting)");
+            return false;
+        }
+        if (tw.nekomimi.nekogram.NekoConfig.videoPreviewFetchAggressiveness.Int() == 0) {
+            PreviewLog.d("SeekPreview: tail moov skipped (aggressiveness 0)");
+            return false;
+        }
+        try {
+            final ConnectivityManager manager = (ConnectivityManager)
+                    ApplicationLoader.applicationContext
+                            .getSystemService(android.content.Context.CONNECTIVITY_SERVICE);
+            if (manager == null) {
+                return true;
+            }
+            final NetworkInfo info = manager.getActiveNetworkInfo();
+            if (info == null || !info.isConnected()) {
+                PreviewLog.d("SeekPreview: tail moov skipped (offline)");
+                return false;
+            }
+            if (info.isRoaming()) {
+                PreviewLog.d("SeekPreview: tail moov skipped (roaming)");
+                return false;
+            }
+            if (manager.isActiveNetworkMetered()) {
+                PreviewLog.d("SeekPreview: tail moov skipped (metered)");
+                return false;
+            }
+            return true;
+        } catch (Throwable e) {
+            return true;
+        }
     }
 
     private static File cacheDir() {
@@ -139,13 +245,15 @@ final class TailMoovFetcher {
     }
 
     private static File cacheFileFor(TLRPC.Document document, long declaredSize) {
+        final int dcId = document.dc_id > 0
+                ? document.dc_id : ConnectionsManager.DEFAULT_DATACENTER_ID;
         return new File(cacheDir(),
-                document.id + "_" + declaredSize + ".moov");
+                dcId + "_" + document.id + "_" + declaredSize + ".moov");
     }
 
     private static byte[] readCached(File file) {
         try {
-            if (!file.isFile() || file.length() < 16) {
+            if (!file.isFile() || file.length() < TailMoovLocator.MIN_MOOV_BYTES) {
                 return null;
             }
             return Files.readAllBytes(file.toPath());

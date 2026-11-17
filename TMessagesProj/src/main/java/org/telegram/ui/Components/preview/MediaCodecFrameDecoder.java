@@ -170,8 +170,6 @@ public final class MediaCodecFrameDecoder implements FrameDecoder {
         if (closed) {
             throw new IllegalStateException("decoder is closed");
         }
-        cancelled = false;
-        cancelRequested = false;
         final int index = nearestKeyframeIndex(timeMs);
         if (index < 0 || index >= keyframes.size()) {
             return null;
@@ -662,6 +660,12 @@ public final class MediaCodecFrameDecoder implements FrameDecoder {
     @Override
     public void cancel() {
         cancelRequested = true;
+    }
+
+    @Override
+    public void resetCancel() {
+        cancelRequested = false;
+        cancelled = false;
     }
 
     @Override

@@ -169,17 +169,6 @@ public class NekoConfig {
 
     public static ConfigItem customAudioBitrate = addConfig("customAudioBitrate", configTypeInt, 32);
     public static ConfigItem enhancedFileLoader = addConfig("enhancedFileLoader", configTypeBool, false);
-    /**
-     * Gates the *behaviour* of the video preview diagnostics: the N=5/N=10
-     * retry ladder, the readAt tracer and the control-group re-decode. The
-     * ABPV log lines themselves are always written (FileLog lets that prefix
-     * through regardless of {@code BuildVars.LOGS_ENABLED}), so this switch
-     * costs nothing when it is off.
-     *
-     * Default true for this build so the next round of tests produces data;
-     * flip back to false before shipping.
-     */
-    public static ConfigItem videoPreviewDiagnostics = addConfig("videoPreviewDiagnostics", configTypeBool, false);
 
     /**
      * Master switch for preview range requests. Fetching is now structurally
@@ -209,12 +198,6 @@ public class NekoConfig {
      * more requests.
      */
     public static ConfigItem videoPreviewFetchBlockKb = addConfig("videoPreviewFetchBlockKb", configTypeInt, 256);
-    /**
-     * When a partially downloaded video keeps its moov atom past the
-     * downloaded prefix, probe the last blocks of the file once to fetch it.
-     * Bounded to two request blocks; bigger atoms fall back to the retriever.
-     */
-    public static ConfigItem videoPreviewTailMoov = addConfig("videoPreviewTailMoov", configTypeBool, false);
     public static ConfigItem uploadBoost = addConfig("uploadBoost", configTypeBool, false);
     public static ConfigItem useOSMDroidMap = addConfig("useOSMDroidMap", configTypeBool, false);
     public static ConfigItem mapDriftingFixForGoogleMaps = addConfig("mapDriftingFixForGoogleMaps", configTypeBool, true);

@@ -92,6 +92,12 @@ public final class RetrieverFrameDecoder implements FrameDecoder {
         if (file == null || !file.exists()) {
             return false;
         }
+        if (document == null && file.getName().endsWith(".temp")) {
+            // A .temp is the downloader's sparse working file. Without the
+            // document there is no way to ask which ranges are really there,
+            // so its length proves nothing and the retriever must stream it.
+            return false;
+        }
         if (declaredSize <= 0) {
             return file.length() > 0;
         }
@@ -281,8 +287,6 @@ public final class RetrieverFrameDecoder implements FrameDecoder {
         if (closed) {
             throw new IllegalStateException("retriever is closed");
         }
-        cancelled = false;
-        cancelRequested = false;
         if (!ensureOpen()) {
             return null;
         }
@@ -412,6 +416,12 @@ public final class RetrieverFrameDecoder implements FrameDecoder {
     @Override
     public void cancel() {
         cancelRequested = true;
+    }
+
+    @Override
+    public void resetCancel() {
+        cancelRequested = false;
+        cancelled = false;
     }
 
     @Override

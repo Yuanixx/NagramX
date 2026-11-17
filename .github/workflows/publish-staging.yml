@@ -1,0 +1,96 @@
+name: Publish staging
+
+# Manual gate: this is the only workflow that touches the public mirror.
+# It downloads the artifact of a finished Staging build, so what is published
+# is exactly the APK that was installed and accepted, not a fresh compile.
+on:
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: 'Staging build run id (Actions -> Staging build -> run id)'
+        required: true
+        type: string
+
+permissions:
+  actions: read
+  contents: read
+
+concurrency:
+  group: staging-publish
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Publish accepted build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download the accepted artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ inputs.run_id }}
+        run: |
+          rm -rf staging
+          gh run download "$RUN_ID" --repo "$GITHUB_REPOSITORY" \
+            --name Staging --dir staging
+          ls -l staging
+          test -f staging/build-info.json
+          jq . staging/build-info.json
+
+      - name: Read build info
+        id: info
+        run: |
+          INFO=staging/build-info.json
+          echo "version=$(jq -r '.version' "$INFO")" >> "$GITHUB_OUTPUT"
+          echo "versionCode=$(jq -r '.versionCode' "$INFO")" >> "$GITHUB_OUTPUT"
+          echo "commit=$(jq -r '.commit' "$INFO")" >> "$GITHUB_OUTPUT"
+          echo "builtAt=$(jq -r '.builtAt' "$INFO")" >> "$GITHUB_OUTPUT"
+
+      - name: Publish to the update mirror
+        env:
+          GH_TOKEN: ${{ secrets.REPO_ADMIN_TOKEN }}
+          VERSION_NAME: ${{ steps.info.outputs.version }}
+          VERSION_CODE: ${{ steps.info.outputs.versionCode }}
+          COMMIT_ID: ${{ steps.info.outputs.commit }}
+          BUILD_TIMESTAMP: ${{ steps.info.outputs.builtAt }}
+        run: |
+          if [ -z "$GH_TOKEN" ]; then
+            echo "No admin token configured; cannot publish."
+            exit 1
+          fi
+          MIRROR=Yuanixx/NagramX-releases
+          ARM64="NagramX-${VERSION_NAME}-arm64-v8a.apk"
+          UNIVERSAL="NagramX-${VERSION_NAME}-universal.apk"
+          NOTES=$(jq -r '.notes' staging/build-info.json)
+          rm -rf mirror
+          mkdir -p mirror
+          cp "$(ls staging/*-arm64-v8a.apk | head -n1)" "mirror/$ARM64"
+          cp "$(ls staging/*-universal.apk | head -n1)" "mirror/$UNIVERSAL"
+          {
+            echo "已验收的构建。"
+            echo
+            echo "- Commit: $COMMIT_ID"
+            echo "- Version: $VERSION_NAME ($VERSION_CODE)"
+            echo
+            echo "$NOTES"
+          } > mirror/notes.md
+          BUILD_TIMESTAMP="${BUILD_TIMESTAMP:-0}"
+          jq -n \
+            --arg version "$VERSION_NAME" \
+            --argjson versionCode "$VERSION_CODE" \
+            --arg commit "$COMMIT_ID" \
+            --argjson builtAt "$BUILD_TIMESTAMP" \
+            --arg notes "$NOTES" \
+            --arg arm64 "$ARM64" \
+            --arg universal "$UNIVERSAL" \
+            '{version:$version, versionCode:$versionCode, commit:$commit, builtAt:$builtAt, notes:$notes, arm64:$arm64, universal:$universal}' \
+            > mirror/update.json
+          gh release delete staging --repo "$MIRROR" --yes --cleanup-tag=false 2>/dev/null || true
+          gh release create staging \
+            --repo "$MIRROR" \
+            --title "Staging build" \
+            --notes-file mirror/notes.md \
+            "mirror/$ARM64" \
+            "mirror/$UNIVERSAL" \
+            mirror/update.json
+          gh release view staging --repo "$MIRROR" --json assets \
+            --jq '.assets[].name'

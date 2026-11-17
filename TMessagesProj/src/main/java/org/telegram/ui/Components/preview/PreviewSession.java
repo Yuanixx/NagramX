@@ -86,12 +86,6 @@ public final class PreviewSession {
     private static final long REMOTE_WINDOW_MIN_MS = 30_000L;
     /** Largest block the chain scan may request when a moof refuses to fit. */
     private static final int MAX_SCAN_FETCH_BYTES = 4 * 1024 * 1024;
-    /** Consecutive real failures after which this session goes local-only. */
-    private static final int REMOTE_MAX_FAILURES = 3;
-    /** How long it stays dark after the first plain failure streak. */
-    private static final long REMOTE_FAILURE_COOLDOWN_MS = 30_000L;
-    /** Repeated streaks double the wait, up to five minutes. */
-    private static final long REMOTE_FAILURE_COOLDOWN_MAX_MS = 5L * 60L * 1000L;
 
     private static final class Prepared {
         final FrameDecoder decoder;
@@ -149,20 +143,12 @@ public final class PreviewSession {
     /** Set once in prepare() on the scheduler thread; null means local only. */
     private RangeSupplier remoteSupplier;
     /**
-     * Wall-clock deadline of this session's own cooldown; 0 means allowed.
-     *
-     * Only plain failures live here. A server flood wait parks every caller in
-     * {@link FileRangeFetcher} instead, because the limit belongs to the
-     * account and must survive switching videos.
+     * This session's failure state. Only plain failures are counted here: a
+     * server flood wait parks every caller in {@link FileRangeFetcher}
+     * instead, because the limit belongs to the account and must survive
+     * switching videos.
      */
-    private volatile long remoteDisabledUntilMs;
-    /**
-     * True once a failure cooldown was set. The next request after the
-     * cooldown acts as the recovery probe: success clears the streak, failure
-     * parks again.
-     */
-    private volatile boolean remoteProbePending;
-    private volatile int remoteFloodWaits;
+    private final RemoteFailureTracker remoteFailures = new RemoteFailureTracker();
     private final AtomicInteger remoteFailureTotal = new AtomicInteger();
     private final AtomicInteger remoteTimeoutTotal = new AtomicInteger();
     private volatile boolean remoteBudgetLogged;
@@ -196,14 +182,18 @@ public final class PreviewSession {
     private final LinkedHashMap<Long, byte[]> remoteCache = new LinkedHashMap<>();
     private long remoteCacheBytes;
     private final HashSet<Long> remoteInFlight = new HashSet<>();
-    /** Guarded by remoteLock. */
-    private int remoteFailures;
-    /** Consecutive failure cooldowns; drives the exponential backoff. */
-    private volatile int remoteCooldownStreak;
     private volatile FileRangeFetcher.FetchHandle prefetchHandle;
     private volatile long prefetchTimeMs = -1;
     private volatile FileRangeFetcher.FetchHandle decoderFetchHandle;
     private volatile long decoderFetchTimeMs = -1;
+    /**
+     * Every range request currently in the session. A cooldown that starts
+     * while another request is on the wire must cancel it: the server has
+     * already said no, and the request would otherwise keep a download slot
+     * busy. Session teardown uses the same registry.
+     */
+    private final Object handlesLock = new Object();
+    private final HashSet<FileRangeFetcher.FetchHandle> activeHandles = new HashSet<>();
     /** Incremented on every drag-position change; stale requests give up. */
     private volatile int demandGeneration;
     private volatile boolean prefetchStopped;
@@ -272,14 +262,7 @@ public final class PreviewSession {
     /** max(1.5s, 5% of duration), widened for very short videos. */
     public long maxFrameDistanceMs() {
         final long duration = planDurationMs > 0 ? planDurationMs : documentDurationMs();
-        if (duration <= 0L) {
-            return 1500L;
-        }
-        long limit = Math.max(1500L, duration / 20L);
-        if (duration < 10_000L) {
-            limit = Math.max(limit, duration / 2L);
-        }
-        return limit;
+        return PreviewRules.displayLimitMs(duration);
     }
 
     public int thumbnailCount() {
@@ -417,7 +400,7 @@ public final class PreviewSession {
                 + " bytes=" + remoteBytesFetched.get()
                 + " fails=" + remoteFailureTotal.get()
                 + " timeouts=" + remoteTimeoutTotal.get()
-                + " floods=" + remoteFloodWaits
+                + " floods=" + remoteFailures.floodWaits()
                 + " cooling=" + isRemoteCoolingDown());
     }
 
@@ -447,7 +430,7 @@ public final class PreviewSession {
                 return;
             }
             if (diskSink != null) {
-                diskSink.loadInto(store);
+                diskSink.loadInto(store, desiredMs);
             }
             PreviewLog.d("SeekPreview: session decoder=" + decoder.name()
                     + " duration=" + prepared.plan.durationMs
@@ -601,8 +584,7 @@ public final class PreviewSession {
             if (declaredSize > 0) {
                 source = KeyframeSource.read(file);
                 if (source == null && !stopped && !isRemoteCoolingDown()
-                        && declaredSize > file.length()
-                        && NekoConfig.videoPreviewTailMoov.Bool()) {
+                        && declaredSize > file.length()) {
                     // The directory sits past the downloaded prefix (a tail
                     // moov file). Probe the last blocks once so the range
                     // fetcher has a keyframe table to work with; a failed
@@ -612,10 +594,10 @@ public final class PreviewSession {
             }
             final int keyframeCount = source != null && source.track != null
                     ? source.track.keyframes.size() : 0;
+            final boolean indexKnown = source != null && source.track != null;
             final long docDuration = documentDuration;
-            final boolean shortMode = file != null
-                    && keyframeCount < 12
-                    && docDuration > 0L && docDuration <= 60_000L;
+            final boolean shortMode = PreviewRules.shouldUseShortMode(
+                    indexKnown, keyframeCount, docDuration);
             if (shortMode) {
                 // A handful of keyframes cannot paint a short timeline. Decode
                 // even moments locally instead of spending a network request.
@@ -876,6 +858,7 @@ public final class PreviewSession {
                 final long targetTime = target.timeMs;
                 handle.stale = () -> nearestKeyframeTime(desiredMs) != targetTime;
             }
+            registerHandle(handle);
             prefetchHandle = handle;
             prefetchTimeMs = fetchTimeMs;
             byte[] data = null;
@@ -888,6 +871,8 @@ public final class PreviewSession {
             } catch (Throwable e) {
                 PreviewLog.w("SeekPreview: prefetch failed off=" + fetchOffset, e);
             } finally {
+                unregisterHandle(handle);
+                boolean cancelAfter = false;
                 synchronized (remoteLock) {
                     remoteInFlight.remove(fetchOffset);
                     if (target == null) {
@@ -913,9 +898,18 @@ public final class PreviewSession {
                     } else if (!stopped && !prefetchStopped) {
                         // Cancelled, stale and local-cooldown results carry
                         // countsAsFailure=false, so they leave the streak alone.
-                        recordRemoteFailureLocked(result);
+                        cancelAfter = recordRemoteFailureLocked(result);
+                        if (result != null && result.status
+                                == FileRangeFetcher.FetchResult.Status.FLOOD) {
+                            cancelAfter = true;
+                        }
                     }
                     remoteLock.notifyAll();
+                }
+                if (cancelAfter) {
+                    // A cooldown has started: requests that are still on the
+                    // wire are refused anyway and must not hold the slot.
+                    cancelActiveHandles();
                 }
             }
             if (target == null && data != null && !stopped && !prefetchStopped) {
@@ -1224,6 +1218,7 @@ public final class PreviewSession {
             // Drop the request only if it has not been sent yet; a sent block
             // finishes and its bytes stay in the cache for the next visit.
             handle.stale = () -> generation != demandGeneration;
+            registerHandle(handle);
             decoderFetchTimeMs = timeMs;
             decoderFetchHandle = handle;
         }
@@ -1239,6 +1234,10 @@ public final class PreviewSession {
             PreviewLog.w("SeekPreview: remote keyframe failed off=" + offset
                     + " size=" + size, e);
         } finally {
+            if (handle != null) {
+                unregisterHandle(handle);
+            }
+            boolean cancelAfter = false;
             synchronized (remoteLock) {
                 remoteInFlight.remove(offset);
                 if (decoderFetchHandle == handle) {
@@ -1257,9 +1256,18 @@ public final class PreviewSession {
                 } else if (!stopped) {
                     // The result decides whether this counts; a drag that moved
                     // away must not move the failure streak.
-                    recordRemoteFailureLocked(result);
+                    if (handle != null) {
+                        cancelAfter = recordRemoteFailureLocked(result);
+                        if (result != null && result.status
+                                == FileRangeFetcher.FetchResult.Status.FLOOD) {
+                            cancelAfter = true;
+                        }
+                    }
                 }
                 remoteLock.notifyAll();
+            }
+            if (cancelAfter) {
+                cancelActiveHandles();
             }
         }
         return data;
@@ -1273,47 +1281,64 @@ public final class PreviewSession {
      * and a malformed response are. A 420 is not a session failure either:
      * FileRangeFetcher parks every caller on its own account-wide cooldown, so
      * this session only keeps the count for its summary line.
+     *
+     * @return true when this result started a session cooldown
      */
-    private void recordRemoteFailureLocked(FileRangeFetcher.FetchResult result) {
+    private boolean recordRemoteFailureLocked(FileRangeFetcher.FetchResult result) {
+        final RemoteFailureTracker.Outcome outcome;
+        if (result == null) {
+            outcome = RemoteFailureTracker.Outcome.REAL_FAILURE;
+        } else {
+            switch (result.status) {
+                case SUCCESS:
+                    outcome = RemoteFailureTracker.Outcome.SUCCESS;
+                    break;
+                case FLOOD:
+                    outcome = RemoteFailureTracker.Outcome.FLOOD;
+                    break;
+                case LOCAL_COOLDOWN:
+                    outcome = RemoteFailureTracker.Outcome.LOCAL_COOLDOWN;
+                    break;
+                case CANCELLED:
+                    outcome = RemoteFailureTracker.Outcome.CANCELLED;
+                    break;
+                default:
+                    outcome = result.countsAsFailure
+                            ? RemoteFailureTracker.Outcome.REAL_FAILURE
+                            : RemoteFailureTracker.Outcome.CANCELLED;
+                    break;
+            }
+        }
         final long now = System.currentTimeMillis();
-        if (result != null && result.status == FileRangeFetcher.FetchResult.Status.FLOOD) {
-            remoteFloodWaits++;
+        final boolean started = remoteFailures.onOutcome(outcome, now);
+        if (outcome == RemoteFailureTracker.Outcome.FLOOD) {
             PreviewLog.d("SeekPreview: remote flood wait " + result.floodSeconds
                     + "s cooldown=" + FileRangeFetcher.coolingDownRemainingMs() + "ms");
-            return;
         }
-        if (result == null || result.countsAsFailure) {
-            remoteFailures++;
+        if (outcome == RemoteFailureTracker.Outcome.REAL_FAILURE) {
             remoteFailureTotal.incrementAndGet();
-            if (result != null && result.status == FileRangeFetcher.FetchResult.Status.TIMEOUT) {
+            if (result != null
+                    && result.status == FileRangeFetcher.FetchResult.Status.TIMEOUT) {
                 remoteTimeoutTotal.incrementAndGet();
             }
-            if (remoteFailures >= REMOTE_MAX_FAILURES || remoteProbePending) {
-                long cooldown = REMOTE_FAILURE_COOLDOWN_MS;
-                for (int i = 0; i < remoteCooldownStreak
-                        && cooldown < REMOTE_FAILURE_COOLDOWN_MAX_MS; i++) {
-                    cooldown = Math.min(REMOTE_FAILURE_COOLDOWN_MAX_MS, cooldown * 2L);
-                }
-                remoteCooldownStreak = Math.min(remoteCooldownStreak + 1, 8);
-                remoteDisabledUntilMs = now + cooldown;
-                PreviewLog.d("SeekPreview: remote disabled reason=failures streak="
-                        + remoteFailures + " cooldown=" + cooldown
-                        + "ms until=" + remoteDisabledUntilMs);
-                remoteFailures = 0;
-                remoteProbePending = true;
-            }
         }
+        if (started) {
+            final long until = remoteFailures.disabledUntilMs();
+            PreviewLog.d("SeekPreview: remote disabled reason=failures streak="
+                    + remoteFailures.streak() + " cooldown="
+                    + Math.max(0L, until - now) + "ms until=" + until);
+        }
+        return started;
     }
 
     /** Guarded by remoteLock. Clears the streak and confirms a recovery probe. */
     private void recordRemoteSuccessLocked() {
-        if (remoteProbePending) {
-            remoteProbePending = false;
+        final boolean probe = remoteFailures.probePending();
+        remoteFailures.onOutcome(
+                RemoteFailureTracker.Outcome.SUCCESS, System.currentTimeMillis());
+        if (probe) {
             PreviewLog.d("SeekPreview: remote probe ok");
         }
-        remoteFloodWaits = 0;
-        remoteFailures = 0;
-        remoteCooldownStreak = 0;
     }
 
     /**
@@ -1324,17 +1349,12 @@ public final class PreviewSession {
         if (FileRangeFetcher.isCoolingDown()) {
             return true;
         }
-        final long until = remoteDisabledUntilMs;
-        if (until == 0L) {
-            return false;
-        }
-        if (System.currentTimeMillis() < until) {
+        if (remoteFailures.isCoolingDown(System.currentTimeMillis())) {
             return true;
         }
-        // Latch the expiry so the log appears once and the next request can
-        // act as the probe.
-        remoteDisabledUntilMs = 0L;
-        PreviewLog.d("SeekPreview: remote disabled expired");
+        if (remoteFailures.consumeExpired()) {
+            PreviewLog.d("SeekPreview: remote disabled expired");
+        }
         return false;
     }
 
@@ -1587,8 +1607,44 @@ public final class PreviewSession {
         }
     }
 
+    private void registerHandle(FileRangeFetcher.FetchHandle handle) {
+        if (handle == null) {
+            return;
+        }
+        synchronized (handlesLock) {
+            activeHandles.add(handle);
+        }
+    }
+
+    private void unregisterHandle(FileRangeFetcher.FetchHandle handle) {
+        if (handle == null) {
+            return;
+        }
+        synchronized (handlesLock) {
+            activeHandles.remove(handle);
+        }
+    }
+
+    /** Cancels every request still on the wire. Never call with remoteLock held. */
+    private void cancelActiveHandles() {
+        final FileRangeFetcher.FetchHandle[] copy;
+        synchronized (handlesLock) {
+            if (activeHandles.isEmpty()) {
+                return;
+            }
+            copy = activeHandles.toArray(new FileRangeFetcher.FetchHandle[0]);
+        }
+        for (FileRangeFetcher.FetchHandle handle : copy) {
+            handle.cancel();
+        }
+        PreviewLog.d("SeekPreview: cancelled " + copy.length + " in-flight request(s)");
+    }
+
     private void stopRemotePrefetch() {
         prefetchStopped = true;
+        // Registry first: this also covers a request that is between its
+        // creation and the moment the fields below are read.
+        cancelActiveHandles();
         final FileRangeFetcher.FetchHandle sync = decoderFetchHandle;
         if (sync != null) {
             sync.cancel();

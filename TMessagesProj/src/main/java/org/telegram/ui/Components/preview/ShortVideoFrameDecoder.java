@@ -74,11 +74,9 @@ public final class ShortVideoFrameDecoder implements FrameDecoder {
         if (closed) {
             throw new IllegalStateException("short decoder is closed");
         }
-        cancelRequested = false;
-        cancelled = false;
         while (!closed
                 && !RetrieverFrameDecoder.isFileComplete(file, declaredSize, document, account)) {
-            if (cancelRequested) {
+            if (cancelRequested || closed) {
                 cancelled = true;
                 return null;
             }
@@ -185,6 +183,12 @@ public final class ShortVideoFrameDecoder implements FrameDecoder {
     }
 
     @Override
+    public void resetCancel() {
+        cancelRequested = false;
+        cancelled = false;
+    }
+
+    @Override
     public boolean wasCancelled() {
         return cancelled;
     }
@@ -192,6 +196,7 @@ public final class ShortVideoFrameDecoder implements FrameDecoder {
     @Override
     public void close() {
         closed = true;
+        cancelRequested = true;
         if (retriever != null) {
             try {
                 retriever.release();

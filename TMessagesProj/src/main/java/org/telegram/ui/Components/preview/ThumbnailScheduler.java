@@ -111,6 +111,7 @@ public final class ThumbnailScheduler {
     }
 
     private final Object lock = new Object();
+    private final DecodeGate decodeGate = new DecodeGate();
     private final PriorityQueue<Task> queue = new PriorityQueue<>((a, b) -> {
         if (a.priority != b.priority) {
             return Integer.compare(a.priority, b.priority);
@@ -268,7 +269,9 @@ public final class ThumbnailScheduler {
             queue.clear();
             lock.notifyAll();
         }
-        decoder.cancel();
+        // The gate orders this cancel against decodeAt's reset, so a stop can
+        // never be erased by a decode that starts at the same moment.
+        decodeGate.stop(decoder::cancel);
     }
 
     /**
@@ -291,6 +294,9 @@ public final class ThumbnailScheduler {
             Task task = null;
             boolean refillDue = false;
             boolean summaryDue = false;
+            // Log the periodic summary before any branch can wait: the drag
+            // and buffering paths used to continue before the old check, so
+            // the 5s line went missing exactly while a finger was down.
             synchronized (lock) {
                 if (stopped) {
                     return;
@@ -300,6 +306,15 @@ public final class ThumbnailScheduler {
                     lastSummaryAt = now;
                     summaryDue = true;
                 }
+            }
+            if (summaryDue) {
+                logStoreSummary();
+            }
+            synchronized (lock) {
+                if (stopped) {
+                    return;
+                }
+                final long now = SystemClock.uptimeMillis();
                 if (dragging) {
                     maybeScheduleHoverLocked(now);
                     final Task head = queue.peek();
@@ -361,9 +376,6 @@ public final class ThumbnailScheduler {
                     }
                     task = queue.poll();
                 }
-            }
-            if (summaryDue) {
-                logStoreSummary();
             }
             if (refillDue) {
                 boolean grew = false;
@@ -431,10 +443,8 @@ public final class ThumbnailScheduler {
 
     private void decodeTask(Task task) {
         try {
-            synchronized (lock) {
-                if (stopped) {
-                    return;
-                }
+            if (!decodeGate.begin(decoder::resetCancel)) {
+                return;
             }
             if (store.containsTime(task.timeMs)) {
                 return;
@@ -601,7 +611,13 @@ public final class ThumbnailScheduler {
             key = keyframes[index];
         } else {
             index = -1;
-            key = desiredMs;
+            // No index means the picture is decoded at the finger position.
+            // Snapping keeps one decode per 750ms of travel instead of one
+            // per pixel; with real keyframes the file already defines the
+            // step, so those keep the exact position.
+            final long step = plan != null && plan.uniformStepMs > 0
+                    ? plan.uniformStepMs : PreviewRules.HOVER_GRID_MS;
+            key = PreviewRules.hoverTime(desiredMs, true, step);
         }
         if (key != desiredKeyframeTime) {
             desiredKeyframeTime = key;

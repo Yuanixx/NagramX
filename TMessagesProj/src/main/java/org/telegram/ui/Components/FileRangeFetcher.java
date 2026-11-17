@@ -24,6 +24,7 @@ import org.telegram.messenger.FileLog;
 import org.telegram.tgnet.ConnectionsManager;
 import org.telegram.tgnet.NativeByteBuffer;
 import org.telegram.tgnet.TLRPC;
+import org.telegram.ui.Components.preview.PreviewRules;
 
 import java.io.File;
 import java.io.RandomAccessFile;
@@ -202,20 +203,37 @@ public final class FileRangeFetcher {
     private FileRangeFetcher() {
     }
 
+    /** Wall-clock cap for one multi-block keyframe fetch. */
+    public static final long MULTI_BLOCK_BUDGET_MS = 6000L;
+
     /**
      * Blocking range fetch. Call from a background thread only.
      */
     public static FetchResult fetchSync(int account, TLRPC.Document document,
                                         long offset, long length, long timeoutMs,
                                         FetchHandle handle) {
+        return fetchSync(account, document, offset, length, timeoutMs,
+                MULTI_BLOCK_BUDGET_MS, handle);
+    }
+
+    /**
+     * @param totalBudgetMs cap for the whole fetch, retries and rate waits
+     *                      included; a timeout counts as a real failure
+     */
+    public static FetchResult fetchSync(int account, TLRPC.Document document,
+                                        long offset, long length, long timeoutMs,
+                                        long totalBudgetMs, FetchHandle handle) {
         final long started = System.currentTimeMillis();
-        return fetchSync(account, document, offset, length, timeoutMs, true, handle, started);
+        final long deadline = totalBudgetMs > 0L
+                ? started + totalBudgetMs : Long.MAX_VALUE;
+        return fetchSync(account, document, offset, length, timeoutMs, true,
+                handle, started, deadline);
     }
 
     public static FetchResult fetchSync(int account, TLRPC.Document document,
                                         long offset, long length, long timeoutMs) {
-        final long started = System.currentTimeMillis();
-        return fetchSync(account, document, offset, length, timeoutMs, true, null, started);
+        return fetchSync(account, document, offset, length, timeoutMs,
+                MULTI_BLOCK_BUDGET_MS, null);
     }
 
     /**
@@ -236,9 +254,20 @@ public final class FileRangeFetcher {
          */
         /** Public so callers in sub-packages can install a probe. */
         public volatile BooleanSupplier stale;
+        /**
+         * True once at least one request has actually been sent. From then on
+         * a moving finger no longer drops the fetch: half a multi-block range
+         * is useless, and the bytes already on the wire are paid for anyway.
+         * An explicit {@link #cancel()} still wins — changing videos or
+         * starting a cooldown must abort even a committed fetch.
+         */
+        public volatile boolean committed;
         private volatile CountDownLatch latch;
 
         public boolean isStale() {
+            if (committed) {
+                return false;
+            }
             final BooleanSupplier probe = stale;
             if (probe == null) {
                 return false;
@@ -308,7 +337,8 @@ public final class FileRangeFetcher {
 
     private static FetchResult fetchSync(int account, TLRPC.Document document,
                                          long offset, long length, long timeoutMs,
-                                         boolean allowRetry, FetchHandle handle, long started) {
+                                         boolean allowRetry, FetchHandle handle, long started,
+                                         long deadlineMs) {
         if (document == null || length <= 0 || account < 0) {
             return failure(FetchResult.Status.ERROR, 0, -1, "invalid-args", false, 0, started);
         }
@@ -339,7 +369,7 @@ public final class FileRangeFetcher {
         }
         try {
             final FetchResult result = fetchBlocks(account, document, offset, length,
-                    timeoutMs, allowRetry, downloadActive, handle, started);
+                    timeoutMs, allowRetry, downloadActive, handle, started, deadlineMs);
             // Only the probe may reopen the gate. A request that was already in
             // flight when another thread got a 420 must not erase that fresh
             // cooldown just because it happened to finish successfully.
@@ -359,7 +389,8 @@ public final class FileRangeFetcher {
     private static FetchResult fetchBlocks(int account, TLRPC.Document document,
                                            long offset, long length, long timeoutMs,
                                            boolean allowRetry, boolean downloadActive,
-                                           FetchHandle handle, long started) {
+                                           FetchHandle handle, long started,
+                                           long deadlineMs) {
         // Fixed blocks, aligned down, always requested in full.
         //
         // The server accepts only limits that divide 1MB evenly (4K, 8K ... 1M),
@@ -384,9 +415,15 @@ public final class FileRangeFetcher {
                 ? document.dc_id
                 : ConnectionsManager.DEFAULT_DATACENTER_ID;
 
+        if (effectiveTimeout(timeoutMs, deadlineMs) <= 0L) {
+            return failure(FetchResult.Status.TIMEOUT, 0, -1,
+                    "budget exhausted", true, 0, started);
+        }
+
         if (blocks <= 1) {
             final FetchResult slice = fetchOneBlock(account, document, location,
-                    aligned, delta, blockBytes(), timeoutMs, handle, dcId, started);
+                    aligned, delta, blockBytes(), effectiveTimeout(timeoutMs, deadlineMs),
+                    handle, dcId, started);
             if (!slice.ok() && slice.status == FetchResult.Status.ERROR
                     && slice.text != null
                     && FileRefController.isFileRefError(slice.text)) {
@@ -404,7 +441,7 @@ public final class FileRangeFetcher {
                     // for the probe request, collide with its own probe slot.
                     FileLog.d("ABPV: range retry after file reference error: " + slice.text);
                     return fetchBlocks(account, document, offset, length, timeoutMs,
-                            false, downloadActive, handle, started);
+                            false, downloadActive, handle, started, deadlineMs);
                 }
                 return failure(FetchResult.Status.RETRY_LIMIT, slice.code, -1,
                         RETRY_LIMIT_TEXT, true, slice.requests, started);
@@ -434,10 +471,19 @@ public final class FileRangeFetcher {
                     return next.rewrap(filled > 0, sent, started);
                 }
             }
+            final long blockTimeout = effectiveTimeout(timeoutMs, deadlineMs);
+            if (blockTimeout <= 0L) {
+                FileLog.d("ABPV: range multi-block budget exhausted off=" + offset
+                        + " got=" + filled + " want=" + length + " block="
+                        + (b + 1) + "/" + blocks);
+                return failure(FetchResult.Status.TIMEOUT, 0, -1,
+                        "budget exhausted", true, sent, started)
+                        .rewrap(filled > 0, sent, started);
+            }
             final long blockAligned = aligned + (long) b * blockBytes();
             final int blockDelta = (b == 0) ? delta : 0;
             final FetchResult chunk = fetchOneBlock(account, document, location,
-                    blockAligned, blockDelta, blockBytes(), timeoutMs, handle, dcId, started);
+                    blockAligned, blockDelta, blockBytes(), blockTimeout, handle, dcId, started);
             sent += chunk.requests;
             if (!chunk.ok()) {
                 FileLog.d("ABPV: range multi-block failed at block " + (b + 1)
@@ -452,9 +498,31 @@ public final class FileRangeFetcher {
                 break;
             }
         }
+        if (!PreviewRules.rangeComplete(filled, out.length)) {
+            // A short reply used to be returned as success; the tail of the
+            // buffer stayed zeros and the decoder painted garbage without an
+            // error. A range is only usable when every byte was stitched.
+            FileLog.d("ABPV: range multi-block incomplete off=" + offset
+                    + " got=" + filled + " want=" + length + " blocks=" + blocks);
+            return failure(FetchResult.Status.ERROR, 0, -1,
+                    "incomplete range got " + filled + "/" + length, true,
+                    sent, started).rewrap(true, sent, started);
+        }
         FileLog.d("ABPV: range multi-block done off=" + offset + " got=" + filled
                 + " want=" + length + " blocks=" + blocks);
         return success(out, sent, started);
+    }
+
+    /**
+     * Per-block timeout clamped to what is left of the whole-fetch budget.
+     * Zero or less means the budget is gone and the caller must fail.
+     */
+    private static long effectiveTimeout(long timeoutMs, long deadlineMs) {
+        if (deadlineMs == Long.MAX_VALUE) {
+            return timeoutMs;
+        }
+        final long remaining = deadlineMs - System.currentTimeMillis();
+        return remaining <= 0L ? 0L : Math.min(timeoutMs, remaining);
     }
 
     /**
@@ -697,6 +765,10 @@ public final class FileRangeFetcher {
                 ConnectionsManager.ConnectionTypeDownload, dcId);
         if (handle != null) {
             handle.token = requestToken;
+            // The bytes are on their way now. From this point only an explicit
+            // cancel (new video, cooldown, session teardown) may stop them; a
+            // moving finger no longer drops the block.
+            handle.committed = true;
             if (handle.cancelled) {
                 // cancel() ran before sendRequest returned; the token was still 0
                 // then, so cancel it here instead.
