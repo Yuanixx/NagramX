@@ -39,6 +39,20 @@ jobs:
         with:
           fetch-depth: 1
           submodules: recursive
+      # ubuntu-latest ships with ~14 GB of toolchains this Android build never uses.
+      # With ccache (10G) + a cached TMessagesProj/build, Gradle's desugar/resource steps
+      # ran out of space ("Could not pack tree ... No space left on device"). Drop the
+      # unused SDKs/images before building; the Android SDK/NDK we need is installed below.
+      - name: Free up disk space
+        run: |
+          df -h . | tail -1
+          sudo rm -rf /usr/share/dotnet \
+                      /usr/local/lib/android/sdk/system-images \
+                      /opt/ghc /opt/hostedtoolcache/CodeQL \
+                      /usr/local/share/boost /usr/local/share/powershell \
+                      /usr/lib/jvm/java-8-openjdk-amd64 \
+                      "$AGENT_TOOLSDIRECTORY/boost" 2>/dev/null || true
+          df -h . | tail -1
       - name: Set up JDK
         uses: actions/setup-java@v5
         with:
@@ -50,6 +64,7 @@ jobs:
           javac -d /tmp/preview-rules \
             TMessagesProj/src/test/java/org/telegram/ui/Components/preview/PreviewRulesTest.java \
             TMessagesProj/src/main/java/org/telegram/ui/Components/preview/PreviewRules.java \
+            TMessagesProj/src/main/java/org/telegram/messenger/FragmentIndexRules.java \
             TMessagesProj/src/main/java/org/telegram/ui/Components/preview/TailMoovLocator.java \
             TMessagesProj/src/main/java/org/telegram/ui/Components/preview/DecodeGate.java \
             TMessagesProj/src/main/java/org/telegram/ui/Components/preview/RemoteFailureTracker.java

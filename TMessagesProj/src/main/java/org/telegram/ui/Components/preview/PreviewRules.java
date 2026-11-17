@@ -171,9 +171,6 @@ public final class PreviewRules {
      * @param maxTail    maximum tolerated trailing bytes for a genuinely complete file
      */
     public static boolean shouldTreatAsPartial(long len, long docSize, long validEnd, long maxTail) {
-        if (validEnd < 0 || validEnd > len) {
-            return true;
-        }
-        return len - validEnd > maxTail;
+        return org.telegram.messenger.FragmentIndexRules.shouldTreatAsPartial(len, docSize, validEnd, maxTail);
     }
 }

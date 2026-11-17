@@ -9,8 +9,6 @@ import androidx.annotation.Nullable;
 
 import androidx.media3.extractor.ChunkIndex;
 
-import org.telegram.ui.Components.preview.PreviewRules;
-
 import java.io.File;
 import java.io.RandomAccessFile;
 import java.util.ArrayList;
@@ -28,7 +26,7 @@ public final class FragmentIndexBuilder {
 
     private static final String TAG = "FMPIDX";
     private static final int MAX_BOX_BODY = 16 * 1024 * 1024;
-    private static final long MAX_TAIL_BYTES = 64;
+    private static final long MAX_TAIL_BYTES = FragmentIndexRules.MAX_TAIL_BYTES;
     private static final int SAMPLE_FLAG_NON_SYNC = 0x00010000;
     /** Size of a plain ISO-BMFF box header: 4 bytes size + 4 bytes type. */
     private static final int Atom_HEADER_SIZE = 8;
@@ -98,39 +96,51 @@ public final class FragmentIndexBuilder {
         // can be walked up to the last complete fragment. That is what makes a seek
         // work before the download has finished, instead of falling back to
         // RestartableSeekMap (which restarts at byte 0 and looks like "seek is stuck").
-        boolean complete = docSize <= 0 || len == docSize;
-        if (complete) {
-            // A Telegram streaming temp is pre-allocated to the full document size, so
-            // file.length() == docSize even when only a prefix has real box data and the
-            // rest is zero-filled. Treating that as a complete file makes scan() reject
-            // the huge zero tail and return no index, which leaves the player on an
-            // unseekable SeekMap that restarts every seek at byte 0. Detect the sparse
-            // preallocation here and fall back to the partial path, which already tolerates
-            // a truncated tail and builds an index from the fragments that did arrive.
-            boolean sparse = false;
-            try {
-                StructStat st = Os.stat(path);
-                sparse = (long) st.st_blocks * 512L < st.st_size;
-            } catch (ErrnoException e) {
-                // Cannot tell: keep the conservative complete path below.
-            }
-            if (sparse) {
-                complete = false;
-            }
+        //
+        // One stat gives us two things: (a) a cheap sparse hint for the complete decision and
+        // (b) the allocated-byte count that goes into the PARTIAL cache key. Previously this
+        // code stat'ed twice with opposite error handling: one catch kept the complete path,
+        // the other returned null (no index -> byte 0). Now there is a single decision point
+        // and an unreadable stat is treated as "unknown", keeping the conservative full scan
+        // rather than dropping the index.
+        long allocatedBytes = -1;
+        boolean sparse = false;
+        try {
+            StructStat st = Os.stat(path);
+            allocatedBytes = (long) st.st_blocks * 512L;
+            sparse = allocatedBytes < st.st_size;
+        } catch (ErrnoException e) {
+            // Cannot tell: stay on the complete path and let scan()/validEnd decide. Never
+            // return null here: no index is what puts the player back on RestartableSeekMap.
         }
-        // Box-header scanning cannot detect holes inside mdat payloads; st_blocks is a cheap
-        // gate for a finished file. A growing *.temp can legitimately be sparse, and the
-        // scanner stops at the first zeroed header anyway, so the gate is skipped there.
+        boolean complete = (docSize <= 0 || len == docSize) && !sparse;
+
+        // A pre-allocated temp has file.length() == docSize but a zero-filled tail. st_blocks is
+        // only a hint and is unreliable on some filesystems, so confirm with the bytes: sample
+        // the tail and, if it is all zeros, downgrade BEFORE the cache lookup. This makes the
+        // cache bucket we look up (CACHE vs PARTIAL) agree with the final decision, instead of
+        // looking up CACHE, downgrading inside scan(), then storing to PARTIAL where the next
+        // call will never look. scan() keeps its own validEnd-based downgrade as a safety net.
         if (complete) {
-            try {
-                StructStat st = Os.stat(path);
-                if ((long) st.st_blocks * 512L < st.st_size) {
-                    reject("sparse blocks=" + st.st_blocks + " size=" + st.st_size);
-                    return null;
+            try (RandomAccessFile probe = new RandomAccessFile(file, "r")) {
+                int sample = (int) Math.min(MAX_TAIL_BYTES, len);
+                if (sample > 0) {
+                    probe.seek(len - sample);
+                    byte[] tailBytes = new byte[sample];
+                    probe.readFully(tailBytes);
+                    boolean allZero = true;
+                    for (int i = 0; i < sample; i++) {
+                        if (tailBytes[i] != 0) {
+                            allZero = false;
+                            break;
+                        }
+                    }
+                    if (allZero) {
+                        complete = false;
+                    }
                 }
-            } catch (ErrnoException e) {
-                reject("stat " + e.getMessage());
-                return null;
+            } catch (Throwable ignore) {
+                // Cannot sample: let scan()/validEnd decide.
             }
         }
 
@@ -143,9 +153,11 @@ public final class FragmentIndexBuilder {
                 }
             }
         } else {
-            // The partial cache is keyed by the exact length the scan saw, so a hit means the
-            // file has not grown since. That is the only case where the prefix is unchanged.
-            final String partialKey = key + "_" + len;
+            // Keyed by the allocated-byte count as well as the length. A pre-allocated temp keeps
+            // len == docSize while its real content grows, so length alone never invalidates the
+            // entry and a stale prefix index would be reused; the allocated count changes as
+            // blocks are written and makes a grown file miss the old key.
+            final String partialKey = FragmentIndexRules.partialCacheKey(docId, docSize, len, allocatedBytes);
             synchronized (PARTIAL) {
                 ChunkIndex cached = PARTIAL.get(partialKey);
                 if (cached != null) {
@@ -197,7 +209,7 @@ public final class FragmentIndexBuilder {
             }
             if (index != null) {
                 synchronized (PARTIAL) {
-                    PARTIAL.put(key + "_" + len, index);
+                    PARTIAL.put(FragmentIndexRules.partialCacheKey(docId, docSize, len, allocatedBytes), index);
                     while (PARTIAL.size() > 4) {
                         String oldest = PARTIAL.keySet().iterator().next();
                         PARTIAL.remove(oldest);
@@ -208,7 +220,8 @@ public final class FragmentIndexBuilder {
                     + " len=" + len + "/" + docSize + " doc=" + docId);
         }
         Log.w(TAG, "build costMs=" + (System.currentTimeMillis() - t0)
-                + " complete=" + complete + " doc=" + docId + " size=" + docSize);
+                + " complete=" + complete + " partial=" + usePartial
+                + " allocated=" + allocatedBytes + " doc=" + docId + " size=" + docSize);
         return index;
     }
 
@@ -614,7 +627,7 @@ public final class FragmentIndexBuilder {
             reject("has native index sidx=" + hasSidx + " mfra=" + hasMfra);
             return null;
         }
-        if (complete && PreviewRules.shouldTreatAsPartial(len, docSize, validEnd, MAX_TAIL_BYTES)) {
+        if (complete && FragmentIndexRules.shouldTreatAsPartial(len, docSize, validEnd, MAX_TAIL_BYTES)) {
             // A pre-allocated streaming temp has file.length() == docSize but only a prefix of
             // real fragments; the rest is a zero tail. Do not throw away the fragments we did
             // parse: fall back to the partial rules below so a usable index is built from what

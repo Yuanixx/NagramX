@@ -49,6 +49,7 @@ public final class PreviewRulesTest {
         testTailMoovNeedsPrefix();
         testTailMoovTooLargeAndInvalid();
         testSparseTailDowngrade();
+        testPartialCacheKeyTracksGrowth();
         System.out.println("PREVIEW RULES: " + passed + " checks passed");
     }
 
@@ -412,6 +413,25 @@ public final class PreviewRulesTest {
                 "validEnd beyond length is inconsistent -> partial");
         check(PreviewRules.shouldTreatAsPartial(1000L, 1000L, -1L, 64L),
                 "unknown validEnd -> partial");
+        // docSize now participates: a still-growing prefix (len < docSize) is already partial
+        // by construction and must not be re-flagged by the tail-distance rule.
+        check(!PreviewRules.shouldTreatAsPartial(90_000_000L, 326_398_043L, 80_000_000L, 64L),
+                "a growing prefix is partial already, docSize makes the tail check a no-op");
+    }
+
+    private static void testPartialCacheKeyTracksGrowth() {
+        // Reproduces C1: a pre-allocated temp keeps len == docSize while its real content grows
+        // (allocated blocks increase). The PARTIAL cache key must change with the allocated count
+        // so a grown file cannot reuse the stale prefix index built at an earlier stage.
+        String k1 = org.telegram.messenger.FragmentIndexRules.partialCacheKey(123L, 326398043L, 326398043L, 40_000_000L);
+        String k2 = org.telegram.messenger.FragmentIndexRules.partialCacheKey(123L, 326398043L, 326398043L, 80_000_000L);
+        check(!k1.equals(k2), "allocated-byte growth must invalidate the partial cache key");
+        // Same content -> same key (stability): a re-open of the identical prefix reuses the index.
+        String k1again = org.telegram.messenger.FragmentIndexRules.partialCacheKey(123L, 326398043L, 326398043L, 40_000_000L);
+        check(k1.equals(k1again), "an unchanged prefix keeps the same partial cache key");
+        // Different documents must never collide.
+        String otherDoc = org.telegram.messenger.FragmentIndexRules.partialCacheKey(124L, 326398043L, 326398043L, 40_000_000L);
+        check(!k1.equals(otherDoc), "different docIds produce different keys");
     }
 
     // ------------------------------------------------------------- fixtures
