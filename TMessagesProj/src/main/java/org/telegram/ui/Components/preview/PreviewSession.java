@@ -259,10 +259,11 @@ public final class PreviewSession {
         return store.nearest(timeMs, maxDistanceMs);
     }
 
-    /** max(1.5s, 5% of duration), widened for very short videos. */
+    /** The display window, widened for locally sparse GOPs but capped at 10%. */
     public long maxFrameDistanceMs() {
         final long duration = planDurationMs > 0 ? planDurationMs : documentDurationMs();
-        return PreviewRules.displayLimitMs(duration);
+        final long at = desiredMs >= 0 ? desiredMs : 0L;
+        return PreviewRules.displayLimitMs(duration, keyframeGapAt(at));
     }
 
     public int thumbnailCount() {
@@ -436,7 +437,8 @@ public final class PreviewSession {
                     + " duration=" + prepared.plan.durationMs
                     + " keyframes=" + (prepared.plan.keyframeTimesMs != null
                     ? prepared.plan.keyframeTimesMs.length : 0)
-                    + " remote=" + (remoteSupplier != null && !isRemoteCoolingDown()));
+                    + " remote=" + (remoteSupplier != null && !isRemoteCoolingDown())
+                    + " fetchMode=" + NekoConfig.videoPreviewFetchAggressiveness.Int());
             startRemotePrefetch(prepared);
             worker.run();
         } catch (Throwable e) {
@@ -1715,7 +1717,10 @@ public final class PreviewSession {
             return false;
         }
         if (mode == 1) {
-            return true;
+            // While the finger is down the preview is the user's whole focus;
+            // pausing its fetches just because playback buffers was the main
+            // reason a streamed seek showed nothing for seconds.
+            return !dragging;
         }
         return bufferedAheadMs < AGGRESSIVE_MIN_BUFFERED_AHEAD_MS
                 || playbackStableMs < AGGRESSIVE_MIN_STABLE_MS

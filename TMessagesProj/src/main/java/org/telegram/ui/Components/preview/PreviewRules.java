@@ -63,6 +63,63 @@ public final class PreviewRules {
     }
 
     /**
+     * How far from the finger a cached frame may still be shown. Two local GOPs
+     * are enough for a sparse stretch, but the window never grows past 10% of
+     * the video: a wider net would put an unrelated picture under the timestamp.
+     */
+    public static long displayLimitMs(long durationMs, long localKeyframeGapMs) {
+        final long base = displayLimitMs(durationMs);
+        if (durationMs <= 0L || localKeyframeGapMs <= 0L) {
+            return base;
+        }
+        final long doubled = localKeyframeGapMs > Long.MAX_VALUE / 2L
+                ? Long.MAX_VALUE : localKeyframeGapMs * 2L;
+        final long cap = Math.max(base, durationMs / 10L);
+        return Math.min(cap, Math.max(base, doubled));
+    }
+
+    /**
+     * Playback buffering pauses the bulk pass, but the finger's own frame must
+     * stay responsive and a completely empty store must get one cheap frame.
+     */
+    public static boolean decodeWhileBuffering(boolean hoverAtHead, boolean storeEmpty) {
+        return hoverAtHead || storeEmpty;
+    }
+
+    /** A clear while the seek bar is still held must not end the drag state. */
+    public static boolean keepDraggingOnClear(boolean pressed) {
+        return pressed;
+    }
+
+    /** A follow-up block reuses the probe slot its own fetch already claimed. */
+    public static boolean probeGateAllows(boolean probePending, boolean probeInFlight,
+                                          boolean probeHeldByThisFetch) {
+        return probeHeldByThisFetch || !probePending || !probeInFlight;
+    }
+
+    /** Retry limits for a frame whose bytes have not arrived yet. */
+    public static final int MAX_MISSING_FRAME_RETRIES = 6;
+    public static final long MISSING_FRAME_RETRY_STEP_MS = 300L;
+    public static final long MISSING_FRAME_RETRY_MAX_DELAY_MS = 1500L;
+    public static final long MISSING_FRAME_RETRY_WINDOW_MS = 6000L;
+
+    /**
+     * Backoff for a frame that is still downloading. Negative means the budget
+     * is spent and the task must be dropped; both the count and the total wait
+     * are bounded so a stalled file cannot spin the worker forever.
+     */
+    public static long missingFrameRetryDelayMs(int attempt, long nowMs, long firstMissingAtMs) {
+        if (attempt < 1 || attempt > MAX_MISSING_FRAME_RETRIES) {
+            return -1L;
+        }
+        if (nowMs - firstMissingAtMs >= MISSING_FRAME_RETRY_WINDOW_MS) {
+            return -1L;
+        }
+        return Math.min(MISSING_FRAME_RETRY_MAX_DELAY_MS,
+                MISSING_FRAME_RETRY_STEP_MS * attempt);
+    }
+
+    /**
      * Hover time for the next decode. With a real index the finger position
      * is used as is, because the nearest keyframe is already a file-defined
      * step. Without an index, snapping to the short grid avoids decoding a

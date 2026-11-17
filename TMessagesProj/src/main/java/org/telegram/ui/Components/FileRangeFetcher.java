@@ -369,7 +369,8 @@ public final class FileRangeFetcher {
         }
         try {
             final FetchResult result = fetchBlocks(account, document, offset, length,
-                    timeoutMs, allowRetry, downloadActive, handle, started, deadlineMs);
+                    timeoutMs, allowRetry, downloadActive, handle, started, deadlineMs,
+                    probe[0]);
             // Only the probe may reopen the gate. A request that was already in
             // flight when another thread got a 420 must not erase that fresh
             // cooldown just because it happened to finish successfully.
@@ -390,7 +391,7 @@ public final class FileRangeFetcher {
                                            long offset, long length, long timeoutMs,
                                            boolean allowRetry, boolean downloadActive,
                                            FetchHandle handle, long started,
-                                           long deadlineMs) {
+                                           long deadlineMs, boolean probeHeldByThisFetch) {
         // Fixed blocks, aligned down, always requested in full.
         //
         // The server accepts only limits that divide 1MB evenly (4K, 8K ... 1M),
@@ -441,7 +442,8 @@ public final class FileRangeFetcher {
                     // for the probe request, collide with its own probe slot.
                     FileLog.d("ABPV: range retry after file reference error: " + slice.text);
                     return fetchBlocks(account, document, offset, length, timeoutMs,
-                            false, downloadActive, handle, started, deadlineMs);
+                            false, downloadActive, handle, started, deadlineMs,
+                            probeHeldByThisFetch);
                 }
                 return failure(FetchResult.Status.RETRY_LIMIT, slice.code, -1,
                         RETRY_LIMIT_TEXT, true, slice.requests, started);
@@ -464,7 +466,12 @@ public final class FileRangeFetcher {
             // block is a separate request, so it waits its turn and stops if a
             // flood cooldown started in the meantime.
             if (b > 0) {
-                final FetchResult next = awaitRateSlot(downloadActive, handle, null);
+                // The follow-up blocks belong to the same fetch. If block 1
+                // already claimed the single recovery probe, reusing that slot
+                // is legal; asking for it again used to reject block 2 with
+                // "probe in flight" and throw away the bytes block 1 paid for.
+                final FetchResult next = awaitRateSlot(downloadActive, handle, null,
+                        probeHeldByThisFetch);
                 if (next != null) {
                     FileLog.d("ABPV: range multi-block stopped at block "
                             + (b + 1) + "/" + blocks);
@@ -620,6 +627,12 @@ public final class FileRangeFetcher {
      */
     private static FetchResult awaitRateSlot(boolean downloadActive, FetchHandle handle,
                                              boolean[] probeGranted) {
+        return awaitRateSlot(downloadActive, handle, probeGranted, false);
+    }
+
+    /** @param probeHeldByThisFetch true for later blocks of a fetch whose first block got the probe */
+    private static FetchResult awaitRateSlot(boolean downloadActive, FetchHandle handle,
+                                             boolean[] probeGranted, boolean probeHeldByThisFetch) {
         final long baseGap = downloadActive
                 ? MIN_REQUEST_GAP_MS_ACTIVE : MIN_REQUEST_GAP_MS_IDLE;
         while (true) {
@@ -642,13 +655,17 @@ public final class FileRangeFetcher {
                         ? Math.max(baseGap, POST_FLOOD_GAP_MS) : baseGap;
                 wait = lastRequestAt + gap - now;
                 if (wait <= 0) {
-                    if (probePending) {
+                    if (probePending
+                            && !PreviewRules.probeGateAllows(probePending, probeInFlight,
+                                    probeHeldByThisFetch)) {
                         // One request at a time checks whether the server
                         // accepted us back; everyone else waits for its verdict.
-                        if (probeInFlight) {
-                            return failure(FetchResult.Status.LOCAL_COOLDOWN, 0, -1,
-                                    "probe in flight", false, 0, 0L);
-                        }
+                        // A later block of that same request is not "everyone
+                        // else" and must be allowed through.
+                        return failure(FetchResult.Status.LOCAL_COOLDOWN, 0, -1,
+                                "probe in flight", false, 0, 0L);
+                    }
+                    if (probePending && !probeHeldByThisFetch) {
                         probeInFlight = true;
                         if (probeGranted != null) {
                             probeGranted[0] = true;

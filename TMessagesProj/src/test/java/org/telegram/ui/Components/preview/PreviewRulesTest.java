@@ -32,6 +32,11 @@ public final class PreviewRulesTest {
     public static void main(String[] args) throws Exception {
         testShortModeGate();
         testDisplayLimit();
+        testDisplayLimitWidening();
+        testBufferingGate();
+        testClearDragging();
+        testProbeReuse();
+        testMissingFrameRetry();
         testHoverGrid();
         testRangeAssembly();
         testDecodeGateRace();
@@ -71,6 +76,64 @@ public final class PreviewRulesTest {
         check(PreviewRules.displayLimitMs(60_000L) == 3000L, "60s uses five percent");
         check(PreviewRules.displayLimitMs(100_000L) == 5000L, "100s uses five percent");
         check(PreviewRules.displayLimitMs(20_000L) == 1500L, "the floor is 1.5s");
+    }
+
+    private static void testDisplayLimitWidening() {
+        // A dense index keeps the old 5% window.
+        check(PreviewRules.displayLimitMs(733_633L, 8_333L) == 36_681L,
+                "a dense index keeps the five-percent window");
+        // A locally sparse GOP widens, but never past 10% of the video.
+        check(PreviewRules.displayLimitMs(733_633L, 100_000L) == 73_363L,
+                "a sparse GOP widens the window up to ten percent");
+        check(PreviewRules.displayLimitMs(600_000L, 20_000L) == 40_000L,
+                "two local GOPs are used when they fit under the cap");
+        check(PreviewRules.displayLimitMs(600_000L, 0L) == 30_000L,
+                "an unknown gap leaves the base window");
+        check(PreviewRules.displayLimitMs(0L, 50_000L) == 1500L,
+                "an unknown duration cannot be widened");
+        check(PreviewRules.displayLimitMs(20_000L, 50_000L) == 2000L,
+                "a short video's window stays at ten percent");
+    }
+
+    private static void testBufferingGate() {
+        check(PreviewRules.decodeWhileBuffering(true, false),
+                "the finger's own frame decodes during buffering");
+        check(PreviewRules.decodeWhileBuffering(false, true),
+                "an empty store still gets one frame during buffering");
+        check(!PreviewRules.decodeWhileBuffering(false, false),
+                "bulk layers stay paused while playback buffers");
+    }
+
+    private static void testClearDragging() {
+        check(PreviewRules.keepDraggingOnClear(true),
+                "a clear while held keeps the drag alive");
+        check(!PreviewRules.keepDraggingOnClear(false),
+                "a clear after release ends the drag");
+    }
+
+    private static void testProbeReuse() {
+        check(!PreviewRules.probeGateAllows(true, true, false),
+                "another fetch cannot steal an in-flight probe");
+        check(PreviewRules.probeGateAllows(true, true, true),
+                "the next block of the same fetch reuses its probe");
+        check(PreviewRules.probeGateAllows(false, true, false),
+                "without a pending probe there is no gate");
+        check(PreviewRules.probeGateAllows(true, false, false),
+                "the first block may claim a free probe");
+    }
+
+    private static void testMissingFrameRetry() {
+        check(PreviewRules.missingFrameRetryDelayMs(1, 100L, 100L) == 300L,
+                "the first retry waits one step");
+        check(PreviewRules.missingFrameRetryDelayMs(5, 1_000L, 100L) == 1_500L,
+                "later retries are capped at 1.5s");
+        check(PreviewRules.missingFrameRetryDelayMs(0, 100L, 100L) == -1L,
+                "attempt zero is not a retry");
+        check(PreviewRules.missingFrameRetryDelayMs(
+                        PreviewRules.MAX_MISSING_FRAME_RETRIES + 1, 100L, 100L) == -1L,
+                "the retry count is bounded");
+        check(PreviewRules.missingFrameRetryDelayMs(1, 6_100L, 100L) == -1L,
+                "the total retry window is bounded");
     }
 
     private static void testHoverGrid() {

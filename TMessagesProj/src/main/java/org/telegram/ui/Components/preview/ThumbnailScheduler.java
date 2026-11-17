@@ -100,6 +100,9 @@ public final class ThumbnailScheduler {
         final int keyframeIndex;
         /** Insertion order inside a priority; binary subdivision relies on it. */
         final long order;
+        /** Bounded retries for a frame whose bytes have not arrived yet. */
+        int missingRetries;
+        long firstMissingAtMs;
 
         Task(int priority, int tier, long timeMs, int keyframeIndex, long order) {
             this.priority = priority;
@@ -337,8 +340,18 @@ public final class ThumbnailScheduler {
                         task = queue.poll();
                     }
                 } else if (buffering) {
-                    waitLocked(150L);
-                    continue;
+                    // Playback stalls are common while a streamed file fills.
+                    // Pause the bulk layers, but never the finger's own frame
+                    // and never leave an empty bubble with nothing to decode.
+                    final Task head = queue.peek();
+                    final boolean hoverAtHead = head != null
+                            && head.priority == PRIORITY_HOVER;
+                    if (PreviewRules.decodeWhileBuffering(hoverAtHead, store.size() == 0)) {
+                        task = queue.poll();
+                    } else {
+                        waitLocked(150L);
+                        continue;
+                    }
                 } else {
                     if (queue.isEmpty()) {
                         if (durationMs <= 0) {
@@ -457,11 +470,7 @@ public final class ThumbnailScheduler {
             final FrameDecoder.DecodedFrame frame = decoder.decodeAt(
                     task.timeMs, maxWidth, maxHeight);
             if (frame == null || frame.bitmap == null) {
-                if (!decoder.wasCancelled()) {
-                    synchronized (lock) {
-                        failures++;
-                    }
-                } else {
+                if (decoder.wasCancelled()) {
                     // A short decoder waiting for a download can be interrupted
                     // by a drag. Put the task back so the frame is not lost.
                     synchronized (lock) {
@@ -469,6 +478,32 @@ public final class ThumbnailScheduler {
                             queue.add(task);
                         }
                     }
+                    return;
+                }
+                if (decoder.wasDataMissing()) {
+                    // Not a decode error: the bytes are still downloading or a
+                    // cooldown refused their fetch. Retry a bounded number of
+                    // times instead of dropping the frame forever, and never
+                    // pollute the real-failure streak with it.
+                    final long now = SystemClock.uptimeMillis();
+                    final long delay;
+                    synchronized (lock) {
+                        if (task.firstMissingAtMs <= 0L) {
+                            task.firstMissingAtMs = now;
+                        }
+                        task.missingRetries++;
+                        delay = PreviewRules.missingFrameRetryDelayMs(
+                                task.missingRetries, now, task.firstMissingAtMs);
+                    }
+                    if (delay >= 0L) {
+                        retryLater(task, delay);
+                        return;
+                    }
+                    PreviewLog.d("SeekPreview: frame retries exhausted at " + task.timeMs + "ms");
+                    return;
+                }
+                synchronized (lock) {
+                    failures++;
                 }
                 return;
             }
@@ -583,6 +618,33 @@ public final class ThumbnailScheduler {
     private boolean isStopped() {
         synchronized (lock) {
             return stopped;
+        }
+    }
+
+    /**
+     * Waits off-lock, then puts a still-wanted task back. A finger that moved
+     * meanwhile has already scheduled its own keyframe, so a stale retry is
+     * dropped rather than painted under the new timestamp.
+     */
+    private void retryLater(Task task, long delayMs) {
+        try {
+            Thread.sleep(delayMs);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            synchronized (lock) {
+                stopped = true;
+                lock.notifyAll();
+            }
+            return;
+        }
+        synchronized (lock) {
+            if (stopped) {
+                return;
+            }
+            if (task.priority == PRIORITY_HOVER && task.timeMs != desiredKeyframeTime) {
+                return;
+            }
+            queue.add(task);
         }
     }
 

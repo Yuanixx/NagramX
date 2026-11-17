@@ -36,6 +36,7 @@ import org.telegram.messenger.R;
 import org.telegram.tgnet.TLRPC;
 import org.telegram.ui.Components.preview.PreviewDiskCache;
 import org.telegram.ui.Components.preview.PreviewLog;
+import org.telegram.ui.Components.preview.PreviewRules;
 import org.telegram.ui.Components.preview.PreviewSession;
 import org.telegram.ui.Components.preview.Thumbnail;
 
@@ -468,9 +469,16 @@ public class VideoSeekFramePreview extends View {
                 updateApproxState(current, thumbnail, positionMs);
             }
         } else if (frame != null) {
-            // The store is completely empty (not merely far away): there is
-            // no picture to keep under this timestamp.
-            FileLog.d("ABPV: store empty, dropping frame pos=" + positionMs);
+            // Usually the store is not empty at all: the closest frame is just
+            // outside the display window. Say so, or every capture looks like
+            // a lost picture instead of a deliberate "too far" decision.
+            final Thumbnail closest = current.nearest(positionMs);
+            final long closestTime = closest != null ? closest.timeMs : -1L;
+            FileLog.d("ABPV: no frame within display window, dropping pos=" + positionMs
+                    + " storeSize=" + current.thumbnailCount()
+                    + " limit=" + current.maxFrameDistanceMs()
+                    + " closestT=" + closestTime
+                    + " distance=" + (closestTime >= 0 ? Math.abs(closestTime - positionMs) : -1L));
             setFrame(null, positionMs, false);
         } else if (logRequest) {
             FileLog.d("ABPV: nearest=null storeSize=" + current.thumbnailCount()
@@ -595,14 +603,22 @@ public class VideoSeekFramePreview extends View {
     }
 
     public void clear() {
-        dragging = false;
+        // The viewer hides the bubble on several paths while the seek bar is
+        // still held. Ending the drag there used to push the worker into the
+        // buffering wait with a queue full of tasks and an empty store: the
+        // first picture arrived seconds later and was already invisible.
+        final boolean stillPressed = isPressedNow();
+        final boolean keepDragging = PreviewRules.keepDraggingOnClear(stillPressed);
+        if (!keepDragging) {
+            dragging = false;
+        }
         retainUriForCurrentDrag = false;
         loggedUriRetention = false;
         requestedPosition = -1;
         removeCallbacks(staleRunnable);
         removeCallbacks(pendingRunnable);
         final PreviewSession current = session;
-        if (current != null) {
+        if (current != null && !keepDragging) {
             current.setDragging(false);
         }
         dropFrame();

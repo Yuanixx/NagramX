@@ -78,6 +78,7 @@ public final class MediaCodecFrameDecoder implements FrameDecoder {
     private int recreateCount;
     private int decodedFrames;
     private int unavailableSkips;
+    private volatile boolean lastDataMissing;
     private long inputWaitNanos;
     private long sampleReadNanos;
     private long outputWaitNanos;
@@ -170,6 +171,7 @@ public final class MediaCodecFrameDecoder implements FrameDecoder {
         if (closed) {
             throw new IllegalStateException("decoder is closed");
         }
+        lastDataMissing = false;
         final int index = nearestKeyframeIndex(timeMs);
         if (index < 0 || index >= keyframes.size()) {
             return null;
@@ -198,6 +200,7 @@ public final class MediaCodecFrameDecoder implements FrameDecoder {
                             + " size=" + keyframe.size);
                 }
                 unavailableSkips++;
+                lastDataMissing = true;
                 return null;
             }
         }
@@ -671,6 +674,11 @@ public final class MediaCodecFrameDecoder implements FrameDecoder {
     @Override
     public boolean wasCancelled() {
         return cancelled;
+    }
+
+    @Override
+    public boolean wasDataMissing() {
+        return lastDataMissing;
     }
 
     @Override

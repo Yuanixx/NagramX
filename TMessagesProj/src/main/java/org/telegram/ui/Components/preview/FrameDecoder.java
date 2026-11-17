@@ -66,5 +66,14 @@ public interface FrameDecoder {
     /** True when the last decode ended because {@link #cancel()} was called. */
     boolean wasCancelled();
 
+    /**
+     * True when the last decode produced nothing because its bytes are not on
+     * disk yet (or the network fetch for them was refused). Unlike a real
+     * decode error this is temporary: the scheduler retries it with a bound.
+     */
+    default boolean wasDataMissing() {
+        return false;
+    }
+
     void close();
 }
