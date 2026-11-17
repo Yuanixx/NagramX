@@ -597,6 +597,11 @@ public final class FileRangeFetcher {
     /** A request went through: the cooldown, if any, is over. */
     private static void noteProbeSuccess() {
         synchronized (rateLock) {
+            // This probe was granted when the old cooldown ended. If another
+            // request got a fresh 420 meanwhile, its newer cooldown wins.
+            if (System.currentTimeMillis() < floodUntilMs) {
+                return;
+            }
             if (floodUntilMs != 0L || probePending || consecutiveFloods != 0) {
                 FileLog.d("ABPV: flood cleared after probe");
             }
@@ -665,11 +670,13 @@ public final class FileRangeFetcher {
                         return failure(FetchResult.Status.LOCAL_COOLDOWN, 0, -1,
                                 "probe in flight", false, 0, 0L);
                     }
-                    if (probePending && !probeHeldByThisFetch) {
+                    if (probePending && !probeHeldByThisFetch
+                            && PreviewRules.canClaimProbe(probeGranted != null, false)) {
+                        // Only the caller that can hand the slot back is
+                        // allowed to claim it. A follow-up block with no
+                        // carrier must never leave the global flag stuck.
                         probeInFlight = true;
-                        if (probeGranted != null) {
-                            probeGranted[0] = true;
-                        }
+                        probeGranted[0] = true;
                     }
                     lastRequestAt = now;
                     return null;

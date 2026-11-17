@@ -174,6 +174,7 @@ public final class MediaCodecFrameDecoder implements FrameDecoder {
         lastDataMissing = false;
         final int index = nearestKeyframeIndex(timeMs);
         if (index < 0 || index >= keyframes.size()) {
+            lastDataMissing = true;
             return null;
         }
         if (availability != null) {
@@ -198,6 +199,12 @@ public final class MediaCodecFrameDecoder implements FrameDecoder {
                             + " t=" + keyframe.timeMs
                             + " off=" + keyframe.offset
                             + " size=" + keyframe.size);
+                }
+                // A cancel that arrived during fetchRemote must not be
+                // reported as "bytes missing": the caller would retry it.
+                if (cancelRequested) {
+                    cancelled = true;
+                    return null;
                 }
                 unavailableSkips++;
                 lastDataMissing = true;

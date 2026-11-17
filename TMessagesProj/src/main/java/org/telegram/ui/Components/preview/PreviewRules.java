@@ -86,9 +86,13 @@ public final class PreviewRules {
         return hoverAtHead || storeEmpty;
     }
 
-    /** A clear while the seek bar is still held must not end the drag state. */
-    public static boolean keepDraggingOnClear(boolean pressed) {
-        return pressed;
+    /**
+     * A clear while the seek bar is still held must not end the drag state.
+     * Both sides must agree: the seek bar's own pressed flag flips one event
+     * late, so the preview's drag state is the tie-breaker.
+     */
+    public static boolean keepDraggingOnClear(boolean dragging, boolean pressed) {
+        return dragging && pressed;
     }
 
     /** A follow-up block reuses the probe slot its own fetch already claimed. */
@@ -97,26 +101,40 @@ public final class PreviewRules {
         return probeHeldByThisFetch || !probePending || !probeInFlight;
     }
 
+    /** A frame is exact enough inside this distance: one GOP or the base window. */
+    public static long exactEnoughMs(long durationMs, long localKeyframeGapMs) {
+        final long base = displayLimitMs(durationMs);
+        return localKeyframeGapMs > 0L ? Math.min(base, localKeyframeGapMs) : base;
+    }
+
     /** Retry limits for a frame whose bytes have not arrived yet. */
     public static final int MAX_MISSING_FRAME_RETRIES = 6;
     public static final long MISSING_FRAME_RETRY_STEP_MS = 300L;
     public static final long MISSING_FRAME_RETRY_MAX_DELAY_MS = 1500L;
-    public static final long MISSING_FRAME_RETRY_WINDOW_MS = 6000L;
 
     /**
      * Backoff for a frame that is still downloading. Negative means the budget
-     * is spent and the task must be dropped; both the count and the total wait
-     * are bounded so a stalled file cannot spin the worker forever.
+     * is spent and the task must be dropped. The budget counts actual retries
+     * only: time spent paused by a drag or a flood cooldown must not consume
+     * it, or a single long cooldown would silently drop the frame forever.
      */
-    public static long missingFrameRetryDelayMs(int attempt, long nowMs, long firstMissingAtMs) {
+    public static long missingFrameRetryDelayMs(int attempt) {
         if (attempt < 1 || attempt > MAX_MISSING_FRAME_RETRIES) {
-            return -1L;
-        }
-        if (nowMs - firstMissingAtMs >= MISSING_FRAME_RETRY_WINDOW_MS) {
             return -1L;
         }
         return Math.min(MISSING_FRAME_RETRY_MAX_DELAY_MS,
                 MISSING_FRAME_RETRY_STEP_MS * attempt);
+    }
+
+    /** A retry whose finger has moved on must not be painted under a new time. */
+    public static boolean dropStaleHover(boolean isHover, long taskTimeMs,
+                                         long desiredKeyframeTime) {
+        return isHover && taskTimeMs != desiredKeyframeTime;
+    }
+
+    /** A follow-up block may reuse a slot, but must never claim one itself. */
+    public static boolean canClaimProbe(boolean probeGrantedProvided, boolean heldByThisFetch) {
+        return probeGrantedProvided || heldByThisFetch;
     }
 
     /**

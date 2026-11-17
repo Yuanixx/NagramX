@@ -61,6 +61,7 @@ public final class RetrieverFrameDecoder implements FrameDecoder {
     private boolean sourceComplete;
     private int attemptCount;
     private int unavailableSkips;
+    private volatile boolean lastDataMissing;
     private boolean closed;
     private volatile boolean cancelRequested;
     private volatile boolean cancelled;
@@ -287,7 +288,9 @@ public final class RetrieverFrameDecoder implements FrameDecoder {
         if (closed) {
             throw new IllegalStateException("retriever is closed");
         }
+        lastDataMissing = false;
         if (!ensureOpen()) {
+            lastDataMissing = true;
             return null;
         }
         final long available = availableDurationMs();
@@ -299,6 +302,7 @@ public final class RetrieverFrameDecoder implements FrameDecoder {
                         + "/" + declaredSize);
             }
             unavailableSkips++;
+            lastDataMissing = true;
             return null;
         }
         final long decodeStarted = SystemClock.uptimeMillis();
@@ -427,6 +431,11 @@ public final class RetrieverFrameDecoder implements FrameDecoder {
     @Override
     public boolean wasCancelled() {
         return cancelled;
+    }
+
+    @Override
+    public boolean wasDataMissing() {
+        return lastDataMissing;
     }
 
     @Override

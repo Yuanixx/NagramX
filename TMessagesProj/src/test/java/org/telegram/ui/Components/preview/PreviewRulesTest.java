@@ -105,10 +105,14 @@ public final class PreviewRulesTest {
     }
 
     private static void testClearDragging() {
-        check(PreviewRules.keepDraggingOnClear(true),
+        check(PreviewRules.keepDraggingOnClear(true, true),
                 "a clear while held keeps the drag alive");
-        check(!PreviewRules.keepDraggingOnClear(false),
+        check(!PreviewRules.keepDraggingOnClear(false, true),
+                "a late pressed flag cannot revive an ended drag");
+        check(!PreviewRules.keepDraggingOnClear(true, false),
                 "a clear after release ends the drag");
+        check(!PreviewRules.keepDraggingOnClear(false, false),
+                "no drag and no press clears normally");
     }
 
     private static void testProbeReuse() {
@@ -123,17 +127,36 @@ public final class PreviewRulesTest {
     }
 
     private static void testMissingFrameRetry() {
-        check(PreviewRules.missingFrameRetryDelayMs(1, 100L, 100L) == 300L,
+        check(PreviewRules.missingFrameRetryDelayMs(1) == 300L,
                 "the first retry waits one step");
-        check(PreviewRules.missingFrameRetryDelayMs(5, 1_000L, 100L) == 1_500L,
+        check(PreviewRules.missingFrameRetryDelayMs(5) == 1_500L,
                 "later retries are capped at 1.5s");
-        check(PreviewRules.missingFrameRetryDelayMs(0, 100L, 100L) == -1L,
+        check(PreviewRules.missingFrameRetryDelayMs(0) == -1L,
                 "attempt zero is not a retry");
         check(PreviewRules.missingFrameRetryDelayMs(
-                        PreviewRules.MAX_MISSING_FRAME_RETRIES + 1, 100L, 100L) == -1L,
+                        PreviewRules.MAX_MISSING_FRAME_RETRIES + 1) == -1L,
                 "the retry count is bounded");
-        check(PreviewRules.missingFrameRetryDelayMs(1, 6_100L, 100L) == -1L,
-                "the total retry window is bounded");
+        long total = 0L;
+        for (int attempt = 1; attempt <= PreviewRules.MAX_MISSING_FRAME_RETRIES; attempt++) {
+            total += PreviewRules.missingFrameRetryDelayMs(attempt);
+        }
+        check(total <= 6_000L, "total actual retry wait stays under six seconds");
+        check(PreviewRules.dropStaleHover(true, 10_000L, 20_000L),
+                "a hover whose finger moved on is dropped");
+        check(!PreviewRules.dropStaleHover(true, 10_000L, 10_000L),
+                "the current hover is kept");
+        check(!PreviewRules.dropStaleHover(false, 10_000L, 20_000L),
+                "bulk frames are never dropped as stale hover");
+        check(PreviewRules.canClaimProbe(true, false),
+                "the first block may claim a probe");
+        check(!PreviewRules.canClaimProbe(false, false),
+                "a follow-up block without a slot never claims one");
+        check(PreviewRules.canClaimProbe(false, true),
+                "a follow-up block may reuse its own slot");
+        check(PreviewRules.exactEnoughMs(600_000L, 30_000L) == 30_000L,
+                "one GOP is the exact-enough threshold when smaller");
+        check(PreviewRules.exactEnoughMs(733_633L, 100_000L) == 36_681L,
+                "a sparse GOP falls back to the base window");
     }
 
     private static void testHoverGrid() {

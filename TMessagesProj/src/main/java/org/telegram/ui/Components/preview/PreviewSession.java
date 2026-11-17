@@ -262,8 +262,20 @@ public final class PreviewSession {
     /** The display window, widened for locally sparse GOPs but capped at 10%. */
     public long maxFrameDistanceMs() {
         final long duration = planDurationMs > 0 ? planDurationMs : documentDurationMs();
+        // Short videos have their own even grid; widening their window can
+        // keep an old frame on screen longer than one grid step.
+        if (scheduler != null && scheduler.hasUniformStep()) {
+            return PreviewRules.displayLimitMs(duration);
+        }
         final long at = desiredMs >= 0 ? desiredMs : 0L;
         return PreviewRules.displayLimitMs(duration, keyframeGapAt(at));
+    }
+
+    /** Distance within which a frame counts as exact enough for the bubble. */
+    public long exactEnoughMs() {
+        final long duration = planDurationMs > 0 ? planDurationMs : documentDurationMs();
+        final long at = desiredMs >= 0 ? desiredMs : 0L;
+        return PreviewRules.exactEnoughMs(duration, keyframeGapAt(at));
     }
 
     public int thumbnailCount() {
@@ -1717,10 +1729,10 @@ public final class PreviewSession {
             return false;
         }
         if (mode == 1) {
-            // While the finger is down the preview is the user's whole focus;
-            // pausing its fetches just because playback buffers was the main
-            // reason a streamed seek showed nothing for seconds.
-            return !dragging;
+            // Conservative default: never compete with playback for the same
+            // connection while it buffers. The finger frame still decodes
+            // from bytes that are already available.
+            return true;
         }
         return bufferedAheadMs < AGGRESSIVE_MIN_BUFFERED_AHEAD_MS
                 || playbackStableMs < AGGRESSIVE_MIN_STABLE_MS

@@ -19,6 +19,8 @@ package org.telegram.ui.Components.preview;
 
 import android.os.SystemClock;
 
+import org.telegram.ui.Components.FileRangeFetcher;
+
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.PriorityQueue;
@@ -98,8 +100,8 @@ public final class ThumbnailScheduler {
         final int tier;
         final long timeMs;
         final int keyframeIndex;
-        /** Insertion order inside a priority; binary subdivision relies on it. */
-        final long order;
+        /** Insertion order inside a priority; a retry moves to the tier's tail. */
+        long order;
         /** Bounded retries for a frame whose bytes have not arrived yet. */
         int missingRetries;
         long firstMissingAtMs;
@@ -172,6 +174,11 @@ public final class ThumbnailScheduler {
         this.indexRefill = refill;
         this.diskSink = diskSink;
         this.durationMs = plan != null ? plan.durationMs : 0;
+    }
+
+    /** Short videos use an even grid and keep the original display window. */
+    public boolean hasUniformStep() {
+        return plan != null && plan.uniformStepMs > 0L;
     }
 
     /** Diagnostic: download progress used by the periodic store summary. */
@@ -417,6 +424,13 @@ public final class ThumbnailScheduler {
                         queue.add(task);
                         task = null;
                         waitLocked(Math.min(remaining, 150L));
+                    } else if (!stopped && PreviewRules.dropStaleHover(
+                            task.priority == PRIORITY_HOVER, task.timeMs,
+                            desiredKeyframeTime)) {
+                        // The finger left while this one waited its turn.
+                        task = null;
+                    } else {
+                        task.retryAtMs = 0L;
                     }
                 }
             }
@@ -487,11 +501,7 @@ public final class ThumbnailScheduler {
                 if (decoder.wasCancelled()) {
                     // A short decoder waiting for a download can be interrupted
                     // by a drag. Put the task back so the frame is not lost.
-                    synchronized (lock) {
-                        if (!stopped && !(dragging && task.priority == PRIORITY_HOVER)) {
-                            queue.add(task);
-                        }
-                    }
+                    requeue(task, 0L, false);
                     return;
                 }
                 if (decoder.wasDataMissing()) {
@@ -500,25 +510,22 @@ public final class ThumbnailScheduler {
                     // times instead of dropping the frame forever, and never
                     // pollute the real-failure streak with it.
                     final long now = SystemClock.uptimeMillis();
-                    final long delay;
-                    synchronized (lock) {
-                        if (task.firstMissingAtMs <= 0L) {
-                            task.firstMissingAtMs = now;
-                        }
-                        task.missingRetries++;
-                        delay = PreviewRules.missingFrameRetryDelayMs(
-                                task.missingRetries, now, task.firstMissingAtMs);
+                    if (FileRangeFetcher.isCoolingDown()) {
+                        // A flood cooldown lasts far longer than the retry
+                        // budget. Wait it out without spending a retry, or the
+                        // frame is thrown away and never comes back.
+                        final long wait = Math.min(
+                                FileRangeFetcher.coolingDownRemainingMs() + 200L, 5_000L);
+                        requeue(task, now + wait, true);
+
+                        return;
                     }
+                    task.missingRetries++;
+                    final long delay = PreviewRules.missingFrameRetryDelayMs(task.missingRetries);
                     if (delay >= 0L) {
                         // Keep it in the queue with a due time. Sleeping the
                         // single worker here would stall a newer finger frame.
-                        synchronized (lock) {
-                            if (!stopped && (task.priority != PRIORITY_HOVER
-                                    || task.timeMs == desiredKeyframeTime)) {
-                                task.retryAtMs = now + delay;
-                                queue.add(task);
-                            }
-                        }
+                        requeue(task, now + delay, true);
                         return;
                     }
                     PreviewLog.d("SeekPreview: frame retries exhausted at " + task.timeMs + "ms");
@@ -606,6 +613,8 @@ public final class ThumbnailScheduler {
             if (decoder.wasCancelled()) {
                 synchronized (lock) {
                     if (!stopped && !(dragging && task.priority == PRIORITY_HOVER)) {
+                        task.order = nextTaskOrder++;
+                        task.retryAtMs = 0L;
                         queue.add(task);
                     }
                 }
@@ -640,6 +649,27 @@ public final class ThumbnailScheduler {
     private boolean isStopped() {
         synchronized (lock) {
             return stopped;
+        }
+    }
+
+    /** Requeues a task at the tail of its tier so a not-yet-due retry cannot block others. */
+    private void requeue(Task task, long retryAt, boolean keepRetryState) {
+        synchronized (lock) {
+            if (stopped) {
+                return;
+            }
+            if (PreviewRules.dropStaleHover(
+                    task.priority == PRIORITY_HOVER, task.timeMs, desiredKeyframeTime)) {
+                return;
+            }
+            if (!keepRetryState) {
+                task.retryAtMs = 0L;
+                task.firstMissingAtMs = 0L;
+                task.missingRetries = 0;
+            }
+            task.order = nextTaskOrder++;
+            task.retryAtMs = retryAt;
+            queue.add(task);
         }
     }
 

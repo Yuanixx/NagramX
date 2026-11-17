@@ -540,8 +540,10 @@ public class VideoSeekFramePreview extends View {
     }
 
     private boolean isApproximate(PreviewSession current, Thumbnail thumbnail, long positionMs) {
-        final long gap = current.keyframeGapAt(positionMs);
-        return gap > 0 && Math.abs(thumbnail.timeMs - positionMs) > gap;
+        // Use the same clock as the display window. Comparing only against a
+        // GOP gap misses far frames when the window was widened but capped by
+        // 10% of the video, leaving a clearly wrong picture unmarked.
+        return Math.abs(thumbnail.timeMs - positionMs) > current.exactEnoughMs();
     }
 
     private void startFrameFade() {
@@ -607,8 +609,7 @@ public class VideoSeekFramePreview extends View {
         // still held. Ending the drag there used to push the worker into the
         // buffering wait with a queue full of tasks and an empty store: the
         // first picture arrived seconds later and was already invisible.
-        final boolean stillPressed = isPressedNow();
-        final boolean keepDragging = PreviewRules.keepDraggingOnClear(stillPressed);
+        final boolean keepDragging = PreviewRules.keepDraggingOnClear(dragging, isPressedNow());
         if (!keepDragging) {
             dragging = false;
         }
