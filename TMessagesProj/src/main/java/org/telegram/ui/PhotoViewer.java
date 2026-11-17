@@ -309,6 +309,7 @@ import org.telegram.ui.Components.Mp4IndexExtractorsFactory;
 import org.telegram.ui.Components.VideoPlayer;
 import org.telegram.ui.Components.VideoPlayerSeekBar;
 import org.telegram.ui.Components.VideoSeekFramePreview;
+import org.telegram.ui.Components.preview.SeekRules;
 import org.telegram.ui.Components.VideoSeekPreviewImage;
 import org.telegram.ui.Components.VideoTimelinePlayView;
 import org.telegram.ui.Components.ViewHelper;
@@ -1125,6 +1126,12 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
     private float seekToProgressPending;
     private long seekToProgressSinceMs;
     private boolean logNextReadyPosition;
+    // Last genuine user drag target (ms). Used to restore the real watch position when a
+    // near-zero dirty seek is rejected, so the fix never leaves the user stuck at frame 0.
+    // Bound to the document id so a target from a previous video can never be replayed on a new one.
+    private long lastGoodDragTargetMs = -1L;
+    private long lastGoodDragAtMs = 0L;
+    private long lastGoodDragDocId = -1L;
     private String shouldSavePositionForCurrentVideo;
     private String shouldSavePositionForCurrentVideoShortTerm;
     private static final HashMap<String, SavedVideoPosition> savedVideoPositions = new HashMap<>();
@@ -1658,7 +1665,9 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
                         // next open start from the first frame.
                         final long saveDuration = videoPlayer != null ? videoPlayer.getDuration() : 0L;
                         final long savePosition = videoPlayer != null ? videoPlayer.getCurrentPosition() : 0L;
-                        final float value = saveDuration != C.TIME_UNSET && saveDuration > 0 && savePosition > 0
+                        // A near-zero read during a fragmented-stream rebuild is not a real
+                        // watch position; persisting it makes the next open start at frame 0.
+                        final float value = SeekRules.isValidSavePosition(savePosition, saveDuration)
                                 ? savePosition / (float) saveDuration : -1f;
                         if (value > 0 && value < 1f && SystemClock.elapsedRealtime() - lastSaveTime >= 1000) {
                             final String saveFor = shouldSavePositionForCurrentVideo;
@@ -10219,7 +10228,16 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
                         seekToProgressPending = progress;
                         seekToProgressSinceMs = 0L;
                     } else {
-                        seekVideoOrWebTo((int) (progress * duration));
+                        final long dragTargetMs = (long) (progress * duration);
+                        // Remember the user's real target so a later near-zero dirty seek
+                        // can be replaced with this position instead of stranding frame 0.
+                        if (dragTargetMs >= SeekRules.tMinMs(duration)) {
+                            lastGoodDragTargetMs = dragTargetMs;
+                            lastGoodDragAtMs = SystemClock.elapsedRealtime();
+                            TLRPC.Document dragDoc = currentMessageObject != null ? currentMessageObject.getDocument() : null;
+                            lastGoodDragDocId = dragDoc != null ? dragDoc.id : -1L;
+                        }
+                        seekVideoOrWebTo((int) dragTargetMs);
                     }
                     showVideoSeekPreviewPosition(false);
                     needShowOnReady = false;
@@ -11050,7 +11068,7 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
                         if (!inPreview && (currentEditMode != EDIT_MODE_NONE || videoTimelineViewContainer.getVisibility() == View.VISIBLE)) {
                             seekVideoOrWebToProgress(videoTimelineView.getLeftProgress());
                         } else {
-                            seekVideoOrWebToProgress(0);
+                            seekVideoOrWebToProgress(0, true);
                         }
                         manuallyPaused = false;
                         cancelVideoPlayRunnable();
@@ -11067,7 +11085,7 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
                     if (!inPreview && videoTimelineViewContainer.getVisibility() == View.VISIBLE) {
                         seekVideoOrWebToProgress(videoTimelineView.getLeftProgress());
                     } else {
-                        seekVideoOrWebToProgress(0);
+                        seekVideoOrWebToProgress(0, true);
                     }
                     manuallyPaused = false;
                     pauseVideoOrWeb();
@@ -11101,30 +11119,76 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
     }
 
     private void seekVideoOrWebToProgress(float progress) {
+        seekVideoOrWebToProgress(progress, false);
+    }
+
+    /**
+     * Single funnel for every progress-based seek (saved-position restore, pending, forceSeekTo).
+     * A fragmented stream that trips a rebuild briefly reports a near-zero position; saving and
+     * replaying it produced a seek to target≈0 that the user saw as "fast-forward jumped back to
+     * the start". Reject those here, at the one choke point all carriers pass through, using the
+     * same pure rules the JVM tests exercise.
+     */
+    private void seekVideoOrWebToProgress(float progress, boolean intentionalZero) {
         if (videoPlayer != null) {
-            final long duration = videoPlayer.getDuration();
-            // A streamed fragmented file can still report TIME_UNSET here. Multiplying
-            // a progress by that sentinel overflows into a huge negative value, which
-            // ExoPlayer clamps to 0 - the video jumps back to the first frame. Never
-            // issue a seek until the duration is known and the target is in range.
-            if (duration == C.TIME_UNSET || duration <= 0 || Float.isNaN(progress)) {
+            final VideoPlayer p = videoPlayer; // single capture: avoid validate-on-A / seek-on-B across a rebuild
+            final long duration = p.getDuration();
+            if (duration == C.TIME_UNSET || duration <= 0) {
                 FileLog.d("ABPV: player seek reject p=" + progress + " dur=" + duration);
                 android.util.Log.w("FMPIDX", "seek reject p=" + progress + " dur=" + duration);
                 return;
             }
             final float clamped = progress < 0f ? 0f : Math.min(progress, 1f);
-            final long targetMs = (long) (clamped * duration);
+            final long targetMs = (long) ((double) clamped * (double) duration);
+            if (SeekRules.isNearZeroDirty(progress, targetMs, duration, intentionalZero)) {
+                FileLog.d("ABPV: player seek dirty-reject p=" + progress + " dur=" + duration + " target=" + targetMs);
+                android.util.Log.w("FMPIDX", "dirty-reject p=" + progress + " target=" + targetMs);
+                restoreAfterDirtyReject(p, duration);
+                return;
+            }
             FileLog.d("ABPV: player seek p=" + progress + " dur=" + duration + " target=" + targetMs);
             android.util.Log.w("FMPIDX", "seek target=" + targetMs + " dur=" + duration + " p=" + progress);
             logNextReadyPosition = true;
-            videoPlayer.seekTo(targetMs);
+            p.seekTo(targetMs);
         } else if (photoViewerWebView != null) {
             final long duration = photoViewerWebView.getVideoDuration();
-            if (duration <= 0 || Float.isNaN(progress)) {
+            if (duration <= 0) {
                 return;
             }
             final float clamped = progress < 0f ? 0f : Math.min(progress, 1f);
-            photoViewerWebView.seekTo((long) (clamped * duration));
+            final long targetMs = (long) ((double) clamped * (double) duration);
+            if (SeekRules.isNearZeroDirty(progress, targetMs, duration, intentionalZero)) {
+                FileLog.d("ABPV: web seek dirty-reject p=" + progress + " target=" + targetMs);
+                return;
+            }
+            photoViewerWebView.seekTo(targetMs);
+        }
+    }
+
+    /**
+     * reject-and-RESTORE: if the user recently dragged to a real position, replay that instead of
+     * leaving the player at frame 0. If there is no recent genuine drag, do nothing: the current
+     * playback position is already the correct one and issuing no seek is strictly better than a
+     * seek to byte 0.
+     */
+    private void restoreAfterDirtyReject(VideoPlayer p, long duration) {
+        if (duration <= 0 || duration == C.TIME_UNSET || p.player == null) {
+            return;
+        }
+        final long now = SystemClock.elapsedRealtime();
+        TLRPC.Document curDoc = currentMessageObject != null ? currentMessageObject.getDocument() : null;
+        final long curDocId = curDoc != null ? curDoc.id : -1L;
+        // Never replay a drag target that belonged to a different video (cross-object leak).
+        if (lastGoodDragTargetMs >= SeekRules.tMinMs(duration)
+                && lastGoodDragTargetMs < duration
+                && lastGoodDragDocId == curDocId
+                && curDocId != -1L
+                && now - lastGoodDragAtMs < 30_000L) {
+            final long restoreMs = lastGoodDragTargetMs;
+            lastGoodDragTargetMs = -1L;
+            logNextReadyPosition = true;
+            android.util.Log.w("FMPIDX", "restore-after-reject pos=" + restoreMs);
+            p.seekTo(restoreMs);
         }
     }
 
@@ -11913,7 +11977,7 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
                 // Never persist a progress derived from an unknown duration or a
                 // reset position: a fragmented stream that tripped a rebuild can
                 // briefly report both, and saving 0 makes the next open start over.
-                if (duration != C.TIME_UNSET && duration > 0 && position > 0) {
+                if (SeekRules.isValidSavePosition(position, duration)) {
                     final float progress = position / (float) duration;
                     if (progress > 0f && progress < 1f) {
                         savedVideoPositions.put(shouldSavePositionForCurrentVideoShortTerm, new SavedVideoPosition(progress, SystemClock.elapsedRealtime()));
@@ -11933,7 +11997,7 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
             if (shouldSavePositionForCurrentVideoShortTerm != null) {
                 final long webDuration = photoViewerWebView.getVideoDuration();
                 final long webPosition = getCurrentVideoPosition();
-                if (webDuration > 0 && webPosition > 0) {
+                if (SeekRules.isValidSavePosition(webPosition, webDuration)) {
                     final float progress = webPosition / (float) webDuration;
                     if (progress > 0f && progress < 1f) {
                         savedVideoPositions.put(shouldSavePositionForCurrentVideoShortTerm, new SavedVideoPosition(progress, SystemClock.elapsedRealtime()));
@@ -14513,7 +14577,7 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
                 }
             } else {
                 if (Math.abs(videoPlayerSeekbar.getProgress() - videoTimelineView.getRightProgress()) < 0.01f || videoPlayer != null && videoPlayer.getCurrentPosition() == videoPlayer.getDuration()) {
-                    seekVideoOrWebToProgress(0);
+                    seekVideoOrWebToProgress(0, true);
                 }
                 scheduleActionBarHide();
             }

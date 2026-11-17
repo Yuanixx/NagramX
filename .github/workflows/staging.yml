@@ -67,8 +67,13 @@ jobs:
             TMessagesProj/src/main/java/org/telegram/messenger/FragmentIndexRules.java \
             TMessagesProj/src/main/java/org/telegram/ui/Components/preview/TailMoovLocator.java \
             TMessagesProj/src/main/java/org/telegram/ui/Components/preview/DecodeGate.java \
-            TMessagesProj/src/main/java/org/telegram/ui/Components/preview/RemoteFailureTracker.java
+            TMessagesProj/src/main/java/org/telegram/ui/Components/preview/RemoteFailureTracker.java \
+            TMessagesProj/src/main/java/org/telegram/ui/Components/preview/SeekRules.java
           java -cp /tmp/preview-rules org.telegram.ui.Components.preview.PreviewRulesTest
+          javac -d /tmp/preview-rules \
+            TMessagesProj/src/test/java/org/telegram/ui/Components/preview/SeekRulesTest.java \
+            TMessagesProj/src/main/java/org/telegram/ui/Components/preview/SeekRules.java
+          java -cp /tmp/preview-rules org.telegram.ui.Components.preview.SeekRulesTest
       - name: Set up Ccache
         uses: hendrikmuhs/ccache-action@v1.2.23
         with:
