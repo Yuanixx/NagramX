@@ -11003,8 +11003,6 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
                 logNextReadyPosition = false;
                 FileLog.d("ABPV: player ready pos=" + videoPlayer.getCurrentPosition()
                         + " dur=" + videoPlayer.getDuration());
-                android.util.Log.w("FMPIDX", "player ready pos=" + videoPlayer.getCurrentPosition()
-                        + " dur=" + videoPlayer.getDuration());
             }
             if (aspectRatioFrameLayout != null && aspectRatioFrameLayout.getVisibility() != View.VISIBLE) {
                 aspectRatioFrameLayout.setVisibility(View.VISIBLE);
@@ -11109,13 +11107,11 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
             // issue a seek until the duration is known and the target is in range.
             if (duration == C.TIME_UNSET || duration <= 0 || Float.isNaN(progress)) {
                 FileLog.d("ABPV: player seek reject p=" + progress + " dur=" + duration);
-                android.util.Log.w("FMPIDX", "seek reject p=" + progress + " dur=" + duration);
                 return;
             }
             final float clamped = progress < 0f ? 0f : Math.min(progress, 1f);
             final long targetMs = (long) (clamped * duration);
             FileLog.d("ABPV: player seek p=" + progress + " dur=" + duration + " target=" + targetMs);
-            android.util.Log.w("FMPIDX", "seek target=" + targetMs + " dur=" + duration + " p=" + progress);
             logNextReadyPosition = true;
             videoPlayer.seekTo(targetMs);
         } else if (photoViewerWebView != null) {
