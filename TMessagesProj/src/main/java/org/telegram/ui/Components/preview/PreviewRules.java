@@ -157,4 +157,23 @@ public final class PreviewRules {
     public static boolean rangeComplete(int filled, int wanted) {
         return wanted > 0 && filled >= wanted;
     }
+
+    /**
+     * A file whose declared full length is present but whose box chain ends far before that
+     * length is a pre-allocated sparse streaming temp, not a complete file: only a prefix has
+     * real fragments and the rest is a zero tail. It must be indexed with the partial rules so
+     * the player gets a seekable map from the fragments that did arrive instead of restarting
+     * every seek at byte 0.
+     *
+     * @param len        number of bytes actually readable (usually the file length)
+     * @param docSize    declared document size
+     * @param validEnd   byte offset where the last complete top-level box ends
+     * @param maxTail    maximum tolerated trailing bytes for a genuinely complete file
+     */
+    public static boolean shouldTreatAsPartial(long len, long docSize, long validEnd, long maxTail) {
+        if (validEnd < 0 || validEnd > len) {
+            return true;
+        }
+        return len - validEnd > maxTail;
+    }
 }

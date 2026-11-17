@@ -48,6 +48,7 @@ public final class PreviewRulesTest {
         testTailMoovNeedsExpansion();
         testTailMoovNeedsPrefix();
         testTailMoovTooLargeAndInvalid();
+        testSparseTailDowngrade();
         System.out.println("PREVIEW RULES: " + passed + " checks passed");
     }
 
@@ -389,6 +390,28 @@ public final class PreviewRulesTest {
                 "an aligned exact block is one block");
         check(TailMoovLocator.blocksForRange(0L, 9L, 8) == 2,
                 "a range past the block edge touches two blocks");
+    }
+
+    private static void testSparseTailDowngrade() {
+        // A genuinely complete file: box chain ends at the declared size, no downgrade.
+        check(!PreviewRules.shouldTreatAsPartial(1000L, 1000L, 1000L, 64L),
+                "a file whose boxes reach EOF is complete");
+        // A complete file with the usual small trailing padding is still complete.
+        check(!PreviewRules.shouldTreatAsPartial(1000L, 1000L, 980L, 64L),
+                "small trailing bytes are tolerated");
+        // The 44:22 case: file length == docSize (pre-allocated) but box chain ends at 24%,
+        // leaving a huge zero tail. Must be downgraded to partial, not rejected as complete.
+        check(PreviewRules.shouldTreatAsPartial(326398043L, 326398043L, 79168189L, 64L),
+                "a pre-allocated sparse temp with a huge zero tail is partial");
+        // A growing prefix whose boxes reach its own length is genuinely partial already
+        // (complete=false is decided by len<docSize); this helper must not re-flag it.
+        check(!PreviewRules.shouldTreatAsPartial(79168189L, 326398043L, 79168189L, 64L),
+                "a prefix with a clean tail needs no downgrade");
+        // Invalid / inconsistent inputs degrade to partial conservatively.
+        check(PreviewRules.shouldTreatAsPartial(1000L, 1000L, 1200L, 64L),
+                "validEnd beyond length is inconsistent -> partial");
+        check(PreviewRules.shouldTreatAsPartial(1000L, 1000L, -1L, 64L),
+                "unknown validEnd -> partial");
     }
 
     // ------------------------------------------------------------- fixtures

@@ -9,6 +9,8 @@ import androidx.annotation.Nullable;
 
 import androidx.media3.extractor.ChunkIndex;
 
+import org.telegram.ui.Components.preview.PreviewRules;
+
 import java.io.File;
 import java.io.RandomAccessFile;
 import java.util.ArrayList;
@@ -96,7 +98,26 @@ public final class FragmentIndexBuilder {
         // can be walked up to the last complete fragment. That is what makes a seek
         // work before the download has finished, instead of falling back to
         // RestartableSeekMap (which restarts at byte 0 and looks like "seek is stuck").
-        final boolean complete = docSize <= 0 || len == docSize;
+        boolean complete = docSize <= 0 || len == docSize;
+        if (complete) {
+            // A Telegram streaming temp is pre-allocated to the full document size, so
+            // file.length() == docSize even when only a prefix has real box data and the
+            // rest is zero-filled. Treating that as a complete file makes scan() reject
+            // the huge zero tail and return no index, which leaves the player on an
+            // unseekable SeekMap that restarts every seek at byte 0. Detect the sparse
+            // preallocation here and fall back to the partial path, which already tolerates
+            // a truncated tail and builds an index from the fragments that did arrive.
+            boolean sparse = false;
+            try {
+                StructStat st = Os.stat(path);
+                sparse = (long) st.st_blocks * 512L < st.st_size;
+            } catch (ErrnoException e) {
+                // Cannot tell: keep the conservative complete path below.
+            }
+            if (sparse) {
+                complete = false;
+            }
+        }
         // Box-header scanning cannot detect holes inside mdat payloads; st_blocks is a cheap
         // gate for a finished file. A growing *.temp can legitimately be sparse, and the
         // scanner stops at the first zeroed header anyway, so the gate is skipped there.
@@ -134,8 +155,13 @@ public final class FragmentIndexBuilder {
             }
         }
 
-        ChunkIndex index = scan(file, len, docSize, expectedDurationSec, complete);
-        if (complete) {
+        boolean[] downgraded = new boolean[1];
+        ChunkIndex index = scan(file, len, docSize, expectedDurationSec, complete, downgraded);
+        // A complete-looking file whose tail is all zeros is really a partial prefix. Treat it
+        // as partial everywhere below: validate structurally, cache by length, never persist a
+        // prefix-only index as if it covered the whole document.
+        final boolean usePartial = !complete || downgraded[0];
+        if (!usePartial) {
             synchronized (CACHE) {
                 // Never cache a failure: a transient reject (file still being filled, transient I/O)
                 // would otherwise poison the key for the whole process lifetime.
@@ -202,7 +228,8 @@ public final class FragmentIndexBuilder {
         if (len <= 0 || (docSize > 0 && len > docSize)) {
             return null;
         }
-        return scan(file, len, docSize, expectedDurationSec, docSize <= 0 || len == docSize);
+        return scan(file, len, docSize, expectedDurationSec, docSize <= 0 || len == docSize,
+                new boolean[1]);
     }
 
     // ---------------------------------------------------------------------
@@ -465,9 +492,10 @@ public final class FragmentIndexBuilder {
 
     @Nullable
     private static ChunkIndex scan(File file, long len, long docSize,
-                                  double expectedDurationSec, boolean complete) {
+                                  double expectedDurationSec, boolean complete,
+                                  boolean[] outDowngraded) {
         try (RandomAccessFile raf = new RandomAccessFile(file, "r")) {
-            return scan(raf, len, docSize, expectedDurationSec, complete);
+            return scan(raf, len, docSize, expectedDurationSec, complete, outDowngraded);
         } catch (Throwable e) {
             reject("exception " + e);
             return null;
@@ -476,8 +504,13 @@ public final class FragmentIndexBuilder {
 
     @Nullable
     private static ChunkIndex scan(RandomAccessFile raf, long len, long docSize,
-                                  double expectedDurationSec, boolean complete)
+                                  double expectedDurationSec, boolean complete,
+                                  boolean[] outDowngraded)
             throws Exception {
+        // strict mirrors complete, but is relaxed to false when a supposedly complete file
+        // turns out to be a pre-allocated sparse temp with a large zero tail. In that case the
+        // partial rules apply so the fragments that did arrive still produce a seekable index.
+        boolean strict = complete;
         Map<Integer, Track> tracks = new HashMap<>();
         List<Frag> frags = new ArrayList<>();
         byte[] hdr = new byte[16];
@@ -581,11 +614,17 @@ public final class FragmentIndexBuilder {
             reject("has native index sidx=" + hasSidx + " mfra=" + hasMfra);
             return null;
         }
-        if (complete) {
-            if (tail < 0 || tail > MAX_TAIL_BYTES) {
-                reject("tail=" + tail + " (truncated or sparse hole)");
-                return null;
-            }
+        if (complete && PreviewRules.shouldTreatAsPartial(len, docSize, validEnd, MAX_TAIL_BYTES)) {
+            // A pre-allocated streaming temp has file.length() == docSize but only a prefix of
+            // real fragments; the rest is a zero tail. Do not throw away the fragments we did
+            // parse: fall back to the partial rules below so a usable index is built from what
+            // arrived, keeping the player seekable.
+            Log.w(TAG, "complete tail too large, downgrade to partial tail=" + tail
+                    + " validEnd=" + validEnd + " len=" + len);
+            strict = false;
+            outDowngraded[0] = true;
+        }
+        if (strict && complete) {
             if (moofCount != mdatCount || moofCount < 2) {
                 reject("moof=" + moofCount + " mdat=" + mdatCount);
                 return null;
@@ -614,11 +653,11 @@ public final class FragmentIndexBuilder {
         Log.w(TAG, "tracks video=" + video.id + " ts=" + video.timescale + " durUs=" + videoUs
                 + " audio=" + audio.id + " ts=" + audio.timescale + " durUs=" + audioUs
                 + " mvhdUs=" + mvhdUs + " mehdUs=" + mehdUs + " expectUs=" + expectedUs);
-        if (complete && (videoUs <= 0 || audioUs <= 0)) {
+        if (strict && (videoUs <= 0 || audioUs <= 0)) {
             reject("zero track duration videoUs=" + videoUs + " audioUs=" + audioUs);
             return null;
         }
-        if (complete && Math.abs(videoUs - audioUs) * 100L >= Math.max(videoUs, audioUs)) {
+        if (strict && Math.abs(videoUs - audioUs) * 100L >= Math.max(videoUs, audioUs)) {
             reject("av mismatch videoUs=" + videoUs + " audioUs=" + audioUs);
             return null;
         }
@@ -626,11 +665,11 @@ public final class FragmentIndexBuilder {
             // Document attribute unavailable: mvhd is a valid fallback for this file.
             expectedUs = mvhdUs;
         }
-        if (complete && expectedUs <= 0) {
+        if (strict && expectedUs <= 0) {
             reject("no expected duration (docAttribute/mvhd both unavailable)");
             return null;
         }
-        if (complete && Math.abs(videoUs - expectedUs) * 100L > expectedUs * 2L) {
+        if (strict && Math.abs(videoUs - expectedUs) * 100L > expectedUs * 2L) {
             reject("duration mismatch videoUs=" + videoUs + " expectUs=" + expectedUs);
             return null;
         }
@@ -736,7 +775,7 @@ public final class FragmentIndexBuilder {
             }
             if (sz <= 0 || sz > Integer.MAX_VALUE || dur <= 0
                     || (i > 0 && offsetsArr[i] <= offsetsArr[i - 1])) {
-                if (complete) {
+                if (strict) {
                     reject("chunk " + i + " sz=" + sz + " dur=" + dur
                             + " offset=" + offsetsArr[i]);
                     return null;
