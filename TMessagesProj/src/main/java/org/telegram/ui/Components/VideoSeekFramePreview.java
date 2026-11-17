@@ -859,6 +859,14 @@ public class VideoSeekFramePreview extends View {
             final int start = (int) ((SystemClock.uptimeMillis() / 4L) % 360L);
             canvas.drawArc(spinnerRect, start, 280, false, spinnerPaint);
             postInvalidateOnAnimation();
+        } else if (picture == null || picture.isRecycled()) {
+            // No frame at all (e.g. a streaming tail-moov file still downloading): the bubble
+            // used to be an unexplained empty dark box, which reads as a freeze. Tell the user
+            // the preview is simply not ready instead of showing a silent blank.
+            final String hint = "预览暂不可用";
+            final float cx = (width - badgeTextPaint.measureText(hint)) / 2f;
+            final float cy = videoHeight / 2f + badgeTextPaint.descent() - badgeTextPaint.ascent() / 2f;
+            canvas.drawText(hint, Math.max(AndroidUtilities.dp(4), cx), cy, badgeTextPaint);
         }
 
         if (frameTime != null) {

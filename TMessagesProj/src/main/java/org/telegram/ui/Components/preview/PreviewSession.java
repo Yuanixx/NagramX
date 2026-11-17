@@ -420,6 +420,15 @@ public final class PreviewSession {
     private void run() {
         FrameDecoder decoder = null;
         try {
+            // Load any already-cached thumbnails BEFORE the (potentially slow) prepare.
+            // A tail-moov streaming file can spend tens of seconds reading its index; during
+            // that window requestFrame() pulls from the store on every drag tick. Seeding the
+            // store here means the finger shows a real cached frame immediately instead of an
+            // empty bubble. This uses only the preview's own disk cache and does not touch the
+            // player's cache. It runs on its own thread and is safe if prepare later fails.
+            if (diskSink != null) {
+                diskSink.loadInto(store, desiredMs);
+            }
             final Prepared prepared = prepare();
             if (prepared == null || stopped) {
                 if (prepared != null) {
@@ -441,9 +450,6 @@ public final class PreviewSession {
             if (stopped) {
                 worker.stop();
                 return;
-            }
-            if (diskSink != null) {
-                diskSink.loadInto(store, desiredMs);
             }
             PreviewLog.d("SeekPreview: session decoder=" + decoder.name()
                     + " duration=" + prepared.plan.durationMs
