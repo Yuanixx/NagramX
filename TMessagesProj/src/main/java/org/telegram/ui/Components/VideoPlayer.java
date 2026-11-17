@@ -1750,6 +1750,11 @@ public class VideoPlayer implements Player.Listener, AnalyticsListener, Notifica
     }
 
     public void seekTo(long positionMs, boolean fast) {
+        // A negative target is clamped to 0 by ExoPlayer, which restarts a
+        // streamed fragmented file from the first frame. Drop it instead.
+        if (positionMs < 0) {
+            return;
+        }
         if (player != null) {
             player.setSeekParameters(fast ? SeekParameters.CLOSEST_SYNC : SeekParameters.EXACT);
             player.seekTo(positionMs);
@@ -1757,6 +1762,12 @@ public class VideoPlayer implements Player.Listener, AnalyticsListener, Notifica
     }
 
     public void seekTo(long positionMs, boolean fast, Runnable whenDone) {
+        if (positionMs < 0) {
+            if (whenDone != null) {
+                whenDone.run();
+            }
+            return;
+        }
         if (player != null) {
             if (whenDone != null) {
                 seekFinishedListeners.add(whenDone);
@@ -1767,6 +1778,12 @@ public class VideoPlayer implements Player.Listener, AnalyticsListener, Notifica
     }
 
     public void seekToBack(long positionMs, boolean fast, Runnable whenDone) {
+        if (positionMs < 0) {
+            if (whenDone != null) {
+                whenDone.run();
+            }
+            return;
+        }
         if (player != null) {
             if (whenDone != null) {
                 seekFinishedListeners.add(whenDone);
@@ -1777,6 +1794,12 @@ public class VideoPlayer implements Player.Listener, AnalyticsListener, Notifica
     }
 
     public void seekToForward(long positionMs, boolean fast, Runnable whenDone) {
+        if (positionMs < 0) {
+            if (whenDone != null) {
+                whenDone.run();
+            }
+            return;
+        }
         if (player != null) {
             if (whenDone != null) {
                 seekFinishedListeners.add(whenDone);

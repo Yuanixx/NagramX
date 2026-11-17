@@ -1123,6 +1123,8 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
     private ImageView abLoopButton;
     private ActionBarMenuSubItem abLoopItem;
     private float seekToProgressPending;
+    private long seekToProgressSinceMs;
+    private boolean logNextReadyPosition;
     private String shouldSavePositionForCurrentVideo;
     private String shouldSavePositionForCurrentVideoShortTerm;
     private static final HashMap<String, SavedVideoPosition> savedVideoPositions = new HashMap<>();
@@ -1367,6 +1369,7 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
                     int seconds = Utilities.parseInt(url);
                     if (videoPlayer.getDuration() == C.TIME_UNSET) {
                         seekToProgressPending = seconds / (float) currentMessageObject.getDuration();
+                        seekToProgressSinceMs = 0L;
                     } else {
                         videoPlayer.seekTo(seconds * 1000L);
                         videoPlayerSeekbar.setProgress(seconds * 1000L / (float) videoPlayer.getDuration(), true);
@@ -1532,6 +1535,19 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
     }
 
     private void seekVideoOrWebTo(long position) {
+        // A negative position used to be clamped to 0 by ExoPlayer, restarting a
+        // streamed fragmented video from the first frame. Never issue one.
+        if (position < 0) {
+            FileLog.d("ABPV: player seekTo reject negative pos=" + position);
+            return;
+        }
+        final long duration = videoPlayer != null ? videoPlayer.getDuration()
+                : (photoViewerWebView != null && photoViewerWebView.isControllable()
+                    ? photoViewerWebView.getVideoDuration() : C.TIME_UNSET);
+        if (duration > 0 && position > duration) {
+            FileLog.d("ABPV: player seekTo reject over pos=" + position + " dur=" + duration);
+            return;
+        }
         if (photoViewerWebView != null && photoViewerWebView.isControllable()) {
             photoViewerWebView.seekTo(position);
         } else if (videoPlayer != null) {
@@ -1640,16 +1656,23 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
                     }
                     videoPlayerSeekbarView.invalidate();
                     if (shouldSavePositionForCurrentVideo != null) {
-                        float value = progress;
-                        if (value >= 0 && SystemClock.elapsedRealtime() - lastSaveTime >= 1000) {
+                        // Derive the value from real player state: `progress` can be 0 or NaN
+                        // while a fragmented stream rebuilds, and persisting that makes the
+                        // next open start from the first frame.
+                        final long saveDuration = videoPlayer != null ? videoPlayer.getDuration() : 0L;
+                        final long savePosition = videoPlayer != null ? videoPlayer.getCurrentPosition() : 0L;
+                        final float value = saveDuration != C.TIME_UNSET && saveDuration > 0 && savePosition > 0
+                                ? savePosition / (float) saveDuration : -1f;
+                        if (value > 0 && value < 1f && SystemClock.elapsedRealtime() - lastSaveTime >= 1000) {
                             final String saveFor = shouldSavePositionForCurrentVideo;
+                            final float valueToStore = value;
                             lastSaveTime = SystemClock.elapsedRealtime();
                             if (currentMessageObject != null) {
-                                currentMessageObject.cachedSavedTimestamp = value;
+                                currentMessageObject.cachedSavedTimestamp = valueToStore;
                             }
                             Utilities.globalQueue.postRunnable(() -> {
                                 SharedPreferences.Editor editor = ApplicationLoader.applicationContext.getSharedPreferences("media_saved_pos", Activity.MODE_PRIVATE).edit();
-                                editor.putFloat(saveFor, value).apply();
+                                editor.putFloat(saveFor, valueToStore).apply();
                             });
                         }
                     }
@@ -10189,8 +10212,15 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
                         progress = videoTimelineView.getLeftProgress() + (videoTimelineView.getRightProgress() - videoTimelineView.getLeftProgress()) * progress;
                     }
                     long duration = getVideoDuration();
-                    if (duration == C.TIME_UNSET) {
+                    // A player being rebuilt reports 0 here; seeking by progress*0
+                    // is a seek to byte 0. Treat any unknown/non-positive duration
+                    // as "defer" instead of issuing that seek.
+                    final boolean durationKnown = duration != C.TIME_UNSET && duration > 0;
+                    FileLog.d("ABPV: player drag p=" + progress + " dur=" + duration
+                            + " target=" + (durationKnown ? (long) (progress * duration) : -1L));
+                    if (!durationKnown) {
                         seekToProgressPending = progress;
+                        seekToProgressSinceMs = 0L;
                     } else {
                         seekVideoOrWebTo((int) (progress * duration));
                     }
@@ -10951,14 +10981,32 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
                 if (knownDuration != C.TIME_UNSET && knownDuration > 0) {
                     final float pending = seekToProgressPending;
                     seekToProgressPending = 0;
+                    seekToProgressSinceMs = 0L;
+                    logNextReadyPosition = true;
                     seekVideoOrWebToProgress(pending);
                     if (currentMessageObject != null && !FileLoader.getInstance(currentMessageObject.currentAccount).isLoadingVideoAny(currentMessageObject.getDocument())) {
                         skipFirstBufferingProgress = true;
+                    }
+                } else {
+                    // Some fragmented/live streams never report a duration. Do not
+                    // let the pending seek hang forever and freeze the bubble: drop
+                    // it after a bounded wait so the UI recovers.
+                    final long now = SystemClock.elapsedRealtime();
+                    if (seekToProgressSinceMs == 0L) {
+                        seekToProgressSinceMs = now;
+                    } else if (now - seekToProgressSinceMs > 5000L) {
+                        seekToProgressPending = 0;
+                        seekToProgressSinceMs = 0L;
                     }
                 }
             }
         }
         if (playbackState == ExoPlayer.STATE_READY) {
+            if (logNextReadyPosition && videoPlayer != null) {
+                logNextReadyPosition = false;
+                FileLog.d("ABPV: player ready pos=" + videoPlayer.getCurrentPosition()
+                        + " dur=" + videoPlayer.getDuration());
+            }
             if (aspectRatioFrameLayout != null && aspectRatioFrameLayout.getVisibility() != View.VISIBLE) {
                 aspectRatioFrameLayout.setVisibility(View.VISIBLE);
             }
@@ -11061,10 +11109,13 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
             // ExoPlayer clamps to 0 - the video jumps back to the first frame. Never
             // issue a seek until the duration is known and the target is in range.
             if (duration == C.TIME_UNSET || duration <= 0 || Float.isNaN(progress)) {
+                FileLog.d("ABPV: player seek reject p=" + progress + " dur=" + duration);
                 return;
             }
             final float clamped = progress < 0f ? 0f : Math.min(progress, 1f);
-            videoPlayer.seekTo((long) (clamped * duration));
+            final long targetMs = (long) (clamped * duration);
+            FileLog.d("ABPV: player seek p=" + progress + " dur=" + duration + " target=" + targetMs);
+            videoPlayer.seekTo(targetMs);
         } else if (photoViewerWebView != null) {
             final long duration = photoViewerWebView.getVideoDuration();
             if (duration <= 0 || Float.isNaN(progress)) {
@@ -11537,7 +11588,13 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
         shouldSavePositionForCurrentVideoShortTerm = null;
         lastSaveTime = 0;
         if (newPlayerCreated) {
-            seekToProgressPending = seekToProgressPending2;
+            // A seek the user just requested (e.g. before a rebuild) lives in
+            // seekToProgressPending; do not overwrite it with the usually-zero
+            // pending2 and lose the target.
+            if (seekToProgressPending == 0f) {
+                seekToProgressPending = seekToProgressPending2;
+                seekToProgressSinceMs = 0L;
+            }
             videoPlayerSeekbar.setProgress(0);
             videoTimelineView.setProgress(videoTimelineView.getLeftProgress());
             videoPlayerSeekbar.setBufferedProgress(0);
@@ -11625,6 +11682,7 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
 
         if (currentMessageObject != null && currentMessageObject.forceSeekTo >= 0) {
             seekToProgressPending = currentMessageObject.forceSeekTo;
+            seekToProgressSinceMs = 0L;
             currentMessageObject.forceSeekTo = -1;
         }
 
@@ -11871,10 +11929,16 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
         if (photoViewerWebView != null) {
             AndroidUtilities.cancelRunOnUIThread(hideActionBarRunnable);
             if (shouldSavePositionForCurrentVideoShortTerm != null) {
-                float progress = getCurrentVideoPosition() / (float) getVideoDuration();
-                savedVideoPositions.put(shouldSavePositionForCurrentVideoShortTerm, new SavedVideoPosition(progress, SystemClock.elapsedRealtime()));
-                if (currentMessageObject != null) {
-                    currentMessageObject.cachedSavedTimestamp = progress;
+                final long webDuration = photoViewerWebView.getVideoDuration();
+                final long webPosition = getCurrentVideoPosition();
+                if (webDuration > 0 && webPosition > 0) {
+                    final float progress = webPosition / (float) webDuration;
+                    if (progress > 0f && progress < 1f) {
+                        savedVideoPositions.put(shouldSavePositionForCurrentVideoShortTerm, new SavedVideoPosition(progress, SystemClock.elapsedRealtime()));
+                        if (currentMessageObject != null) {
+                            currentMessageObject.cachedSavedTimestamp = progress;
+                        }
+                    }
                 }
             }
         }
@@ -19045,6 +19109,7 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
         shouldSavePositionForCurrentVideoShortTerm = null;
         lastSaveTime = 0;
         seekToProgressPending = seekToProgressPending2;
+        seekToProgressSinceMs = 0L;
         videoPlayerSeekbar.setProgress(0);
         videoTimelineView.setProgress(0);
         videoPlayerSeekbar.setBufferedProgress(0);
