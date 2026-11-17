@@ -30,6 +30,8 @@ jobs:
       CCACHE_HARDLINK: "true"
       CCACHE_NOHASHDIR: "true"
       CCACHE_MAXSIZE: "10G"
+      CCACHE_COMPRESS: "true"
+      CCACHE_SLOPPINESS: "time_macros"
       NATIVE_TARGET: "universal"
     steps:
       - name: Checkout
@@ -63,16 +65,40 @@ jobs:
       - name: Set up Gradle cache
         uses: actions/cache@v6
         with:
-          path: ~/.gradle
-          key: gradle-${{ hashFiles('**/*.gradle') }}
+          # A fresh checkout otherwise throws away every compiled task output:
+          # ~/.gradle holds dependencies and the Gradle build cache, while the
+          # two .gradle dirs and the build dir hold the incremental state that
+          # lets AGP skip unchanged Java/resource/native work.
+          path: |
+            ~/.gradle
+            .gradle
+            TMessagesProj/.gradle
+            TMessagesProj/build
+          key: build-${{ hashFiles('**/*.gradle', '**/gradle-wrapper.properties', '**/gradle.properties') }}
+          restore-keys: |
+            build-
+            gradle-
       - name: Set up Android SDK Tools
         uses: android-actions/setup-android@v4
         with:
           packages: "build-tools;36.0.0 ndk;27.2.12479018 platforms;android-37.0"
+      - name: Tune build parallelism
+        run: |
+          cores=$(nproc)
+          if [ "$cores" -gt 4 ]; then cores=4; fi
+          echo "Using $cores workers"
+          sed -i '/^org\.gradle\.workers\.max=/d' gradle.properties
+          sed -i '/^android\.native\.buildParallelism=/d' gradle.properties
+          echo "org.gradle.workers.max=$cores" >> gradle.properties
+          echo "android.native.buildParallelism=$cores" >> gradle.properties
       - name: Install Native Build Dependencies
         run: |
-          sudo apt-get update
-          sudo apt-get install --no-install-recommends --yes nasm
+          if ! command -v nasm >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install --no-install-recommends --yes nasm
+          else
+            echo "nasm is already installed"
+          fi
       - name: Configure Android SDK Path
         run: |
           echo "sdk.dir=${ANDROID_HOME}" >> local.properties
