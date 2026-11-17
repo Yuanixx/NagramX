@@ -10943,10 +10943,18 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
                 videoPreviewFrame.open(currentMessageObject, videoPlayer);
             }
             if (seekToProgressPending != 0) {
-                seekVideoOrWebToProgress(seekToProgressPending);
-                seekToProgressPending = 0;
-                if (currentMessageObject != null && !FileLoader.getInstance(currentMessageObject.currentAccount).isLoadingVideoAny(currentMessageObject.getDocument())) {
-                    skipFirstBufferingProgress = true;
+                final long knownDuration = videoPlayer != null
+                        ? videoPlayer.getDuration()
+                        : (photoViewerWebView != null ? photoViewerWebView.getVideoDuration() : C.TIME_UNSET);
+                // Keep the pending seek until a real duration exists. Seeking with
+                // TIME_UNSET used to clamp to byte 0 and restart the video.
+                if (knownDuration != C.TIME_UNSET && knownDuration > 0) {
+                    final float pending = seekToProgressPending;
+                    seekToProgressPending = 0;
+                    seekVideoOrWebToProgress(pending);
+                    if (currentMessageObject != null && !FileLoader.getInstance(currentMessageObject.currentAccount).isLoadingVideoAny(currentMessageObject.getDocument())) {
+                        skipFirstBufferingProgress = true;
+                    }
                 }
             }
         }
@@ -11047,9 +11055,23 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
 
     private void seekVideoOrWebToProgress(float progress) {
         if (videoPlayer != null) {
-            videoPlayer.seekTo((long) (progress * videoPlayer.getDuration()));
+            final long duration = videoPlayer.getDuration();
+            // A streamed fragmented file can still report TIME_UNSET here. Multiplying
+            // a progress by that sentinel overflows into a huge negative value, which
+            // ExoPlayer clamps to 0 - the video jumps back to the first frame. Never
+            // issue a seek until the duration is known and the target is in range.
+            if (duration == C.TIME_UNSET || duration <= 0 || Float.isNaN(progress)) {
+                return;
+            }
+            final float clamped = progress < 0f ? 0f : Math.min(progress, 1f);
+            videoPlayer.seekTo((long) (clamped * duration));
         } else if (photoViewerWebView != null) {
-            photoViewerWebView.seekTo((long) (progress * photoViewerWebView.getVideoDuration()));
+            final long duration = photoViewerWebView.getVideoDuration();
+            if (duration <= 0 || Float.isNaN(progress)) {
+                return;
+            }
+            final float clamped = progress < 0f ? 0f : Math.min(progress, 1f);
+            photoViewerWebView.seekTo((long) (clamped * duration));
         }
     }
 
@@ -11826,10 +11848,19 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
             AndroidUtilities.cancelRunOnUIThread(setLoadingRunnable);
             AndroidUtilities.cancelRunOnUIThread(hideActionBarRunnable);
             if (shouldSavePositionForCurrentVideoShortTerm != null) {
-                final float progress = videoPlayer.getCurrentPosition() / (float) videoPlayer.getDuration();
-                savedVideoPositions.put(shouldSavePositionForCurrentVideoShortTerm, new SavedVideoPosition(progress, SystemClock.elapsedRealtime()));
-                if (currentMessageObject != null) {
-                    currentMessageObject.cachedSavedTimestamp = progress;
+                final long duration = videoPlayer.getDuration();
+                final long position = videoPlayer.getCurrentPosition();
+                // Never persist a progress derived from an unknown duration or a
+                // reset position: a fragmented stream that tripped a rebuild can
+                // briefly report both, and saving 0 makes the next open start over.
+                if (duration != C.TIME_UNSET && duration > 0 && position > 0) {
+                    final float progress = position / (float) duration;
+                    if (progress > 0f && progress < 1f) {
+                        savedVideoPositions.put(shouldSavePositionForCurrentVideoShortTerm, new SavedVideoPosition(progress, SystemClock.elapsedRealtime()));
+                        if (currentMessageObject != null) {
+                            currentMessageObject.cachedSavedTimestamp = progress;
+                        }
+                    }
                 }
             }
             videoPlayer.releasePlayer(true);
