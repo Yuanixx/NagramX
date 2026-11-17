@@ -46,7 +46,7 @@ jobs:
             echo "A staging build is still running or queued; keeping the current visibility."
             exit 0
           fi
-          current=$(gh api "repos/$GITHUB_REPOSITORY" --jq .visibility)
+          current=$(gh api "repos/$GITHUB_REPOSITORY" --jq .visibility || echo unknown)
           if [ "$current" = "public" ]; then
             gh api -X PATCH "repos/$GITHUB_REPOSITORY" -f visibility=private
             echo "Repository restored to private."

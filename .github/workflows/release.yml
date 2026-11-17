@@ -71,7 +71,6 @@ jobs:
       - name: Publish to GitHub Releases
         env:
           GH_TOKEN: ${{ github.token }}
-          COMMIT_MESSAGE: ${{ github.event.head_commit.message }}
         run: |
           TAG=release
           gh release delete "$TAG" --yes --cleanup-tag=false 2>/dev/null || true
@@ -81,8 +80,6 @@ jobs:
             echo
             echo "- Commit: $GITHUB_SHA"
             echo "- Run: $GITHUB_RUN_NUMBER"
-            echo
-            echo "$COMMIT_MESSAGE"
           } > notes.md
           gh release create "$TAG" \
             --target "$GITHUB_SHA" \
@@ -120,7 +117,7 @@ jobs:
           APP_HASH: ${{ secrets.APP_HASH }}
           COMMIT_ID: ${{ github.event.head_commit.id }}
           COMMIT_URL: ${{ github.event.head_commit.url }}
-          COMMIT_MESSAGE: ${{ github.event.head_commit.message }}
+          COMMIT_MESSAGE: '这一版完成了正式构建。'
           BUILD_TIMESTAMP: ${{ needs.build.outputs.build_timestamp }}
         run: |
           python -m pip install -r Tools/scripts/requirements.txt

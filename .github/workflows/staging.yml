@@ -11,7 +11,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 # One staging build at a time: two builds must never fight over the
 # repository visibility or over the staging release tag.
@@ -42,6 +42,16 @@ jobs:
         with:
           distribution: 'temurin'
           java-version: '21'
+      - name: Check preview rules
+        run: |
+          mkdir -p /tmp/preview-rules
+          javac -d /tmp/preview-rules \
+            TMessagesProj/src/test/java/org/telegram/ui/Components/preview/PreviewRulesTest.java \
+            TMessagesProj/src/main/java/org/telegram/ui/Components/preview/PreviewRules.java \
+            TMessagesProj/src/main/java/org/telegram/ui/Components/preview/TailMoovLocator.java \
+            TMessagesProj/src/main/java/org/telegram/ui/Components/preview/DecodeGate.java \
+            TMessagesProj/src/main/java/org/telegram/ui/Components/preview/RemoteFailureTracker.java
+          java -cp /tmp/preview-rules org.telegram.ui.Components.preview.PreviewRulesTest
       - name: Set up Ccache
         uses: hendrikmuhs/ccache-action@v1.2.23
         with:
@@ -115,7 +125,7 @@ jobs:
             echo "No admin token configured; building privately."
             exit 0
           fi
-          current=$(gh api "repos/$GITHUB_REPOSITORY" --jq .visibility)
+          current=$(gh api "repos/$GITHUB_REPOSITORY" --jq .visibility || echo unknown)
           if [ "$current" != "public" ]; then
             gh api -X PATCH "repos/$GITHUB_REPOSITORY" -f visibility=public
             echo "Repository is public for this run."
@@ -171,7 +181,7 @@ jobs:
             echo "No admin token configured; visibility left unchanged."
             exit 0
           fi
-          current=$(gh api "repos/$GITHUB_REPOSITORY" --jq .visibility)
+          current=$(gh api "repos/$GITHUB_REPOSITORY" --jq .visibility || echo unknown)
           if [ "$current" != "public" ]; then
             echo "Repository is already $current."
             exit 0

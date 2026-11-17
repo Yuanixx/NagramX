@@ -29,12 +29,28 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           RUN_ID: ${{ inputs.run_id }}
         run: |
+          # Only a successful Staging build may be published, and the run id
+          # in its build info must match what was requested.
+          info=$(gh run view "$RUN_ID" --repo "$GITHUB_REPOSITORY" \
+            --json workflowName,conclusion,headBranch \
+            --jq '[.workflowName,.conclusion,.headBranch] | @tsv')
+          IFS=$'\t' read -r wf conclusion branch <<< "$info"
+          if [ "$wf" != "Staging build" ] || [ "$conclusion" != "success" ]; then
+            echo "::error::Run $RUN_ID is not a successful Staging build ($wf/$conclusion)."
+            exit 1
+          fi
           rm -rf staging
           gh run download "$RUN_ID" --repo "$GITHUB_REPOSITORY" \
             --name Staging --dir staging
-          ls -l staging
           test -f staging/build-info.json
-          jq . staging/build-info.json
+          actual=$(jq -r '.runId' staging/build-info.json)
+          if [ "$actual" != "$RUN_ID" ]; then
+            echo "::error::Build info belongs to run $actual, not $RUN_ID."
+            exit 1
+          fi
+          # Print only the fields we use; older artifacts may carry text we
+          # must not push into a public log.
+          jq '{version,versionCode,commit,builtAt}' staging/build-info.json
 
       - name: Read build info
         id: info
