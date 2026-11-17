@@ -1541,13 +1541,10 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
             FileLog.d("ABPV: player seekTo reject negative pos=" + position);
             return;
         }
-        final long duration = videoPlayer != null ? videoPlayer.getDuration()
-                : (photoViewerWebView != null && photoViewerWebView.isControllable()
-                    ? photoViewerWebView.getVideoDuration() : C.TIME_UNSET);
-        if (duration > 0 && position > duration) {
-            FileLog.d("ABPV: player seekTo reject over pos=" + position + " dur=" + duration);
-            return;
-        }
+        // Do not reject an upper-bound seek here: a streamed/fragmented file can
+        // briefly report a stale, too-small duration (fallbackDuration), and ExoPlayer
+        // already clamps an over-range target to the real end safely. Rejecting it
+        // used to strand the video at frame 0.
         if (photoViewerWebView != null && photoViewerWebView.isControllable()) {
             photoViewerWebView.seekTo(position);
         } else if (videoPlayer != null) {
@@ -11115,6 +11112,7 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
             final float clamped = progress < 0f ? 0f : Math.min(progress, 1f);
             final long targetMs = (long) (clamped * duration);
             FileLog.d("ABPV: player seek p=" + progress + " dur=" + duration + " target=" + targetMs);
+            logNextReadyPosition = true;
             videoPlayer.seekTo(targetMs);
         } else if (photoViewerWebView != null) {
             final long duration = photoViewerWebView.getVideoDuration();
