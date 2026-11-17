@@ -178,6 +178,10 @@ jobs:
           VERSION_NAME=$(jq -r '.elements[0].versionName' "$META")
           VERSION_CODE=$(jq -r '.elements[0].versionCode' "$META")
           BUILD_TIMESTAMP="${BUILD_TIMESTAMP:-0}"
+          ARM64=$(ls TMessagesProj/build/outputs/apk/staging/*-arm64-v8a.apk | head -n1)
+          UNIVERSAL=$(ls TMessagesProj/build/outputs/apk/staging/*-universal.apk | head -n1)
+          ARM64_SHA=$(sha256sum "$ARM64" | cut -d' ' -f1)
+          UNIVERSAL_SHA=$(sha256sum "$UNIVERSAL" | cut -d' ' -f1)
           jq -n \
             --arg version "$VERSION_NAME" \
             --argjson versionCode "$VERSION_CODE" \
@@ -186,7 +190,9 @@ jobs:
             --arg notes "这一版改好了视频拖动时的画面预览，等待真机验收。" \
             --arg runId "$GITHUB_RUN_ID" \
             --arg runNumber "$GITHUB_RUN_NUMBER" \
-            '{version:$version, versionCode:$versionCode, commit:$commit, builtAt:$builtAt, notes:$notes, runId:$runId, runNumber:$runNumber}' \
+            --arg arm64Sha "$ARM64_SHA" \
+            --arg universalSha "$UNIVERSAL_SHA" \
+            '{version:$version, versionCode:$versionCode, commit:$commit, builtAt:$builtAt, notes:$notes, runId:$runId, runNumber:$runNumber, arm64Sha:$arm64Sha, universalSha:$universalSha}' \
             > TMessagesProj/build/outputs/apk/staging/build-info.json
           cat TMessagesProj/build/outputs/apk/staging/build-info.json
       - name: Upload Artifacts

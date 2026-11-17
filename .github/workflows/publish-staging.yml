@@ -48,6 +48,26 @@ jobs:
             echo "::error::Build info belongs to run $actual, not $RUN_ID."
             exit 1
           fi
+          # A restored build directory must never silently publish a stale
+          # APK: compare the downloaded bytes with the hashes recorded when
+          # the build produced them.
+          arm64_sha=$(jq -r '.arm64Sha // empty' staging/build-info.json)
+          universal_sha=$(jq -r '.universalSha // empty' staging/build-info.json)
+          if [ -z "$arm64_sha" ] || [ -z "$universal_sha" ]; then
+            echo "::error::Build info has no APK checksums; refusing to publish."
+            exit 1
+          fi
+          arm64_file=$(ls staging/*-arm64-v8a.apk | head -n1)
+          universal_file=$(ls staging/*-universal.apk | head -n1)
+          for pair in "$arm64_file:$arm64_sha" "$universal_file:$universal_sha"; do
+            file=${pair%:*}
+            want=${pair##*:}
+            got=$(sha256sum "$file" | cut -d' ' -f1)
+            if [ "$got" != "$want" ]; then
+              echo "::error::APK $file does not match the build ($got != $want)."
+              exit 1
+            fi
+          done
           # Print only the fields we use; older artifacts may carry text we
           # must not push into a public log.
           jq '{version,versionCode,commit,builtAt}' staging/build-info.json
