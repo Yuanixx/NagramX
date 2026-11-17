@@ -103,6 +103,8 @@ public final class ThumbnailScheduler {
         /** Bounded retries for a frame whose bytes have not arrived yet. */
         int missingRetries;
         long firstMissingAtMs;
+        /** Earliest time this task may be decoded again. */
+        long retryAtMs;
 
         Task(int priority, int tier, long timeMs, int keyframeIndex, long order) {
             this.priority = priority;
@@ -407,6 +409,18 @@ public final class ThumbnailScheduler {
                 continue;
             }
             if (task != null) {
+                synchronized (lock) {
+                    final long remaining = task.retryAtMs - SystemClock.uptimeMillis();
+                    if (remaining > 0L && !stopped) {
+                        // Not due yet. Put it back and wait in short slices so
+                        // a newly queued finger frame can wake us immediately.
+                        queue.add(task);
+                        task = null;
+                        waitLocked(Math.min(remaining, 150L));
+                    }
+                }
+            }
+            if (task != null) {
                 decode(task);
             }
         }
@@ -496,7 +510,15 @@ public final class ThumbnailScheduler {
                                 task.missingRetries, now, task.firstMissingAtMs);
                     }
                     if (delay >= 0L) {
-                        retryLater(task, delay);
+                        // Keep it in the queue with a due time. Sleeping the
+                        // single worker here would stall a newer finger frame.
+                        synchronized (lock) {
+                            if (!stopped && (task.priority != PRIORITY_HOVER
+                                    || task.timeMs == desiredKeyframeTime)) {
+                                task.retryAtMs = now + delay;
+                                queue.add(task);
+                            }
+                        }
                         return;
                     }
                     PreviewLog.d("SeekPreview: frame retries exhausted at " + task.timeMs + "ms");
@@ -618,33 +640,6 @@ public final class ThumbnailScheduler {
     private boolean isStopped() {
         synchronized (lock) {
             return stopped;
-        }
-    }
-
-    /**
-     * Waits off-lock, then puts a still-wanted task back. A finger that moved
-     * meanwhile has already scheduled its own keyframe, so a stale retry is
-     * dropped rather than painted under the new timestamp.
-     */
-    private void retryLater(Task task, long delayMs) {
-        try {
-            Thread.sleep(delayMs);
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            synchronized (lock) {
-                stopped = true;
-                lock.notifyAll();
-            }
-            return;
-        }
-        synchronized (lock) {
-            if (stopped) {
-                return;
-            }
-            if (task.priority == PRIORITY_HOVER && task.timeMs != desiredKeyframeTime) {
-                return;
-            }
-            queue.add(task);
         }
     }
 
