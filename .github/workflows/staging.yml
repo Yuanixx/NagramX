@@ -131,31 +131,11 @@ jobs:
           export BUILD_TIMESTAMP=$(date +%s)
           echo "build_timestamp=$BUILD_TIMESTAMP" >> "$GITHUB_OUTPUT"
           ./gradlew TMessagesProj:assembleStaging
-      - name: Publish to GitHub Releases
-        env:
-          GH_TOKEN: ${{ github.token }}
-          COMMIT_MESSAGE: ${{ github.event.head_commit.message }}
-        run: |
-          TAG=staging
-          gh release delete "$TAG" --yes --cleanup-tag=false 2>/dev/null || true
-          gh api -X DELETE "repos/$GITHUB_REPOSITORY/git/refs/tags/$TAG" 2>/dev/null || true
-          {
-            echo "自动构建，对应最近的代码改动。尚未公开，等待真机验收。"
-            echo
-            echo "- Commit: $GITHUB_SHA"
-            echo "- Run: $GITHUB_RUN_NUMBER"
-            echo
-            echo "$COMMIT_MESSAGE"
-          } > notes.md
-          gh release create "$TAG" \
-            --target "$GITHUB_SHA" \
-            --title "Staging build" \
-            --notes-file notes.md \
-            TMessagesProj/build/outputs/apk/staging/*-arm64-v8a.apk \
-            TMessagesProj/build/outputs/apk/staging/*-universal.apk
+      # No Release is created here on purpose. The build only uploads an
+      # artifact; nothing reaches a public URL until the phone check passes
+      # and the manual publish workflow runs on that same artifact.
       - name: Write build info
         env:
-          COMMIT_MESSAGE: ${{ github.event.head_commit.message || '手动构建' }}
           BUILD_TIMESTAMP: ${{ steps.staging_build_step.outputs.build_timestamp }}
         run: |
           META=TMessagesProj/build/outputs/apk/staging/output-metadata.json
@@ -167,7 +147,7 @@ jobs:
             --argjson versionCode "$VERSION_CODE" \
             --arg commit "$GITHUB_SHA" \
             --argjson builtAt "$BUILD_TIMESTAMP" \
-            --arg notes "$COMMIT_MESSAGE" \
+            --arg notes "这一版改好了视频拖动时的画面预览，等待真机验收。" \
             --arg runId "$GITHUB_RUN_ID" \
             --arg runNumber "$GITHUB_RUN_NUMBER" \
             '{version:$version, versionCode:$versionCode, commit:$commit, builtAt:$builtAt, notes:$notes, runId:$runId, runNumber:$runNumber}' \
@@ -192,9 +172,26 @@ jobs:
             exit 0
           fi
           current=$(gh api "repos/$GITHUB_REPOSITORY" --jq .visibility)
-          if [ "$current" = "public" ]; then
-            gh api -X PATCH "repos/$GITHUB_REPOSITORY" -f visibility=private
-            echo "Repository is private again."
-          else
+          if [ "$current" != "public" ]; then
             echo "Repository is already $current."
+            exit 0
+          fi
+          # A single PATCH can be lost to an expired token, API error or rate
+          # limit and would leave the source public. Retry and verify the
+          # result, then fail the job loudly so the watchdog sees it too.
+          ok=0
+          for attempt in 1 2 3; do
+            gh api -X PATCH "repos/$GITHUB_REPOSITORY" -f visibility=private || true
+            sleep 2
+            current=$(gh api "repos/$GITHUB_REPOSITORY" --jq .visibility || echo unknown)
+            if [ "$current" = "private" ]; then
+              echo "Repository is private again (attempt $attempt)."
+              ok=1
+              break
+            fi
+            echo "Visibility still $current after attempt $attempt."
+          done
+          if [ "$ok" -ne 1 ]; then
+            echo "::error::Repository is still public. Restore it manually."
+            exit 1
           fi
