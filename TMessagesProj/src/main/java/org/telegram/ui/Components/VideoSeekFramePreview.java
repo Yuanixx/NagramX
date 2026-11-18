@@ -77,9 +77,6 @@ public class VideoSeekFramePreview extends View {
     private int displayedOrdinal;
     private boolean displayedApprox;
     private boolean awaitingExact;
-    /** True when the current empty frame is because cached frames were too far from the finger,
-     *  not because there are no frames at all. Suppresses the "unavailable" hint in that case. */
-    private boolean lastDropOutOfWindow;
     /** Incremented for every new press, so a late frame cannot cross gestures. */
     private int gestureSeq;
     private int requestGestureSeq;
@@ -388,24 +385,9 @@ public class VideoSeekFramePreview extends View {
             // will pick the right picture.
             return;
         }
-        final Thumbnail thumbnail = current.nearest(requestedPosition,
-                current.maxFrameDistanceMs());
-        if (thumbnail == null) {
-            // Far outside the allowed window: drop the old picture and keep
-            // only the time instead of showing an unrelated frame.
-            if (frame != null) {
-                setFrame(null, requestedPosition, false);
-            }
-            return;
-        }
-        final boolean closer = displayedThumbTimeMs < 0
-                || Math.abs(thumbnail.timeMs - requestedPosition)
-                < Math.abs(displayedThumbTimeMs - requestedPosition);
-        if (thumbnail.bitmap != frame && closer) {
-            showThumbnail(current, thumbnail, requestedPosition);
-        } else {
-            updateApproxState(current, thumbnail, requestedPosition);
-        }
+        // Share the exact same three-tier decision as the finger path so the worker callback
+        // cannot produce a different (or clearing) UI state for the same condition.
+        decideFrame(current, requestedPosition, false);
     }
 
     public void setPreviewSize(int width, int height) {
@@ -461,35 +443,57 @@ public class VideoSeekFramePreview extends View {
             FileLog.d("ABPV: requestFrame no session pos=" + positionMs);
             return;
         }
-        final Thumbnail thumbnail = current.nearest(positionMs, current.maxFrameDistanceMs());
-        if (thumbnail != null) {
+        decideFrame(current, positionMs, logRequest);
+    }
+
+    /**
+     * Single decision point for both the synchronous finger path and the async worker callback.
+     * Three honest tiers, all reusing the existing displayLimitMs/exactEnoughMs rules (no second
+     * threshold source):
+     *   1) a frame inside the window  -> show/update it normally (approx badge if not exact);
+     *   2) a frame exists but is too far -> keep it on screen, dimmed with the approx badge;
+     *   3) the store is genuinely empty -> neutral time-only placeholder, never a clear far frame.
+     * Crucially, "too far" never clears the picture: that produced a self-destructive oscillation
+     * (show one tick, clear the next) and silent dark boxes.
+     */
+    private void decideFrame(PreviewSession current, long positionMs, boolean log) {
+        final Thumbnail exact = current.nearest(positionMs, current.maxFrameDistanceMs());
+        if (exact != null) {
             final boolean closer = displayedThumbTimeMs < 0
-                    || Math.abs(thumbnail.timeMs - positionMs)
+                    || Math.abs(exact.timeMs - positionMs)
                     < Math.abs(displayedThumbTimeMs - positionMs);
-            if (thumbnail.bitmap != frame && closer) {
-                showThumbnail(current, thumbnail, positionMs);
+            if (exact.bitmap != frame && closer) {
+                showThumbnail(current, exact, positionMs);
             } else {
-                updateApproxState(current, thumbnail, positionMs);
+                updateApproxState(current, exact, positionMs);
             }
-        } else if (frame != null) {
-            // Usually the store is not empty at all: the closest frame is just
-            // outside the display window. Say so, or every capture looks like
-            // a lost picture instead of a deliberate "too far" decision.
-            final Thumbnail closest = current.nearest(positionMs);
-            final long closestTime = closest != null ? closest.timeMs : -1L;
-            FileLog.d("ABPV: no frame within display window, dropping pos=" + positionMs
-                    + " storeSize=" + current.thumbnailCount()
-                    + " limit=" + current.maxFrameDistanceMs()
-                    + " closestT=" + closestTime
-                    + " distance=" + (closestTime >= 0 ? Math.abs(closestTime - positionMs) : -1L));
-            // Frames exist but are too far away: this is a deliberate "too far" decision,
-            // not a broken preview. Do not show the "unavailable" hint for it.
-            lastDropOutOfWindow = true;
-            setFrame(null, positionMs, false);
-        } else if (logRequest) {
-            FileLog.d("ABPV: nearest=null storeSize=" + current.thumbnailCount()
-                    + " pos=" + positionMs);
-            lastDropOutOfWindow = false;
+            return;
+        }
+        // No frame in the display window. Keep the nearest one dimmed (tier 2) if the store
+        // has any; otherwise show the neutral placeholder (tier 3). Never clear to a silent box.
+        final Thumbnail closest = current.nearest(positionMs);
+        if (closest != null && closest.bitmap != null && !closest.bitmap.isRecycled()) {
+            if (closest.bitmap != frame) {
+                showThumbnail(current, closest, positionMs);
+            } else {
+                updateApproxState(current, closest, positionMs);
+            }
+            // mark it approximate so onDraw dims it and paints the badge
+            displayedApprox = true;
+            awaitingExact = false;
+            invalidate();
+            if (log) {
+                FileLog.d("ABPV: too far, showing nearest dimmed pos=" + positionMs
+                        + " closestT=" + closest.timeMs + " posGap=" + (closest.timeMs - positionMs));
+            }
+        } else {
+            if (frame != null) {
+                setFrame(null, positionMs, false);
+            }
+            if (log) {
+                FileLog.d("ABPV: nearest=null storeSize=" + current.thumbnailCount()
+                        + " pos=" + positionMs);
+            }
         }
     }
 
@@ -500,7 +504,6 @@ public class VideoSeekFramePreview extends View {
      */
     private void showThumbnail(PreviewSession current, Thumbnail thumbnail, long positionMs) {
         final boolean hadFrame = frame != null && !frame.isRecycled();
-        lastDropOutOfWindow = false;
         displayedThumbTimeMs = thumbnail.timeMs;
         displayedOrdinal = current.thumbnailOrdinal(thumbnail.timeMs);
         displayedApprox = isApproximate(current, thumbnail, positionMs);
@@ -659,6 +662,10 @@ public class VideoSeekFramePreview extends View {
     public void setDragging(boolean value) {
         if (value && !dragging) {
             gestureSeq++;
+            // Anchor the stability clock for the new gesture and clear any stale buffering mark,
+            // otherwise previewStartedAtMs stays 0 and lastBufferingAtMs pins stableMs to 0.
+            previewStartedAtMs = SystemClock.elapsedRealtime();
+            lastBufferingAtMs = 0L;
         }
         dragging = value;
         if (value) {
@@ -867,12 +874,9 @@ public class VideoSeekFramePreview extends View {
             final int start = (int) ((SystemClock.uptimeMillis() / 4L) % 360L);
             canvas.drawArc(spinnerRect, start, 280, false, spinnerPaint);
             postInvalidateOnAnimation();
-        } else if ((picture == null || picture.isRecycled()) && !lastDropOutOfWindow) {
-            // No frame at all (e.g. a streaming tail-moov file still downloading): the bubble
-            // used to be an unexplained empty dark box, which reads as a freeze. Tell the user
-            // the preview is simply not ready instead of showing a silent blank. When frames
-            // exist but are too far away (lastDropOutOfWindow), stay silent - the approx badge
-            // and the deliberate "too far" decision already cover that case.
+        } else if (picture == null || picture.isRecycled()) {
+            // No frame to paint (e.g. a streaming tail-moov file still downloading): show an
+            // honest neutral placeholder instead of a silent dark box that reads as a freeze.
             final String hint = LocaleController.getString(R.string.NaxPreviewUnavailable);
             final float cx = (width - badgeTextPaint.measureText(hint)) / 2f;
             final float cy = videoHeight / 2f - (badgeTextPaint.ascent() + badgeTextPaint.descent()) / 2f;

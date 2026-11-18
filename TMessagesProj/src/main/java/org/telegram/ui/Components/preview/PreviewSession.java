@@ -138,6 +138,10 @@ public final class PreviewSession {
     private volatile long bufferedAheadMs;
     private volatile long playbackStableMs;
     private volatile boolean stopped;
+    /** Diagnostics: stable per-session id and creation time, so a rebuild race can be traced. */
+    private static final AtomicInteger SESSION_SEQ = new AtomicInteger();
+    private final int sessionNo = SESSION_SEQ.incrementAndGet();
+    private final long createdAtMs = SystemClock.elapsedRealtime();
     private volatile long planDurationMs;
     private volatile ThumbnailScheduler scheduler;
     /** Set once in prepare() on the scheduler thread; null means local only. */
@@ -399,6 +403,18 @@ public final class PreviewSession {
         if (stopped) {
             return;
         }
+        // Diagnostics: who sets stopped, and how old is this session. Stack [0] is the
+        // capture site (stop), [1] closeSession, [2..] the real trigger. Do not insert a
+        // helper between here and the capture, or the frame offsets shift.
+        final StringBuilder trace = new StringBuilder();
+        final StackTraceElement[] st = new Throwable().getStackTrace();
+        for (int i = 2; i < st.length && i < 6; i++) {
+            trace.append("\n    ").append(st[i].getClassName()).append('.')
+                    .append(st[i].getMethodName()).append(':').append(st[i].getLineNumber());
+        }
+        PreviewLog.d("SeekPreview: STOP session=" + sessionNo
+                + " ageMs=" + (SystemClock.elapsedRealtime() - createdAtMs)
+                + " trigger=" + trace);
         stopped = true;
         mainHandler.removeCallbacks(notifyRunnable);
         stopRemotePrefetch();
@@ -407,7 +423,7 @@ public final class PreviewSession {
         if (target != null) {
             target.stop();
         }
-        PreviewLog.d("SeekPreview: remote summary fetches=" + remoteFetchCount.get()
+        PreviewLog.d("SeekPreview: remote summary session=" + sessionNo + " fetches=" + remoteFetchCount.get()
                 + " prefetched=" + remotePrefetchCount.get()
                 + " cacheHits=" + remoteCacheHits.get()
                 + " bytes=" + remoteBytesFetched.get()
@@ -448,6 +464,8 @@ public final class PreviewSession {
             worker.setBuffering(buffering);
             scheduler = worker;
             if (stopped) {
+                PreviewLog.d("SeekPreview: DISCARD-WORKER session=" + sessionNo
+                        + " ageMs=" + (SystemClock.elapsedRealtime() - createdAtMs));
                 worker.stop();
                 return;
             }
@@ -591,6 +609,7 @@ public final class PreviewSession {
     }
 
     private Prepared prepare() {
+        final long prepareStartMs = SystemClock.elapsedRealtime();
         final long documentDuration = documentDurationMs();
         if (file != null) {
             final boolean complete = RetrieverFrameDecoder.isFileComplete(
@@ -612,6 +631,9 @@ public final class PreviewSession {
                     source = TailMoovFetcher.fetch(document, account, declaredSize);
                 }
             }
+            PreviewLog.d("SeekPreview: prepare session=" + sessionNo
+                    + " stage=moov elapsedMs=" + (SystemClock.elapsedRealtime() - prepareStartMs)
+                    + " from=" + (source != null ? "local/tail" : "none"));
             final int keyframeCount = source != null && source.track != null
                     ? source.track.keyframes.size() : 0;
             final boolean indexKnown = source != null && source.track != null;
@@ -650,8 +672,18 @@ public final class PreviewSession {
                 try {
                     final MediaCodecFrameDecoder decoder =
                             new MediaCodecFrameDecoder(file, source.track, availability, supplier);
+                    final long decoderOpenMs = SystemClock.elapsedRealtime();
                     decoder.open();
+                    PreviewLog.d("SeekPreview: prepare session=" + sessionNo
+                            + " stage=decoder-open openMs=" + (SystemClock.elapsedRealtime() - decoderOpenMs)
+                            + " elapsedMs=" + (SystemClock.elapsedRealtime() - prepareStartMs));
                     if (stopped) {
+                        // Near-zero index + full duration is only half the story: this is where a
+                        // completed index gets thrown away because stop() won the race. Log it.
+                        PreviewLog.d("SeekPreview: DISCARD-INDEX session=" + sessionNo
+                                + " droppedKeyframes=" + keyframeCount
+                                + " prepareMs=" + (SystemClock.elapsedRealtime() - prepareStartMs)
+                                + " ageMs=" + (SystemClock.elapsedRealtime() - createdAtMs));
                         decoder.close();
                         return null;
                     }
