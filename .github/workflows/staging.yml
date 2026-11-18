@@ -32,7 +32,7 @@ jobs:
       CCACHE_MAXSIZE: "10G"
       CCACHE_COMPRESS: "true"
       CCACHE_SLOPPINESS: "time_macros"
-      NATIVE_TARGET: "universal"
+      NATIVE_TARGET: "arm64-v8a"
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -102,15 +102,6 @@ jobs:
         uses: android-actions/setup-android@v4
         with:
           packages: "build-tools;36.0.0 ndk;27.2.12479018 platforms;android-37.0"
-      - name: Tune build parallelism
-        run: |
-          cores=$(nproc)
-          if [ "$cores" -gt 4 ]; then cores=4; fi
-          echo "Using $cores workers"
-          sed -i '/^org\.gradle\.workers\.max=/d' gradle.properties
-          sed -i '/^android\.native\.buildParallelism=/d' gradle.properties
-          echo "org.gradle.workers.max=$cores" >> gradle.properties
-          echo "android.native.buildParallelism=$cores" >> gradle.properties
       - name: Install Native Build Dependencies
         run: |
           if ! command -v nasm >/dev/null 2>&1; then
@@ -152,16 +143,6 @@ jobs:
             echo "ALIAS_NAME=androiddebugkey"
             echo "ALIAS_PASS=android"
           } >> local.properties
-      - name: Modify Gradle JVM Args
-        run: |
-          MEMORY_KB=$(awk '/MemTotal/ {print $2}' /proc/meminfo)
-          MEMORY_GB=$((MEMORY_KB / 1024 / 1024))
-          echo "Detected memory size: ${MEMORY_GB}GB"
-          if [ $MEMORY_GB -ge 12 ]; then
-            sed -i '/^org\.gradle\.jvmargs=/d' gradle.properties
-            echo "org.gradle.jvmargs=-Xmx8G -XX:MaxMetaspaceSize=2G -XX:+UseParallelGC -XX:+HeapDumpOnOutOfMemoryError -Dfile.encoding=UTF-8" >> gradle.properties
-          fi
-          cat gradle.properties
       - name: Make repository public for the build
         continue-on-error: true
         env:
@@ -199,9 +180,7 @@ jobs:
           VERSION_CODE=$(jq -r '.elements[0].versionCode' "$META")
           BUILD_TIMESTAMP="${BUILD_TIMESTAMP:-0}"
           ARM64=$(ls TMessagesProj/build/outputs/apk/staging/*-arm64-v8a.apk | head -n1)
-          UNIVERSAL=$(ls TMessagesProj/build/outputs/apk/staging/*-universal.apk | head -n1)
           ARM64_SHA=$(sha256sum "$ARM64" | cut -d' ' -f1)
-          UNIVERSAL_SHA=$(sha256sum "$UNIVERSAL" | cut -d' ' -f1)
           jq -n \
             --arg version "$VERSION_NAME" \
             --argjson versionCode "$VERSION_CODE" \
@@ -211,8 +190,7 @@ jobs:
             --arg runId "$GITHUB_RUN_ID" \
             --arg runNumber "$GITHUB_RUN_NUMBER" \
             --arg arm64Sha "$ARM64_SHA" \
-            --arg universalSha "$UNIVERSAL_SHA" \
-            '{version:$version, versionCode:$versionCode, commit:$commit, builtAt:$builtAt, notes:$notes, runId:$runId, runNumber:$runNumber, arm64Sha:$arm64Sha, universalSha:$universalSha}' \
+            '{version:$version, versionCode:$versionCode, commit:$commit, builtAt:$builtAt, notes:$notes, runId:$runId, runNumber:$runNumber, arm64Sha:$arm64Sha}' \
             > TMessagesProj/build/outputs/apk/staging/build-info.json
           cat TMessagesProj/build/outputs/apk/staging/build-info.json
       - name: Upload Artifacts
@@ -221,7 +199,6 @@ jobs:
           name: Staging
           path: |
             TMessagesProj/build/outputs/apk/staging/*-arm64-v8a.apk
-            TMessagesProj/build/outputs/apk/staging/*-universal.apk
             TMessagesProj/build/outputs/apk/staging/build-info.json
       - name: Make repository private again
         if: always()
