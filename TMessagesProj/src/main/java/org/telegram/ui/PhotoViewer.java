@@ -1139,6 +1139,22 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
     private static final java.util.concurrent.atomic.AtomicLong DIAG_SEEK_SEQ = new java.util.concurrent.atomic.AtomicLong();
     private static volatile float diagLastNonZeroProgress = -1f;
     private static volatile long diagLastNonZeroAtMs = 0L;
+
+    // ---- JUMP-DETECTED ring buffer (observe-only) ----
+    // A bounded in-memory ring of the last ~30s of position/seek/state events. When a
+    // non-gesture jump-back is observed (position falls from >60s to <10s), the whole ring
+    // plus a trigger stack is dumped with a JUMP-DETECTED marker, so the user only has to
+    // search the log — no need to recall a timestamp. Stack traces are taken ONLY on trigger.
+    private static final int DIAG_RING_CAP = 256;
+    private static final java.util.ArrayDeque<String> DIAG_RING = new java.util.ArrayDeque<>();
+    private static final Object DIAG_RING_LOCK = new Object();
+    private static long diagLastObservedPosMs = -1L;
+    private static long diagLastObservedPosAtMs = 0L;
+    private static long diagLastJumpDumpAtMs = 0L;
+    private static volatile long diagLastFunnelTargetMs = -1L; // last funnel seek target; distinguishes intended seek-to-start
+    private static volatile boolean diagGestureActive = false; // logged only; NOT a veto (jump-back follows the gesture)
+    private static volatile long diagGestureActiveUntilMs = 0L;
+    // ---- END JUMP-DETECTED ring buffer ----
     // ---- END DIAGNOSTIC INSTRUMENTATION ----
     private String shouldSavePositionForCurrentVideo;
     private String shouldSavePositionForCurrentVideoShortTerm;
@@ -1550,6 +1566,7 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
     }
 
     private void seekVideoOrWebTo(long position) {
+        diagRingPush("SEEKTO-MS", "posMs=" + position + " streaming=" + isStreaming + " doc=" + diagDocIdHash());
         // A negative position used to be clamped to 0 by ExoPlayer, restarting a
         // streamed fragmented video from the first frame. Never issue one.
         if (position < 0) {
@@ -1673,18 +1690,21 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
                         // next open start from the first frame.
                         final long saveDuration = videoPlayer != null ? videoPlayer.getDuration() : 0L;
                         final long savePosition = videoPlayer != null ? videoPlayer.getCurrentPosition() : 0L;
+                        // Position observation for JUMP-DETECTED: this periodic sampler is where a
+                        // real position fall (rebuild / byte-0 fallback) becomes visible. A rejected
+                        // near-zero save is normal guard behavior and is NOT pushed to the ring.
+                        diagObservePosition(savePosition, saveDuration, diagDocIdHash());
                         // A near-zero read during a fragmented-stream rebuild is not a real
                         // watch position; persisting it makes the next open start at frame 0.
                         final boolean diagValid = SeekRules.isValidSavePosition(savePosition, saveDuration);
                         final float value = diagValid
                                 ? savePosition / (float) saveDuration : -1f;
-                        diagSeek("save-eval", "savePositionMs=" + savePosition + " saveDurationMs=" + saveDuration
-                                + " value=" + value + " isValid=" + diagValid
-                                + " isStreaming=" + isStreaming + " docId=" + diagDocIdHash());
-                        diagNearZeroStack(saveDuration > 0 ? savePosition / (float) saveDuration : -1f, "save-eval");
                         if (value > 0 && value < 1f && SystemClock.elapsedRealtime() - lastSaveTime >= 1000) {
                             final String saveFor = shouldSavePositionForCurrentVideo;
                             final float valueToStore = value;
+                            // Ring records only real writes, not every rejected evaluation.
+                            diagRingPush("SAVE-WRITE", "posMs=" + savePosition + " durMs=" + saveDuration
+                                    + " value=" + value + " streaming=" + isStreaming + " doc=" + diagDocIdHash());
                             lastSaveTime = SystemClock.elapsedRealtime();
                             if (currentMessageObject != null) {
                                 currentMessageObject.cachedSavedTimestamp = valueToStore;
@@ -10242,6 +10262,9 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
                         seekToProgressSinceMs = 0L;
                     } else {
                         final long dragTargetMs = (long) (progress * duration);
+                        diagGesture(); // user-driven position change: suppress JUMP-DETECTED for this window
+                        diagRingPush("DRAG", "rawProgress=" + progress + " dragTargetMs=" + dragTargetMs
+                                + " durMs=" + duration + " streaming=" + isStreaming + " doc=" + diagDocIdHash());
                         diagSeek("drag-to-ms", "rawProgress=" + progress + " durationMs=" + duration
                                 + " dragTargetMs=" + dragTargetMs + " isStreaming=" + isStreaming
                                 + " docId=" + diagDocIdHash());
@@ -10926,6 +10949,8 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
         if (videoPlayer == null && (photoViewerWebView == null || !photoViewerWebView.isControllable())) {
             return;
         }
+        diagRingPush("PLAYER-STATE", "state=" + playbackState + " playWhenReady=" + playWhenReady
+                + " posMs=" + videoPlayer.getCurrentPosition() + " streaming=" + isStreaming + " doc=" + diagDocIdHash());
         if (ads != null) {
             ads.setWaitingPaused(!playWhenReady || playbackState != ExoPlayer.STATE_READY);
         }
@@ -10969,6 +10994,8 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
             }
 
             if (currentMessageObject != null && currentMessageObject.forceSeekTo >= 0) {
+                diagRingPush("FORCESEEK-DIRECT", "pos=" + currentMessageObject.forceSeekTo
+                        + " streaming=" + isStreaming + " doc=" + diagDocIdHash());
                 diagSeek("forceSeekTo-direct", "forceSeekTo=" + currentMessageObject.forceSeekTo
                         + " isStreaming=" + isStreaming + " docId=" + diagDocIdHash());
                 diagNearZeroStack(currentMessageObject.forceSeekTo, "forceSeekTo-direct");
@@ -11021,6 +11048,7 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
                 // TIME_UNSET used to clamp to byte 0 and restart the video.
                 if (knownDuration != C.TIME_UNSET && knownDuration > 0) {
                     final float pending = seekToProgressPending;
+                    diagRingPush("PENDING-FUNNEL", "raw=" + pending + " durMs=" + knownDuration + " doc=" + diagDocIdHash());
                     diagSeek("pending-to-funnel", "rawPending=" + pending + " knownDurationMs=" + knownDuration
                             + " isStreaming=" + isStreaming + " docId=" + diagDocIdHash());
                     diagNearZeroStack(pending, "pending-to-funnel");
@@ -11052,6 +11080,8 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
                         + " dur=" + videoPlayer.getDuration());
                 android.util.Log.w("FMPIDX", "player ready pos=" + videoPlayer.getCurrentPosition()
                         + " dur=" + videoPlayer.getDuration());
+                diagRingPush("PLAYER-READY", "readyPosMs=" + videoPlayer.getCurrentPosition()
+                        + " durMs=" + videoPlayer.getDuration() + " streaming=" + isStreaming + " doc=" + diagDocIdHash());
                 diagSeek("player-ready", "readyPosMs=" + videoPlayer.getCurrentPosition()
                         + " dur=" + videoPlayer.getDuration() + " isStreaming=" + isStreaming);
             }
@@ -11190,6 +11220,9 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
                 restoreAfterDirtyReject(p, duration);
                 return;
             }
+            diagLastFunnelTargetMs = targetMs;
+            diagRingPush("FUNNEL-SEEK", "targetMs=" + targetMs + " progressRaw=" + progress
+                    + " durMs=" + duration + " intentZero=" + intentionalZero + " doc=" + diagDocIdHash());
             FileLog.d("ABPV: player seek p=" + progress + " dur=" + duration + " target=" + targetMs);
             android.util.Log.w("FMPIDX", "seek target=" + targetMs + " dur=" + duration + " p=" + progress);
             logNextReadyPosition = true;
@@ -11233,6 +11266,7 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
                 && curDocId != -1L
                 && now - lastGoodDragAtMs < 30_000L) {
             final long restoreMs = lastGoodDragTargetMs;
+            diagRingPush("RESTORE-AFTER-REJECT", "restoreMs=" + restoreMs + " durMs=" + duration + " doc=" + diagDocIdHash());
             diagSeek("restore-after-reject", "restoreMs=" + restoreMs + " durationMs=" + duration);
             lastGoodDragTargetMs = -1L;
             logNextReadyPosition = true;
@@ -11543,6 +11577,8 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
                     }
                     FileLog.e(e);
                     android.util.Log.w("STREAMDBG", "onError " + (e != null ? e.getClass().getSimpleName() + ": " + e.getMessage() : "null"));
+                    diagRingPush("ONERROR", "type=" + (e != null ? e.getClass().getSimpleName() : "null")
+                            + " streaming=" + isStreaming + " doc=" + diagDocIdHash());
                     diagSeek("onerror", "type=" + (e != null ? e.getClass().getSimpleName() : "null")
                             + " isStreaming=" + isStreaming
                             + " docId=" + diagDocIdHash());
@@ -11805,6 +11841,8 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
         loopItem.setSelectorColor(playerLooping ? 0x0F73B4EC : 0x0fffffff);
 
         if (currentMessageObject != null && currentMessageObject.forceSeekTo >= 0) {
+            diagRingPush("FORCESEEK-PENDING", "pos=" + currentMessageObject.forceSeekTo
+                    + " streaming=" + isStreaming + " doc=" + diagDocIdHash());
             diagSeek("forceSeekTo-pending", "forceSeekTo=" + currentMessageObject.forceSeekTo
                     + " isStreaming=" + isStreaming + " docId=" + diagDocIdHash());
             diagNearZeroStack(currentMessageObject.forceSeekTo, "forceSeekTo-pending");
@@ -24707,6 +24745,69 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
         FileLog.d("ABPV: DIAG ev=" + ev + " seek=" + seek + " t=" + t + " th=" + th + " " + stage + " " + detail);
     }
 
+    /** Push one event into the bounded ring (no stack trace taken here). Drops entries older than 30s. */
+    private static void diagRingPush(String stage, String detail) {
+        final long t = SystemClock.elapsedRealtime();
+        final String line = "t=" + t + " th=" + Thread.currentThread().getName()
+                + " " + stage + (detail != null ? " " + detail : "");
+        synchronized (DIAG_RING_LOCK) {
+            DIAG_RING.addLast(line);
+            while (DIAG_RING.size() > DIAG_RING_CAP) {
+                DIAG_RING.removeFirst();
+            }
+        }
+    }
+
+    /** Mark a short window during which a position fall is attributed to a real user gesture. */
+    private static void diagGesture() {
+        diagGestureActive = true;
+        diagGestureActiveUntilMs = SystemClock.elapsedRealtime() + 1500L;
+    }
+
+    /**
+     * Observe the player's real position (call from the periodic position sampler). If it falls
+     * from a real watch position (>60s) to near-zero (<10s) and no user gesture is active, dump
+     * the ring + a stack under a JUMP-DETECTED marker. Rate-limited so one event dumps once.
+     */
+    private static void diagObservePosition(long posMs, long durationMs, String doc) {
+        if (posMs < 0L || durationMs <= 0L) {
+            return;
+        }
+        final long now = SystemClock.elapsedRealtime();
+        final long prev = diagLastObservedPosMs;
+        boolean gesture = diagGestureActive && now < diagGestureActiveUntilMs;
+        boolean bigFall = prev > 60_000L && posMs < 10_000L && (prev - posMs) > 30_000L;
+        // The real jump-back follows a user gesture by ~150ms, so a gesture window must NOT
+        // veto it. Instead: if the most recent funnel seek target was a normal position (>10s),
+        // a fall to near-zero is an unintended fallback, not a deliberate seek-to-start.
+        boolean lastSeekWasNormal = diagLastFunnelTargetMs > 10_000L;
+        if (bigFall && lastSeekWasNormal && (now - diagLastJumpDumpAtMs) > 4000L) {
+            diagLastJumpDumpAtMs = now;
+            StringBuilder sb = new StringBuilder();
+            sb.append("ABPV: JUMP-DETECTED prevPosMs=").append(prev)
+                    .append(" nowPosMs=").append(posMs)
+                    .append(" durationMs=").append(durationMs)
+                    .append(" doc=").append(doc)
+                    .append(" lastFunnelTargetMs=").append(diagLastFunnelTargetMs)
+                    .append(" gesture=").append(gesture)
+                    .append(" t=").append(now);
+            StackTraceElement[] st = Thread.currentThread().getStackTrace();
+            for (int i = 2; i < st.length && i < 30; i++) {
+                sb.append("\n        at ").append(st[i].toString());
+            }
+            FileLog.d(sb.toString());
+            FileLog.d("ABPV: JUMP-RING-BEGIN count=" + DIAG_RING.size());
+            synchronized (DIAG_RING_LOCK) {
+                for (String line : DIAG_RING) {
+                    FileLog.d("ABPV: JUMP-RING " + line);
+                }
+            }
+            FileLog.d("ABPV: JUMP-RING-END");
+        }
+        diagLastObservedPosMs = posMs;
+        diagLastObservedPosAtMs = now;
+    }
+
     /**
      * Emit a full Java stack trace when a near-zero progress appears AND it is a notable jump
      * from the last non-zero value (not just a fixed 2063 comparison). Threshold: p < 0.01 and
@@ -24755,6 +24856,8 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
         final boolean diagValid = isValidRestoreProgress(pos, durationSec);
         // Observe-only: log the raw stored value and the guard verdict BEFORE any branch,
         // so a near-zero dirty value that gets rejected is still visible in the log.
+        diagRingPush("RESTORE-PERSISTED", "rawPos=" + pos + " durMs=" + (durationSec * 1000L)
+                + " hasRecord=" + hasRecord + " valid=" + diagValid);
         diagSeek("restore-persisted-RAW", "rawPos=" + pos
                 + " durationMs=" + (durationSec * 1000L)
                 + " hasRecord=" + hasRecord + " valid=" + diagValid);
