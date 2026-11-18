@@ -37,6 +37,7 @@ public final class SeekRulesTest {
         testDeepLinkAllowed();
         testValidSavePosition();
         testAbsoluteVsRelative();
+        test2063Leak();
         System.out.println("SEEK RULES: " + passed + " checks passed");
     }
 
@@ -122,6 +123,24 @@ public final class SeekRulesTest {
         boolean ourPredicateRejects = SeekRules.isNearZeroDirty(p, 3000L, dur, false);
         check(naivePFloorRejects && !ourPredicateRejects,
                 "absolute target predicate avoids naive p-floor false kill");
+    }
+
+    /**
+     * Locks in the KNOWN leak observed on device 2026-11-18: on the 44-min video
+     * (dur=2662480ms, floor=2000ms) a dirty near-zero progress producing
+     * target=2063ms passes isNearZeroDirty (2063 > 2000). This is a diagnostic
+     * baseline, NOT an endorse: when the root cause is fixed, this assertion must
+     * be inverted. Its purpose is to prove the 63ms leak is real and reproducible
+     * in pure JVM, so the eventual fix has a falsifiable before/after.
+     */
+    private static void test2063Leak() {
+        long dur = 2_662_480L;              // 44-min, floor = min(2000, 2662) = 2000ms
+        float p2063 = 7.752171E-4f;         // observed raw progress: 2063 / 2662480
+        long targetMs = (long) ((double) p2063 * (double) dur);
+        check(SeekRules.tMinMs(dur) == 2000L, "44min floor is 2000ms");
+        check(!SeekRules.isNearZeroDirty(p2063, 2063L, dur, false),
+                "target=2063ms is NOT rejected today (the known 63ms leak)");
+        check(targetMs == 2063L, "p*duration reproduces target=2063ms");
     }
 
     private static void check(boolean ok, String msg) {

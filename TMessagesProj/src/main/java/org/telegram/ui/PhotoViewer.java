@@ -1132,6 +1132,14 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
     private long lastGoodDragTargetMs = -1L;
     private long lastGoodDragAtMs = 0L;
     private long lastGoodDragDocId = -1L;
+    // ---- DIAGNOSTIC INSTRUMENTATION (observe-only; no playback behavior change) ----
+    // Correlate one jump event across save → restore → funnel → ready. ev orders all
+    // lines globally; seek groups funnel→ready; t is elapsedRealtime for cross-thread joins.
+    private static final java.util.concurrent.atomic.AtomicLong DIAG_EVENT_SEQ = new java.util.concurrent.atomic.AtomicLong();
+    private static final java.util.concurrent.atomic.AtomicLong DIAG_SEEK_SEQ = new java.util.concurrent.atomic.AtomicLong();
+    private static volatile float diagLastNonZeroProgress = -1f;
+    private static volatile long diagLastNonZeroAtMs = 0L;
+    // ---- END DIAGNOSTIC INSTRUMENTATION ----
     private String shouldSavePositionForCurrentVideo;
     private String shouldSavePositionForCurrentVideoShortTerm;
     private static final HashMap<String, SavedVideoPosition> savedVideoPositions = new HashMap<>();
@@ -1667,8 +1675,13 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
                         final long savePosition = videoPlayer != null ? videoPlayer.getCurrentPosition() : 0L;
                         // A near-zero read during a fragmented-stream rebuild is not a real
                         // watch position; persisting it makes the next open start at frame 0.
-                        final float value = SeekRules.isValidSavePosition(savePosition, saveDuration)
+                        final boolean diagValid = SeekRules.isValidSavePosition(savePosition, saveDuration);
+                        final float value = diagValid
                                 ? savePosition / (float) saveDuration : -1f;
+                        diagSeek("save-eval", "savePositionMs=" + savePosition + " saveDurationMs=" + saveDuration
+                                + " value=" + value + " isValid=" + diagValid
+                                + " isStreaming=" + isStreaming + " docId=" + diagDocIdHash());
+                        diagNearZeroStack(saveDuration > 0 ? savePosition / (float) saveDuration : -1f, "save-eval");
                         if (value > 0 && value < 1f && SystemClock.elapsedRealtime() - lastSaveTime >= 1000) {
                             final String saveFor = shouldSavePositionForCurrentVideo;
                             final float valueToStore = value;
@@ -10229,6 +10242,10 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
                         seekToProgressSinceMs = 0L;
                     } else {
                         final long dragTargetMs = (long) (progress * duration);
+                        diagSeek("drag-to-ms", "rawProgress=" + progress + " durationMs=" + duration
+                                + " dragTargetMs=" + dragTargetMs + " isStreaming=" + isStreaming
+                                + " docId=" + diagDocIdHash());
+                        diagNearZeroStack(progress, "drag-to-ms");
                         // Remember the user's real target so a later near-zero dirty seek
                         // can be replaced with this position instead of stranding frame 0.
                         if (dragTargetMs >= SeekRules.tMinMs(duration)) {
@@ -10924,6 +10941,9 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
                         SavedVideoPosition videoPosition = savedVideoPositions.get(name);
                         if (currentMessageObject.forceSeekTo < 0 && videoPosition != null) {
                             float pos = videoPosition.position;
+                            diagSeek("restore-shortterm", "rawPos=" + pos + " durationSec=" + duration
+                                    + " valid=" + isValidRestoreProgress(pos, duration) + " source=shortterm");
+                            diagNearZeroStack(pos, "restore-shortterm");
                             if (isValidRestoreProgress(pos, duration)) {
                                 currentMessageObject.forceSeekTo = pos;
                                 videoPlayerSeekbar.setProgress(pos);
@@ -10935,6 +10955,9 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
                         if (currentMessageObject.forceSeekTo < 0) {
                             SharedPreferences preferences = ApplicationLoader.applicationContext.getSharedPreferences("media_saved_pos", Activity.MODE_PRIVATE);
                             float pos = readAndCleanSavedProgress(preferences, name, duration);
+                            diagSeek("restore-persisted", "rawPos=" + pos + " durationSec=" + duration
+                                    + " source=persisted");
+                            diagNearZeroStack(pos, "restore-persisted");
                             if (pos >= 0f) {
                                 currentMessageObject.forceSeekTo = pos;
                                 videoPlayerSeekbar.setProgress(pos);
@@ -10946,6 +10969,9 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
             }
 
             if (currentMessageObject != null && currentMessageObject.forceSeekTo >= 0) {
+                diagSeek("forceSeekTo-direct", "forceSeekTo=" + currentMessageObject.forceSeekTo
+                        + " isStreaming=" + isStreaming + " docId=" + diagDocIdHash());
+                diagNearZeroStack(currentMessageObject.forceSeekTo, "forceSeekTo-direct");
                 seekVideoOrWebToProgress(currentMessageObject.forceSeekTo);
                 currentMessageObject.forceSeekTo = -1;
             }
@@ -10995,6 +11021,9 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
                 // TIME_UNSET used to clamp to byte 0 and restart the video.
                 if (knownDuration != C.TIME_UNSET && knownDuration > 0) {
                     final float pending = seekToProgressPending;
+                    diagSeek("pending-to-funnel", "rawPending=" + pending + " knownDurationMs=" + knownDuration
+                            + " isStreaming=" + isStreaming + " docId=" + diagDocIdHash());
+                    diagNearZeroStack(pending, "pending-to-funnel");
                     seekToProgressPending = 0;
                     seekToProgressSinceMs = 0L;
                     logNextReadyPosition = true;
@@ -11023,6 +11052,8 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
                         + " dur=" + videoPlayer.getDuration());
                 android.util.Log.w("FMPIDX", "player ready pos=" + videoPlayer.getCurrentPosition()
                         + " dur=" + videoPlayer.getDuration());
+                diagSeek("player-ready", "readyPosMs=" + videoPlayer.getCurrentPosition()
+                        + " dur=" + videoPlayer.getDuration() + " isStreaming=" + isStreaming);
             }
             if (aspectRatioFrameLayout != null && aspectRatioFrameLayout.getVisibility() != View.VISIBLE) {
                 aspectRatioFrameLayout.setVisibility(View.VISIBLE);
@@ -11133,17 +11164,27 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
      * same pure rules the JVM tests exercise.
      */
     private void seekVideoOrWebToProgress(float progress, boolean intentionalZero) {
+        DIAG_SEEK_SEQ.incrementAndGet();
+        diagSeek("funnel-in", "progressRaw=" + progress + " intentionalZero=" + intentionalZero
+                + " isStreaming=" + isStreaming + " docId=" + diagDocIdHash());
+        diagNearZeroStack(progress, "funnel-in");
         if (videoPlayer != null) {
             final VideoPlayer p = videoPlayer; // single capture: avoid validate-on-A / seek-on-B across a rebuild
             final long duration = p.getDuration();
             if (duration == C.TIME_UNSET || duration <= 0) {
                 FileLog.d("ABPV: player seek reject p=" + progress + " dur=" + duration);
                 android.util.Log.w("FMPIDX", "seek reject p=" + progress + " dur=" + duration);
+                diagSeek("funnel-reject", "progressRaw=" + progress + " dur=" + duration);
                 return;
             }
             final float clamped = progress < 0f ? 0f : Math.min(progress, 1f);
             final long targetMs = (long) ((double) clamped * (double) duration);
-            if (SeekRules.isNearZeroDirty(progress, targetMs, duration, intentionalZero)) {
+            final boolean diagDirty = SeekRules.isNearZeroDirty(progress, targetMs, duration, intentionalZero);
+            diagSeek("funnel-eval", "progressRaw=" + progress + " clamped=" + clamped
+                    + " targetMs=" + targetMs + " durationMs=" + duration
+                    + " intentionalZero=" + intentionalZero + " isNearZeroDirty=" + diagDirty
+                    + " tMinMs=" + SeekRules.tMinMs(duration));
+            if (diagDirty) {
                 FileLog.d("ABPV: player seek dirty-reject p=" + progress + " dur=" + duration + " target=" + targetMs);
                 android.util.Log.w("FMPIDX", "dirty-reject p=" + progress + " target=" + targetMs);
                 restoreAfterDirtyReject(p, duration);
@@ -11160,7 +11201,11 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
             }
             final float clamped = progress < 0f ? 0f : Math.min(progress, 1f);
             final long targetMs = (long) ((double) clamped * (double) duration);
-            if (SeekRules.isNearZeroDirty(progress, targetMs, duration, intentionalZero)) {
+            final boolean diagDirty = SeekRules.isNearZeroDirty(progress, targetMs, duration, intentionalZero);
+            diagSeek("web-funnel-eval", "progressRaw=" + progress + " clamped=" + clamped
+                    + " targetMs=" + targetMs + " durationMs=" + duration
+                    + " isNearZeroDirty=" + diagDirty);
+            if (diagDirty) {
                 FileLog.d("ABPV: web seek dirty-reject p=" + progress + " target=" + targetMs);
                 return;
             }
@@ -11188,6 +11233,7 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
                 && curDocId != -1L
                 && now - lastGoodDragAtMs < 30_000L) {
             final long restoreMs = lastGoodDragTargetMs;
+            diagSeek("restore-after-reject", "restoreMs=" + restoreMs + " durationMs=" + duration);
             lastGoodDragTargetMs = -1L;
             logNextReadyPosition = true;
             android.util.Log.w("FMPIDX", "restore-after-reject pos=" + restoreMs);
@@ -11497,6 +11543,9 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
                     }
                     FileLog.e(e);
                     android.util.Log.w("STREAMDBG", "onError " + (e != null ? e.getClass().getSimpleName() + ": " + e.getMessage() : "null"));
+                    diagSeek("onerror", "type=" + (e != null ? e.getClass().getSimpleName() : "null")
+                            + " isStreaming=" + isStreaming + " playbackState=" + playbackState
+                            + " docId=" + diagDocIdHash());
                     if (currentMessageObject != null && currentMessageObject.isGif() && NekoConfig.takeGIFasVideo.Bool()) {
                         return;
                     }
@@ -11676,6 +11725,9 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
                         SavedVideoPosition videoPosition = savedVideoPositions.get(name);
                         if (currentMessageObject.forceSeekTo < 0 && videoPosition != null) {
                             float pos = videoPosition.position;
+                            diagSeek("restore-shortterm", "rawPos=" + pos + " durationSec=" + duration
+                                    + " valid=" + isValidRestoreProgress(pos, duration) + " source=shortterm");
+                            diagNearZeroStack(pos, "restore-shortterm");
                             if (isValidRestoreProgress(pos, duration)) {
                                 currentMessageObject.forceSeekTo = pos;
                                 videoPlayerSeekbar.setProgress(pos);
@@ -11687,6 +11739,9 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
                         if (currentMessageObject.forceSeekTo < 0) {
                             SharedPreferences preferences = ApplicationLoader.applicationContext.getSharedPreferences("media_saved_pos", Activity.MODE_PRIVATE);
                             float pos = readAndCleanSavedProgress(preferences, name, duration);
+                            diagSeek("restore-persisted", "rawPos=" + pos + " durationSec=" + duration
+                                    + " source=persisted");
+                            diagNearZeroStack(pos, "restore-persisted");
                             if (pos >= 0f) {
                                 currentMessageObject.forceSeekTo = pos;
                                 videoPlayerSeekbar.setProgress(pos);
@@ -11750,6 +11805,9 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
         loopItem.setSelectorColor(playerLooping ? 0x0F73B4EC : 0x0fffffff);
 
         if (currentMessageObject != null && currentMessageObject.forceSeekTo >= 0) {
+            diagSeek("forceSeekTo-pending", "forceSeekTo=" + currentMessageObject.forceSeekTo
+                    + " isStreaming=" + isStreaming + " docId=" + diagDocIdHash());
+            diagNearZeroStack(currentMessageObject.forceSeekTo, "forceSeekTo-pending");
             seekToProgressPending = currentMessageObject.forceSeekTo;
             seekToProgressSinceMs = 0L;
             currentMessageObject.forceSeekTo = -1;
@@ -24628,6 +24686,57 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
      * `pos > 0` check let through. Returns false for an invalid value so callers treat it as
      * "play from start".
      */
+    /** A stable non-reversible numeric token for the current document, never the raw id/url. */
+    private String diagDocIdHash() {
+        TLRPC.Document d = currentMessageObject != null ? currentMessageObject.getDocument() : null;
+        long id = d != null ? d.id : -1L;
+        return String.valueOf(Long.hashCode(id) & 0xffffffL);
+    }
+
+    /**
+     * Observe-only diagnostic line. All seek-carrier instrumentation routes through here so
+     * every line carries a globally ordered event id, a seek id (funnel→ready), a monotonic
+     * timestamp and the thread name. Values are logged BEFORE any filter/reject decision.
+     * No business id / document id / url is ever written. No playback behavior is changed.
+     */
+    private static void diagSeek(String stage, String detail) {
+        final long ev = DIAG_EVENT_SEQ.incrementAndGet();
+        final long seek = DIAG_SEEK_SEQ.get();
+        final long t = SystemClock.elapsedRealtime();
+        final String th = Thread.currentThread().getName();
+        FileLog.d("ABPV: DIAG ev=" + ev + " seek=" + seek + " t=" + t + " th=" + th + " " + stage + " " + detail);
+    }
+
+    /**
+     * Emit a full Java stack trace when a near-zero progress appears AND it is a notable jump
+     * from the last non-zero value (not just a fixed 2063 comparison). Threshold: p < 0.01 and
+     * |delta| > 0.01 or > 3s since the last non-zero sample. Purely observational.
+     */
+    private static void diagNearZeroStack(float progress, String where) {
+        if (Float.isNaN(progress) || Float.isInfinite(progress) || progress < 0f) {
+            return;
+        }
+        final long now = SystemClock.elapsedRealtime();
+        boolean nearZero = progress < 0.01f;
+        boolean notable = diagLastNonZeroProgress < 0f
+                || Math.abs(progress - diagLastNonZeroProgress) > 0.01f
+                || (now - diagLastNonZeroAtMs) > 3000L;
+        if (nearZero && notable) {
+            StringBuilder sb = new StringBuilder();
+            StackTraceElement[] st = Thread.currentThread().getStackTrace();
+            for (int i = 2; i < st.length && i < 22; i++) {
+                sb.append("\n        at ").append(st[i].toString());
+            }
+            FileLog.d("ABPV: DIAG ev=" + DIAG_EVENT_SEQ.incrementAndGet()
+                    + " seek=" + DIAG_SEEK_SEQ.get() + " t=" + now
+                    + " NEARZERO-STACK where=" + where + " p=" + progress + sb);
+        }
+        if (!nearZero) {
+            diagLastNonZeroProgress = progress;
+            diagLastNonZeroAtMs = now;
+        }
+    }
+
     private static boolean isValidRestoreProgress(float pos, long durationSec) {
         if (!(pos > 0f && pos < 0.999f) || durationSec <= 0) {
             return false;
