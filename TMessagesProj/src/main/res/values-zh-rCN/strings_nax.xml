@@ -223,6 +223,7 @@
     <string name="NaxUpdateFailed">更新下载失败，请检查网络后重试。</string>
     <string name="NaxUpdatePermission">请允许安装未知应用，然后重新检查更新。</string>
     <string name="NaxPreviewApproximate">近似</string>
+    <string name="NaxPreviewUnavailable">预览暂不可用</string>
     <string name="PremiumElements">Premium 元素</string>
     <string name="PremiumItemBoosts">助推者标识</string>
     <string name="PremiumItemStickerEffects">贴纸特效</string>

@@ -236,6 +236,7 @@
     <string name="NaxUpdateFailed">Update download failed. Check your connection and try again.</string>
     <string name="NaxUpdatePermission">Allow installing unknown apps, then check for updates again.</string>
     <string name="NaxPreviewApproximate">Approx.</string>
+    <string name="NaxPreviewUnavailable">Preview unavailable</string>
     <string name="PremiumElements">Premium Elements</string>
     <string name="PremiumItemBoosts">Boost Counter</string>
     <string name="PremiumItemStickerEffects">Sticker Effects</string>

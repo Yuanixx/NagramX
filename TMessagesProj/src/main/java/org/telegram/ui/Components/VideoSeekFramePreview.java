@@ -77,6 +77,9 @@ public class VideoSeekFramePreview extends View {
     private int displayedOrdinal;
     private boolean displayedApprox;
     private boolean awaitingExact;
+    /** True when the current empty frame is because cached frames were too far from the finger,
+     *  not because there are no frames at all. Suppresses the "unavailable" hint in that case. */
+    private boolean lastDropOutOfWindow;
     /** Incremented for every new press, so a late frame cannot cross gestures. */
     private int gestureSeq;
     private int requestGestureSeq;
@@ -479,10 +482,14 @@ public class VideoSeekFramePreview extends View {
                     + " limit=" + current.maxFrameDistanceMs()
                     + " closestT=" + closestTime
                     + " distance=" + (closestTime >= 0 ? Math.abs(closestTime - positionMs) : -1L));
+            // Frames exist but are too far away: this is a deliberate "too far" decision,
+            // not a broken preview. Do not show the "unavailable" hint for it.
+            lastDropOutOfWindow = true;
             setFrame(null, positionMs, false);
         } else if (logRequest) {
             FileLog.d("ABPV: nearest=null storeSize=" + current.thumbnailCount()
                     + " pos=" + positionMs);
+            lastDropOutOfWindow = false;
         }
     }
 
@@ -493,6 +500,7 @@ public class VideoSeekFramePreview extends View {
      */
     private void showThumbnail(PreviewSession current, Thumbnail thumbnail, long positionMs) {
         final boolean hadFrame = frame != null && !frame.isRecycled();
+        lastDropOutOfWindow = false;
         displayedThumbTimeMs = thumbnail.timeMs;
         displayedOrdinal = current.thumbnailOrdinal(thumbnail.timeMs);
         displayedApprox = isApproximate(current, thumbnail, positionMs);
@@ -859,13 +867,15 @@ public class VideoSeekFramePreview extends View {
             final int start = (int) ((SystemClock.uptimeMillis() / 4L) % 360L);
             canvas.drawArc(spinnerRect, start, 280, false, spinnerPaint);
             postInvalidateOnAnimation();
-        } else if (picture == null || picture.isRecycled()) {
+        } else if ((picture == null || picture.isRecycled()) && !lastDropOutOfWindow) {
             // No frame at all (e.g. a streaming tail-moov file still downloading): the bubble
             // used to be an unexplained empty dark box, which reads as a freeze. Tell the user
-            // the preview is simply not ready instead of showing a silent blank.
-            final String hint = "预览暂不可用";
+            // the preview is simply not ready instead of showing a silent blank. When frames
+            // exist but are too far away (lastDropOutOfWindow), stay silent - the approx badge
+            // and the deliberate "too far" decision already cover that case.
+            final String hint = LocaleController.getString(R.string.NaxPreviewUnavailable);
             final float cx = (width - badgeTextPaint.measureText(hint)) / 2f;
-            final float cy = videoHeight / 2f + badgeTextPaint.descent() - badgeTextPaint.ascent() / 2f;
+            final float cy = videoHeight / 2f - (badgeTextPaint.ascent() + badgeTextPaint.descent()) / 2f;
             canvas.drawText(hint, Math.max(AndroidUtilities.dp(4), cx), cy, badgeTextPaint);
         }
 

@@ -220,7 +220,7 @@ public final class PreviewDiskCache {
          * position are loaded first, so reopening a long video does not fill
          * the store with frames around minute zero.
          */
-        public void loadInto(ThumbnailStore store, long desiredMs) {
+        public void loadInto(ThumbnailStore store, long desiredMs, Runnable onLoaded) {
             final File[] all = dir.listFiles();
             if (all == null || all.length == 0) {
                 return;
@@ -257,6 +257,11 @@ public final class PreviewDiskCache {
                 }
                 PreviewLog.d("SeekPreview: disk cache loaded " + loaded
                         + " of " + all.length + " frames near=" + focus + "ms");
+                // The store has no on-put listener, so notify the UI that new frames arrived.
+                // Otherwise a finger held still while seeding finishes would never repaint.
+                if (onLoaded != null) {
+                    onLoaded.run();
+                }
             }, "seek-preview-disk");
             reader.setPriority(Thread.MIN_PRIORITY);
             reader.start();

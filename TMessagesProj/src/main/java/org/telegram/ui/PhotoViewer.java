@@ -11064,9 +11064,11 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
             if (playbackState == ExoPlayer.STATE_ENDED) {
                 if (isCurrentVideo) {
                     if (!videoTimelineView.isDragging()) {
-                        videoTimelineView.setProgress(videoTimelineView.getLeftProgress());
+                        final float leftProgress = videoTimelineView.getLeftProgress();
+                        videoTimelineView.setProgress(leftProgress);
                         if (!inPreview && (currentEditMode != EDIT_MODE_NONE || videoTimelineViewContainer.getVisibility() == View.VISIBLE)) {
-                            seekVideoOrWebToProgress(videoTimelineView.getLeftProgress());
+                            // A trim start of 0 is a deliberate seek to the beginning, not a dirty near-zero.
+                            seekVideoOrWebToProgress(leftProgress, leftProgress == 0f);
                         } else {
                             seekVideoOrWebToProgress(0, true);
                         }
@@ -11082,8 +11084,9 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
                 } else {
                     videoPlayerSeekbar.setProgress(0.0f);
                     videoPlayerSeekbarView.invalidate();
+                    final float leftProgress2 = videoTimelineView.getLeftProgress();
                     if (!inPreview && videoTimelineViewContainer.getVisibility() == View.VISIBLE) {
-                        seekVideoOrWebToProgress(videoTimelineView.getLeftProgress());
+                        seekVideoOrWebToProgress(leftProgress2, leftProgress2 == 0f);
                     } else {
                         seekVideoOrWebToProgress(0, true);
                     }
@@ -14573,7 +14576,8 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
         } else {
             if (isCurrentVideo) {
                 if (Math.abs(videoTimelineView.getProgress() - videoTimelineView.getRightProgress()) < 0.01f || videoPlayer != null && videoPlayer.getCurrentPosition() == videoPlayer.getDuration()) {
-                    seekVideoOrWebToProgress(videoTimelineView.getLeftProgress());
+                    final float leftProgress3 = videoTimelineView.getLeftProgress();
+                    seekVideoOrWebToProgress(leftProgress3, leftProgress3 == 0f);
                 }
             } else {
                 if (Math.abs(videoPlayerSeekbar.getProgress() - videoTimelineView.getRightProgress()) < 0.01f || videoPlayer != null && videoPlayer.getCurrentPosition() == videoPlayer.getDuration()) {

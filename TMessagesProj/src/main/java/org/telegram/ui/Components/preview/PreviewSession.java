@@ -427,7 +427,7 @@ public final class PreviewSession {
             // empty bubble. This uses only the preview's own disk cache and does not touch the
             // player's cache. It runs on its own thread and is safe if prepare later fails.
             if (diskSink != null) {
-                diskSink.loadInto(store, desiredMs);
+                diskSink.loadInto(store, desiredMs, () -> mainHandler.post(notifyRunnable));
             }
             final Prepared prepared = prepare();
             if (prepared == null || stopped) {
