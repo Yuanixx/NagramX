@@ -24751,10 +24751,18 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
      */
     private static float readAndCleanSavedProgress(SharedPreferences preferences, String name, long durationSec) {
         final float pos = preferences.getFloat(name, -1f);
+        final boolean hasRecord = pos >= 0f;
+        final boolean diagValid = isValidRestoreProgress(pos, durationSec);
+        // Observe-only: log the raw stored value and the guard verdict BEFORE any branch,
+        // so a near-zero dirty value that gets rejected is still visible in the log.
+        diagSeek("restore-persisted-RAW", "rawPos=" + pos
+                + " durationMs=" + (durationSec * 1000L)
+                + " hasRecord=" + hasRecord + " valid=" + diagValid);
+        diagNearZeroStack(pos, "restore-persisted-RAW");
         if (pos < 0f) {
             return -1f; // no record
         }
-        if (isValidRestoreProgress(pos, durationSec)) {
+        if (diagValid) {
             return pos;
         }
         // A real record that fails the floor is a stale near-zero dirty value: drop just this key.
