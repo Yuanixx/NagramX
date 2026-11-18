@@ -10924,7 +10924,7 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
                         SavedVideoPosition videoPosition = savedVideoPositions.get(name);
                         if (currentMessageObject.forceSeekTo < 0 && videoPosition != null) {
                             float pos = videoPosition.position;
-                            if (pos > 0 && pos < 0.999f) {
+                            if (isValidRestoreProgress(pos, duration)) {
                                 currentMessageObject.forceSeekTo = pos;
                                 videoPlayerSeekbar.setProgress(pos);
                             }
@@ -10934,8 +10934,8 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
                     if (duration >= 5 * 60) {
                         if (currentMessageObject.forceSeekTo < 0) {
                             SharedPreferences preferences = ApplicationLoader.applicationContext.getSharedPreferences("media_saved_pos", Activity.MODE_PRIVATE);
-                            float pos = preferences.getFloat(name, -1);
-                            if (pos > 0 && pos < 0.999f) {
+                            float pos = readAndCleanSavedProgress(preferences, name, duration);
+                            if (pos >= 0f) {
                                 currentMessageObject.forceSeekTo = pos;
                                 videoPlayerSeekbar.setProgress(pos);
                             }
@@ -11676,7 +11676,7 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
                         SavedVideoPosition videoPosition = savedVideoPositions.get(name);
                         if (currentMessageObject.forceSeekTo < 0 && videoPosition != null) {
                             float pos = videoPosition.position;
-                            if (pos > 0 && pos < 0.999f) {
+                            if (isValidRestoreProgress(pos, duration)) {
                                 currentMessageObject.forceSeekTo = pos;
                                 videoPlayerSeekbar.setProgress(pos);
                             }
@@ -11686,8 +11686,8 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
                     if (duration >= 5 * 60) {
                         if (currentMessageObject.forceSeekTo < 0) {
                             SharedPreferences preferences = ApplicationLoader.applicationContext.getSharedPreferences("media_saved_pos", Activity.MODE_PRIVATE);
-                            float pos = preferences.getFloat(name, -1);
-                            if (pos > 0 && pos < 0.999f) {
+                            float pos = readAndCleanSavedProgress(preferences, name, duration);
+                            if (pos >= 0f) {
                                 currentMessageObject.forceSeekTo = pos;
                                 videoPlayerSeekbar.setProgress(pos);
                             }
@@ -24620,6 +24620,39 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
         }
     }
 
+    /**
+     * A saved progress is only restored if it maps to a genuine watch position. MessageObject
+     * duration is in SECONDS; convert to milliseconds before applying the shared floor, otherwise
+     * the 1000x unit mismatch silently disables the guard. Also drops legacy near-zero dirty
+     * values (e.g. a 1.4s low-progress written during a fragmented-stream rebuild) that the old
+     * `pos > 0` check let through. Returns false for an invalid value so callers treat it as
+     * "play from start".
+     */
+    private static boolean isValidRestoreProgress(float pos, long durationSec) {
+        if (!(pos > 0f && pos < 0.999f) || durationSec <= 0) {
+            return false;
+        }
+        final long durationMs = durationSec * 1000L;
+        return (double) pos * (double) durationMs >= (double) SeekRules.tMinMs(durationMs);
+    }
+
+    /**
+     * Read a persisted progress and lazily drop a legacy dirty value. Only removes this one
+     * key (the prefs also hold quality/loop settings, so a bulk clear would destroy them).
+     */
+    private static float readAndCleanSavedProgress(SharedPreferences preferences, String name, long durationSec) {
+        final float pos = preferences.getFloat(name, -1f);
+        if (pos < 0f) {
+            return -1f; // no record
+        }
+        if (isValidRestoreProgress(pos, durationSec)) {
+            return pos;
+        }
+        // A real record that fails the floor is a stale near-zero dirty value: drop just this key.
+        preferences.edit().remove(name).apply();
+        return -1f;
+    }
+
     public static float getSavedProgressFast(MessageObject msg) {
         final int duration = (int) msg.getDuration();
         final String name = msg.isEmbedVideo() ? msg.messageOwner.media.webpage.url : msg.getFileNameFast();
@@ -24628,7 +24661,7 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
                 final SavedVideoPosition videoPosition = savedVideoPositions.get(name);
                 if (msg != null && msg.forceSeekTo < 0 && videoPosition != null) {
                     float pos = videoPosition.position;
-                    if (pos > 0 && pos < 0.999f) {
+                    if (isValidRestoreProgress(pos, duration)) {
                         return pos;
                     }
                 }
@@ -24645,7 +24678,7 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
                 SavedVideoPosition videoPosition = savedVideoPositions.get(name);
                 if (msg != null && msg.forceSeekTo < 0 && videoPosition != null) {
                     float pos = videoPosition.position;
-                    if (pos > 0 && pos < 0.999f) {
+                    if (isValidRestoreProgress(pos, duration)) {
                         return pos;
                     }
                 }
@@ -24653,8 +24686,8 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
             if (duration >= 2 * 60) {
                 if (msg.forceSeekTo < 0) {
                     SharedPreferences preferences = ApplicationLoader.applicationContext.getSharedPreferences("media_saved_pos", Activity.MODE_PRIVATE);
-                    float pos = preferences.getFloat(name, -1);
-                    if (pos > 0 && pos < 0.999f) {
+                    float pos = readAndCleanSavedProgress(preferences, name, duration);
+                    if (pos >= 0f) {
                         return pos;
                     }
                 }

@@ -41,12 +41,12 @@ public final class SeekRulesTest {
     }
 
     private static void testFloorFormula() {
-        // 27-min video: min(1000, 1660840*0.001=1660) = 1000ms
-        check(SeekRules.tMinMs(1_660_840L) == 1000L, "27min floor is 1000ms");
-        // 10s video: min(1000, 10000*0.001=10) = 10ms
+        // 27-min video: min(2000, 1660840*0.001=1660) = 1660ms (relative branch)
+        check(SeekRules.tMinMs(1_660_840L) == 1660L, "27min floor is 1660ms");
+        // 10s video: min(2000, 10000*0.001=10) = 10ms
         check(SeekRules.tMinMs(10_000L) == 10L, "10s floor is 10ms");
-        // 44-min: min(1000, 2662480*0.001=2662) = 1000ms
-        check(SeekRules.tMinMs(2_662_480L) == 1000L, "44min floor is 1000ms");
+        // 44-min: min(2000, 2662480*0.001=2662) = 2000ms (absolute cap now catches 1437ms)
+        check(SeekRules.tMinMs(2_662_480L) == 2000L, "44min floor is 2000ms");
     }
 
     private static void testInvalidDurationFailsSafe() {
@@ -61,16 +61,24 @@ public final class SeekRulesTest {
         float p88 = 88f / 1_660_840f;   // 5.2985237E-5
         check(SeekRules.isNearZeroDirty(p17, 17L, 1_660_840L, false), "target=17ms is dirty");
         check(SeekRules.isNearZeroDirty(p88, 88L, 1_660_840L, false), "target=88ms is dirty");
+        // The 2026-11-18 regression: a 44-min video auto-seeked to 1437ms (≈first frame)
+        // after a switch. The old 1000ms floor let it through; the 2000ms floor must catch it.
+        float p1437 = 5.4009794E-4f;   // 1438/2662480
+        check(SeekRules.isNearZeroDirty(p1437, 1437L, 2_662_480L, false),
+                "target=1437ms on 44min is dirty (regression guard)");
+        // But a legitimate 3s deep link in a 1-hour video must still pass.
+        check(!SeekRules.isNearZeroDirty(3f / 3600f, 3000L, 3_600_000L, false),
+                "3s deep link still allowed after floor raise");
     }
 
     private static void testBoundaryTolerance() {
-        long dur = 1_660_840L;      // floor 1000ms
-        // Just below floor with tolerance: 999ms must be tolerated (not dirty).
-        check(!SeekRules.isNearZeroDirty(999f / dur, 999L, dur, false), "999ms tolerated");
+        long dur = 1_660_840L;      // floor 1660ms
+        // Just below floor with tolerance: 1659ms must be tolerated (not dirty).
+        check(!SeekRules.isNearZeroDirty(1659f / dur, 1659L, dur, false), "1659ms tolerated");
         // Well below floor: 500ms dirty.
         check(SeekRules.isNearZeroDirty(500f / dur, 500L, dur, false), "500ms dirty");
-        // At floor: 1000ms allowed.
-        check(!SeekRules.isNearZeroDirty(1000f / dur, 1000L, dur, false), "1000ms allowed");
+        // At floor: 1660ms allowed.
+        check(!SeekRules.isNearZeroDirty(1660f / dur, 1660L, dur, false), "1660ms allowed");
     }
 
     private static void testNaNAndInfinity() {
@@ -92,7 +100,7 @@ public final class SeekRulesTest {
     private static void testDeepLinkAllowed() {
         // Deep link to 3s in a 1-hour video: p=3/3600=8.33e-4 (below 0.001 p-floor)
         // but target=3000ms is legitimate by the absolute predicate.
-        long dur = 3_600_000L;      // floor = min(1000, 3600) = 1000ms
+        long dur = 3_600_000L;      // floor = min(2000, 3600) = 2000ms; 3000ms deep link still allowed
         float p = 3f / 3600f;
         check(!SeekRules.isNearZeroDirty(p, 3000L, dur, false), "3s deep link allowed");
     }

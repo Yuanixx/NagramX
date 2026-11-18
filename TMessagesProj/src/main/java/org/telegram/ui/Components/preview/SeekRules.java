@@ -29,8 +29,12 @@ package org.telegram.ui.Components.preview;
  */
 public final class SeekRules {
 
-    /** Absolute floor in milliseconds: positions below this are never a real watch position. */
-    public static final long SAVE_FLOOR_MS = 1000L;
+    /**
+     * Absolute floor in milliseconds: positions below this are never a real watch position.
+     * 2000ms catches the ~1.4s low-progress dirty values (rejected by the old 1000ms floor)
+     * while still allowing legitimate 3s deep links (min() keeps the relative branch for shorts).
+     */
+    public static final long SAVE_FLOOR_MS = 2000L;
     /** Relative floor: 0.1% of the duration. */
     public static final double SAVE_FLOOR_RATIO = 0.001d;
     /** media3 TIME_UNSET sentinel. Kept local so this class stays Android-free. */
@@ -42,7 +46,7 @@ public final class SeekRules {
     /**
      * The single source of truth for the minimum legitimate seek/persist position.
      *
-     * min(1000ms, duration*0.001). An invalid duration fails safe with MAX_VALUE
+     * min(2000ms, duration*0.001). An invalid duration fails safe with MAX_VALUE
      * so every caller rejects (never a tiny threshold that could let a near-zero
      * position through).
      */
