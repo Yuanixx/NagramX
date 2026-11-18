@@ -11544,7 +11544,7 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
                     FileLog.e(e);
                     android.util.Log.w("STREAMDBG", "onError " + (e != null ? e.getClass().getSimpleName() + ": " + e.getMessage() : "null"));
                     diagSeek("onerror", "type=" + (e != null ? e.getClass().getSimpleName() : "null")
-                            + " isStreaming=" + isStreaming + " playbackState=" + playbackState
+                            + " isStreaming=" + isStreaming
                             + " docId=" + diagDocIdHash());
                     if (currentMessageObject != null && currentMessageObject.isGif() && NekoConfig.takeGIFasVideo.Bool()) {
                         return;
