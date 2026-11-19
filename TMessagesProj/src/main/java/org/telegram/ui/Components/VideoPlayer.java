@@ -258,6 +258,15 @@ public class VideoPlayer implements Player.Listener, AnalyticsListener, Notifica
 
     private boolean triedReinit;
 
+    // Internal error-recovery position preservation (onPlayerError AV1 / decoder-init).
+    // Only armed by those two internal recovery paths; normal open / quality switch do not use it.
+    // volatile because recovery may be scheduled on the UI thread and consumed on the player looper.
+    private volatile ExoPlayer recoveryPlayerRef = null;
+    private volatile long recoveryPositionMs = C.TIME_UNSET;
+    private volatile boolean recoveryPlayWhenReady = false;
+    private volatile int recoveryGeneration = -1;
+    private volatile int prepareGeneration = 0;
+
     private Uri currentUri;
 
     private boolean videoPlayerReady;
@@ -413,6 +422,7 @@ public class VideoPlayer implements Player.Listener, AnalyticsListener, Notifica
     }
 
     public void preparePlayerLoop(Uri videoUri, String videoType, Uri audioUri, String audioType) {
+        prepareGeneration++;
         this.videoQualities = null;
         this.videoQualityToSelect = null;
         this.videoUri = videoUri;
@@ -498,6 +508,7 @@ public class VideoPlayer implements Player.Listener, AnalyticsListener, Notifica
     }
 
     public void preparePlayer(Uri uri, String type, int priority, long videoByteOffset) {
+        prepareGeneration++;
         this.videoQualities = null;
         this.videoQualityToSelect = null;
         this.videoUri = uri;
@@ -520,6 +531,7 @@ public class VideoPlayer implements Player.Listener, AnalyticsListener, Notifica
     }
 
     public void preparePlayer(ArrayList<Quality> qualities, Quality select) {
+        prepareGeneration++;
         this.videoQualities = qualities;
         this.videoQualityToSelect = select;
         this.videoUri = null;
@@ -1509,6 +1521,9 @@ public class VideoPlayer implements Player.Listener, AnalyticsListener, Notifica
 
     public void releasePlayer(boolean async) {
         activePlayers.remove(playerId);
+        recoveryPlayerRef = null;
+        recoveryPositionMs = C.TIME_UNSET;
+        recoveryGeneration = -1;
         if (player != null) {
             player.release();
             player = null;
@@ -1884,9 +1899,25 @@ public class VideoPlayer implements Player.Listener, AnalyticsListener, Notifica
         if (playWhenReady && playbackState == Player.STATE_READY && !isMuted() && shouldPauseOther) {
             NotificationCenter.getGlobalInstance().postNotificationName(NotificationCenter.playerDidStartPlaying, this);
         }
-        if (!videoPlayerReady && playbackState == Player.STATE_READY) {
-            videoPlayerReady = true;
-            checkPlayersReady();
+        if (playbackState == Player.STATE_READY) {
+            // One-shot internal error-recovery restore. Only armed by onPlayerError's AV1 /
+            // decoder-init paths. Generation and player instance must both still match, so a
+            // normal open, a quality switch, a later re-prepare or a new player cannot consume it.
+            if (recoveryPlayerRef == player && recoveryPositionMs != C.TIME_UNSET && prepareGeneration == recoveryGeneration) {
+                long restorePos = recoveryPositionMs;
+                boolean restorePlaying = recoveryPlayWhenReady;
+                recoveryPlayerRef = null;
+                recoveryPositionMs = C.TIME_UNSET;
+                recoveryGeneration = -1;
+                if (restorePos > 0) {
+                    player.seekTo(restorePos);
+                }
+                player.setPlayWhenReady(restorePlaying);
+            }
+            if (!videoPlayerReady) {
+                videoPlayerReady = true;
+                checkPlayersReady();
+            }
         }
         if (playbackState != Player.STATE_READY) {
             audioUpdateHandler.removeCallbacksAndMessages(null);
@@ -1905,6 +1936,19 @@ public class VideoPlayer implements Player.Listener, AnalyticsListener, Notifica
         }
     }
 
+    // Called immediately before an internal error-recovery prepare(). Records the position and
+    // playback state still held by the old source. generation is set to the value prepareGeneration
+    // will have AFTER the imminent preparePlayer* call increments it; STATE_READY restores only if
+    // the generation and the player instance still match (one-shot, cleared on restore).
+    private void captureRecoveryIntent() {
+        if (player != null) {
+            recoveryPlayerRef = player;
+            recoveryPositionMs = player.getCurrentPosition();
+            recoveryPlayWhenReady = player.getPlayWhenReady();
+            recoveryGeneration = prepareGeneration + 1;
+        }
+    }
+
     @Override
     public void onPlayerError(PlaybackException error) {
         AndroidUtilities.runOnUIThread(() -> {
@@ -1919,6 +1963,7 @@ public class VideoPlayer implements Player.Listener, AnalyticsListener, Notifica
                     }
                     videoQualities = Quality.filterByCodec(videoQualities);
                     if (videoQualities != null) {
+                        captureRecoveryIntent();
                         preparePlayer(videoQualities, videoQualityToSelect);
                     }
                     return;
@@ -1936,6 +1981,7 @@ public class VideoPlayer implements Player.Listener, AnalyticsListener, Notifica
                     if (workerQueue != null) {
                         workerQueue.postRunnable(() -> {
                             if (player != null) {
+                                captureRecoveryIntent();
                                 player.clearVideoSurface();
                                 attachTextureView(textureView);
                                 if (videoQualities != null) {
@@ -1949,6 +1995,7 @@ public class VideoPlayer implements Player.Listener, AnalyticsListener, Notifica
                             }
                         });
                     } else {
+                        captureRecoveryIntent();
                         player.clearVideoSurface();
                         attachTextureView(textureView);
                         if (videoQualities != null) {
@@ -1962,6 +2009,10 @@ public class VideoPlayer implements Player.Listener, AnalyticsListener, Notifica
                     }
                 }
             } else {
+                // Not an internal recovery: do not leave a stale restore armed.
+                recoveryPlayerRef = null;
+                recoveryPositionMs = C.TIME_UNSET;
+                recoveryGeneration = -1;
                 if (delegate != null) {
                     delegate.onError(this, error);
                 }
