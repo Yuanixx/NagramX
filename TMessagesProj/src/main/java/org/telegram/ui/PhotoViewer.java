@@ -1152,6 +1152,7 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
     private static long diagLastObservedPosAtMs = 0L;
     private static long diagLastJumpDumpAtMs = 0L;
     private static volatile long diagLastFunnelTargetMs = -1L; // last funnel seek target; distinguishes intended seek-to-start
+    private static volatile long diagLastFunnelDoc = -1L;      // doc hash of that funnel seek (no business id/url)
     private static volatile boolean diagGestureActive = false; // logged only; NOT a veto (jump-back follows the gesture)
     private static volatile long diagGestureActiveUntilMs = 0L;
     // ---- END JUMP-DETECTED ring buffer ----
@@ -11221,8 +11222,9 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
                 return;
             }
             diagLastFunnelTargetMs = targetMs;
+            diagLastFunnelDoc = diagDocIdHash();
             diagRingPush("FUNNEL-SEEK", "targetMs=" + targetMs + " progressRaw=" + progress
-                    + " durMs=" + duration + " intentZero=" + intentionalZero + " doc=" + diagDocIdHash());
+                    + " durMs=" + duration + " intentZero=" + intentionalZero + " doc=" + diagLastFunnelDoc);
             FileLog.d("ABPV: player seek p=" + progress + " dur=" + duration + " target=" + targetMs);
             android.util.Log.w("FMPIDX", "seek target=" + targetMs + " dur=" + duration + " p=" + progress);
             logNextReadyPosition = true;
@@ -24765,9 +24767,12 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
     }
 
     /**
-     * Observe the player's real position (call from the periodic position sampler). If it falls
-     * from a real watch position (>60s) to near-zero (<10s) and no user gesture is active, dump
-     * the ring + a stack under a JUMP-DETECTED marker. Rate-limited so one event dumps once.
+     * Observe the player's real position (call from the periodic position sampler). Dump the ring
+     * + a stack under a JUMP-DETECTED marker when the observed position drops to near-zero (<10s)
+     * while the most recent funnel seek to the SAME doc target was a normal position
+     * (targetMs > posMs + 30s): i.e. the player reset the position after a real seek.
+     * A deliberate seek-to-start keeps targetMs in the near-zero range, so it does not trigger.
+     * The doc hash is compared, not the raw id, and is never written out. Rate-limited: 4s.
      */
     private static void diagObservePosition(long posMs, long durationMs, String doc) {
         if (posMs < 0L || durationMs <= 0L) {
@@ -24776,12 +24781,13 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
         final long now = SystemClock.elapsedRealtime();
         final long prev = diagLastObservedPosMs;
         boolean gesture = diagGestureActive && now < diagGestureActiveUntilMs;
-        boolean bigFall = prev > 60_000L && posMs < 10_000L && (prev - posMs) > 30_000L;
+        boolean jumpToNearZero = posMs < 10_000L
+                && diagLastFunnelTargetMs > posMs + 30_000L
+                && diagLastFunnelDoc == doc;
         // The real jump-back follows a user gesture by ~150ms, so a gesture window must NOT
-        // veto it. Instead: if the most recent funnel seek target was a normal position (>10s),
-        // a fall to near-zero is an unintended fallback, not a deliberate seek-to-start.
-        boolean lastSeekWasNormal = diagLastFunnelTargetMs > 10_000L;
-        if (bigFall && lastSeekWasNormal && (now - diagLastJumpDumpAtMs) > 4000L) {
+        // veto it. Instead: if the most recent funnel seek to this doc target was a normal
+        // position, a fall to near-zero is an unintended fallback, not a deliberate seek-to-start.
+        if (jumpToNearZero && (now - diagLastJumpDumpAtMs) > 4000L) {
             diagLastJumpDumpAtMs = now;
             StringBuilder sb = new StringBuilder();
             sb.append("ABPV: JUMP-DETECTED prevPosMs=").append(prev)
