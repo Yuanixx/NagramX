@@ -24,6 +24,7 @@ import android.opengl.EGLContext;
 import android.os.Build;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.SystemClock;
 import android.text.TextUtils;
 import android.util.Base64;
 import android.util.LongSparseArray;
@@ -46,6 +47,7 @@ import androidx.media3.common.PlaybackParameters;
 import androidx.media3.common.Player;
 import androidx.media3.exoplayer.SeekParameters;
 import androidx.media3.common.Tracks;
+import androidx.media3.common.Timeline;
 import androidx.media3.exoplayer.analytics.AnalyticsListener;
 import androidx.media3.extractor.ExtractorsFactory;
 import androidx.media3.common.AudioAttributes;
@@ -267,6 +269,11 @@ public class VideoPlayer implements Player.Listener, AnalyticsListener, Notifica
     private volatile int recoveryGeneration = -1;
     private volatile int prepareGeneration = 0;
 
+    // Observe-only Player-internal diagnostics (see PlayerDiag: log lines). No behavior change.
+    private volatile long diagLastStateAtMs = -1L;
+    private volatile long diagLastTimelineChangeAtMs = -1L;
+    private volatile long diagLastPrepareAtMs = -1L;
+
     private Uri currentUri;
 
     private boolean videoPlayerReady;
@@ -423,6 +430,7 @@ public class VideoPlayer implements Player.Listener, AnalyticsListener, Notifica
 
     public void preparePlayerLoop(Uri videoUri, String videoType, Uri audioUri, String audioType) {
         prepareGeneration++;
+        diagLastPrepareAtMs = SystemClock.elapsedRealtime();
         this.videoQualities = null;
         this.videoQualityToSelect = null;
         this.videoUri = videoUri;
@@ -509,6 +517,7 @@ public class VideoPlayer implements Player.Listener, AnalyticsListener, Notifica
 
     public void preparePlayer(Uri uri, String type, int priority, long videoByteOffset) {
         prepareGeneration++;
+        diagLastPrepareAtMs = SystemClock.elapsedRealtime();
         this.videoQualities = null;
         this.videoQualityToSelect = null;
         this.videoUri = uri;
@@ -532,6 +541,7 @@ public class VideoPlayer implements Player.Listener, AnalyticsListener, Notifica
 
     public void preparePlayer(ArrayList<Quality> qualities, Quality select) {
         prepareGeneration++;
+        diagLastPrepareAtMs = SystemClock.elapsedRealtime();
         this.videoQualities = qualities;
         this.videoQualityToSelect = select;
         this.videoUri = null;
@@ -1895,6 +1905,18 @@ public class VideoPlayer implements Player.Listener, AnalyticsListener, Notifica
 
     @Override
     public void onPlayerStateChanged(boolean playWhenReady, int playbackState) {
+        long prevT = diagLastStateAtMs;
+        diagLastStateAtMs = SystemClock.elapsedRealtime();
+        if (player != null) {
+            diagPlayer("STATE " + diagStateName(playbackState),
+                    "from=" + (prevT < 0 ? "?" : (diagLastStateAtMs - prevT) + "ms ago")
+                    + " pwr=" + playWhenReady
+                    + " suppress=" + player.getPlaybackSuppressionReason()
+                    + " pos=" + player.getCurrentPosition()
+                    + " item=" + player.getCurrentMediaItemIndex()
+                    + " dur=" + player.getDuration()
+                    + " timeline=" + (player.getCurrentTimeline() != null ? player.getCurrentTimeline().getWindowCount() : -1));
+        }
         maybeReportPlayerState();
         if (playWhenReady && playbackState == Player.STATE_READY && !isMuted() && shouldPauseOther) {
             NotificationCenter.getGlobalInstance().postNotificationName(NotificationCenter.playerDidStartPlaying, this);
@@ -1929,11 +1951,63 @@ public class VideoPlayer implements Player.Listener, AnalyticsListener, Notifica
 
     @Override
     public void onPositionDiscontinuity(Player.PositionInfo oldPosition, Player.PositionInfo newPosition, @Player.DiscontinuityReason int reason) {
+        diagPlayer("DISCONT " + diagReasonName(reason),
+                "oldPos=" + (oldPosition != null ? oldPosition.positionMs : -1)
+                + " newPos=" + (newPosition != null ? newPosition.positionMs : -1)
+                + " oldItem=" + (oldPosition != null ? oldPosition.mediaItemIndex : -1)
+                + " newItem=" + (newPosition != null ? newPosition.mediaItemIndex : -1)
+                + " state=" + diagStateName(player != null ? player.getPlaybackState() : Player.STATE_IDLE)
+                + " pos=" + (player != null ? player.getCurrentPosition() : -1));
         if (reason == Player.DISCONTINUITY_REASON_AUTO_TRANSITION) {
             repeatCount++;
         } else if (reason == Player.DISCONTINUITY_REASON_SEEK || reason == Player.DISCONTINUITY_REASON_SEEK_ADJUSTMENT) {
             notifySeekFinished();
         }
+    }
+
+    @Override
+    public void onTimelineChanged(Timeline timeline, int reason) {
+        diagLastTimelineChangeAtMs = SystemClock.elapsedRealtime();
+        diagPlayer("TIMELINE", "reason=" + reason
+                + " windows=" + (timeline != null ? timeline.getWindowCount() : -1)
+                + " pos=" + (player != null ? player.getCurrentPosition() : -1));
+    }
+
+    // Observe-only. Emits a single line with a monotonic timestamp (SystemClock.elapsedRealtime,
+    // same clock base as PhotoViewer's ABPV t=), the ExoPlayer instance identity, generation and
+    // timeline/prepare timestamps. Never touches playback state. detail is appended verbatim.
+    private void diagPlayer(String tag, String detail) {
+        try {
+            FileLog.d("PlayerDiag: " + tag
+                    + " t=" + SystemClock.elapsedRealtime()
+                    + " pid=" + (player != null ? System.identityHashCode(player) : 0)
+                    + " gen=" + prepareGeneration
+                    + " timelineT=" + diagLastTimelineChangeAtMs
+                    + " prepareT=" + diagLastPrepareAtMs
+                    + (detail != null ? " " + detail : ""));
+        } catch (Throwable ignore) {
+        }
+    }
+
+    private static String diagStateName(int s) {
+        return switch (s) {
+            case Player.STATE_IDLE -> "IDLE";
+            case Player.STATE_BUFFERING -> "BUFFERING";
+            case Player.STATE_READY -> "READY";
+            case Player.STATE_ENDED -> "ENDED";
+            default -> "STATE_" + s;
+        };
+    }
+
+    private static String diagReasonName(int r) {
+        return switch (r) {
+            case Player.DISCONTINUITY_REASON_AUTO_TRANSITION -> "AUTO_TRANSITION";
+            case Player.DISCONTINUITY_REASON_SEEK -> "SEEK";
+            case Player.DISCONTINUITY_REASON_SEEK_ADJUSTMENT -> "SEEK_ADJUSTMENT";
+            case Player.DISCONTINUITY_REASON_INTERNAL -> "INTERNAL";
+            case Player.DISCONTINUITY_REASON_REMOVE -> "REMOVE";
+            default -> "REASON_" + r;
+        };
     }
 
     // Called immediately before an internal error-recovery prepare(). Records the position and
