@@ -1152,7 +1152,7 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
     private static long diagLastObservedPosAtMs = 0L;
     private static long diagLastJumpDumpAtMs = 0L;
     private static volatile long diagLastFunnelTargetMs = -1L; // last funnel seek target; distinguishes intended seek-to-start
-    private static volatile long diagLastFunnelDoc = -1L;      // doc hash of that funnel seek (no business id/url)
+    private static volatile String diagLastFunnelDoc = null;   // doc hash of that funnel seek (no business id/url)
     private static volatile boolean diagGestureActive = false; // logged only; NOT a veto (jump-back follows the gesture)
     private static volatile long diagGestureActiveUntilMs = 0L;
     // ---- END JUMP-DETECTED ring buffer ----
@@ -24783,7 +24783,7 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
         boolean gesture = diagGestureActive && now < diagGestureActiveUntilMs;
         boolean jumpToNearZero = posMs < 10_000L
                 && diagLastFunnelTargetMs > posMs + 30_000L
-                && diagLastFunnelDoc == doc;
+                && Objects.equals(diagLastFunnelDoc, doc);
         // The real jump-back follows a user gesture by ~150ms, so a gesture window must NOT
         // veto it. Instead: if the most recent funnel seek to this doc target was a normal
         // position, a fall to near-zero is an unintended fallback, not a deliberate seek-to-start.
