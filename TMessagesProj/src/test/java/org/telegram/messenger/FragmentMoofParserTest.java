@@ -86,6 +86,7 @@ public final class FragmentMoofParserTest {
         audio.id = 2;
         audio.timescale = 48_000;
         audio.video = false;
+        audio.audio = true;
         audio.defaultDuration = 1_024;
 
         FragmentMoofParser.Track subtitle = new FragmentMoofParser.Track();
