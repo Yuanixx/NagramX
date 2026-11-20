@@ -808,7 +808,7 @@ public class FileLoadOperation {
             }
             return getDownloadedLengthFromOffsetInternal(ranges, offset, length);
         } catch (Throwable e) {
-            return 0;
+            return -1L;
         }
     }
 
