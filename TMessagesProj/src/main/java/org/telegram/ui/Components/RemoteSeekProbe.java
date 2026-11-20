@@ -63,9 +63,7 @@ public final class RemoteSeekProbe {
     /** 整个探测（不含调用方后续动作）的墙钟预算。 */
     private static final long TOTAL_BUDGET_MS = 12000L;
     /** 单次阻塞读取的超时。 */
-    private static final long FETCH_TIMEOUT_MS = 2000L;
-    /** 单次多块抓取的总预算。 */
-    private static final long FETCH_BUDGET_MS = 3000L;
+    private static final long FETCH_TIMEOUT_MS = 3000L;
 
     /**
      * Remote定位到Probe。
