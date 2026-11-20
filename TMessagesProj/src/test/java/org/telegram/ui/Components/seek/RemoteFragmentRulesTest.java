@@ -20,7 +20,10 @@ public final class RemoteFragmentRulesTest {
                 "latest fragment at/before target");
         check(RemoteFragmentRules.bestAtOrBefore(times, 4, 20 * S) == 2,
                 "exact fragment start is included");
-        check(RemoteFragmentRules.bestAtOrBefore(times, 4, 5 * S) == -1,
+        check(RemoteFragmentRules.bestAtOrBefore(times, 4, 5 * S) == 0,
+                "earlier fragment at time zero is still at/before the target");
+        long[] laterOnly = {10 * S, 20 * S, 30 * S};
+        check(RemoteFragmentRules.bestAtOrBefore(laterOnly, 3, 5 * S) == -1,
                 "no fragment at/before target is reported as -1");
     }
 
