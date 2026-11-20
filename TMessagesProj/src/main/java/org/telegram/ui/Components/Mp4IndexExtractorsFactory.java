@@ -75,6 +75,8 @@ public final class Mp4IndexExtractorsFactory implements ExtractorsFactory {
     private double seekDurationSec;
     @Nullable
     private volatile SeekPoint remotePoint;
+    @Nullable
+    private volatile SeekPoint remoteNextPoint;
     private volatile long remoteSpanUs;
 
     /**
@@ -213,6 +215,7 @@ public final class Mp4IndexExtractorsFactory implements ExtractorsFactory {
                                             probed.point.position, probed.size,
                                             docSize, Math.max(0L, coveredEndBytes))) {
                                 remotePoint = probed.point;
+                                remoteNextPoint = probed.nextPoint;
                                 remoteSpanUs = probed.spanUs;
                                 Log.w(TAG, "remote probe accepted start=" + start
                                         + " span=" + probed.spanUs + " pos=" + probed.point.position);
@@ -242,7 +245,7 @@ public final class Mp4IndexExtractorsFactory implements ExtractorsFactory {
             if (extractors[i] instanceof FragmentedMp4Extractor) {
                 // Always wrap, even 使用  空值 索引: keeps  path identical 用于 both cases.
                 extractors[i] = new ChunkIndexInjectingExtractor(extractors[i], idx, remotePoint,
-                        remoteSpanUs, expectedDurationSec);
+                        remoteNextPoint, remoteSpanUs, expectedDurationSec);
                 n++;
             }
         }
@@ -258,15 +261,18 @@ public final class Mp4IndexExtractorsFactory implements ExtractorsFactory {
         private final ChunkIndex chunkIndex;
         @Nullable
         private final SeekPoint remotePoint;
+        @Nullable
+        private final SeekPoint remoteNextPoint;
         private final long remoteSpanUs;
         private final double durationSec;
 
         ChunkIndexInjectingExtractor(Extractor delegate, @Nullable ChunkIndex chunkIndex,
-                                     @Nullable SeekPoint remotePoint, long remoteSpanUs,
-                                     double durationSec) {
+                                     @Nullable SeekPoint remotePoint, @Nullable SeekPoint remoteNextPoint,
+                                     long remoteSpanUs, double durationSec) {
             this.delegate = delegate;
             this.chunkIndex = chunkIndex;
             this.remotePoint = remotePoint;
+            this.remoteNextPoint = remoteNextPoint;
             this.remoteSpanUs = remoteSpanUs;
             this.durationSec = durationSec;
         }
@@ -303,7 +309,7 @@ public final class Mp4IndexExtractorsFactory implements ExtractorsFactory {
                         output.seekMap(seekMap);
                     } else if (remotePoint != null) {
                         output.seekMap(new RemoteExtendedSeekMap(chunkIndex, remotePoint,
-                                remoteSpanUs, (long) (durationSec * 1000000.0)));
+                                remoteNextPoint, remoteSpanUs, (long) (durationSec * 1000000.0)));
                     } else {
                         output.seekMap(chunkIndex);
                     }
@@ -341,13 +347,16 @@ public final class Mp4IndexExtractorsFactory implements ExtractorsFactory {
         @Nullable
         private final ChunkIndex local;
         private final SeekPoint remote;
+        @Nullable
+        private final SeekPoint remoteNext;
         private final long remoteSpanUs;
         private final long durationUs;
 
-        RemoteExtendedSeekMap(@Nullable ChunkIndex local, SeekPoint remote, long remoteSpanUs,
-                              long durationUs) {
+        RemoteExtendedSeekMap(@Nullable ChunkIndex local, SeekPoint remote,
+                              @Nullable SeekPoint remoteNext, long remoteSpanUs, long durationUs) {
             this.local = local;
             this.remote = remote;
+            this.remoteNext = remoteNext;
             this.remoteSpanUs = remoteSpanUs;
             this.durationUs = durationUs;
         }
@@ -375,6 +384,11 @@ public final class Mp4IndexExtractorsFactory implements ExtractorsFactory {
             }
             if (SeekCoverageRules.coversRemote(remote.timeUs,
                     remote.timeUs + remoteSpanUs, timeUs)) {
+                if (remoteNext != null && remoteNext.timeUs > remote.timeUs
+                        && remoteNext.timeUs == remote.timeUs + remoteSpanUs
+                        && remoteNext.position > remote.position) {
+                    return new SeekPoints(remote, remoteNext);
+                }
                 return new SeekPoints(remote);
             }
             // Never present  stale remote point 作为 valid 用于  unrelated time. When there 是
