@@ -781,6 +781,37 @@ public class FileLoadOperation {
         }
     }
 
+    /**
+     * Non-blocking, conservative availability check for streaming reads.
+     *
+     * Unlike getDownloadedLengthFast(), this method never treats an absent range
+     * snapshot as proof that bytes are present. A null snapshot means "unknown",
+     * so callers must wait for a later download notification and check again.
+     */
+    public long getKnownDownloadedLengthFast(final long offset, final long length) {
+        if (length <= 0 || offset < 0) {
+            return 0;
+        }
+        if (state == stateFinished) {
+            return Math.min(length, Math.max(0L, totalBytesCount - offset));
+        }
+        try {
+            final ArrayList<Range> ranges = notLoadedBytesRangesCopy;
+            if (ranges == null) {
+                return 0;
+            }
+            if (ranges.isEmpty()) {
+                if (totalBytesCount > 0 && downloadedBytes >= totalBytesCount) {
+                    return Math.min(length, Math.max(0L, totalBytesCount - offset));
+                }
+                return 0;
+            }
+            return getDownloadedLengthFromOffsetInternal(ranges, offset, length);
+        } catch (Throwable e) {
+            return 0;
+        }
+    }
+
     protected long[] getDownloadedLengthFromOffset(final long offset, final long length) {
         final CountDownLatch countDownLatch = new CountDownLatch(1);
         final long[] result = new long[2];
