@@ -192,12 +192,11 @@ public final class RemoteSeekProbe {
                 final long guess = probe == 0
                         ? Math.max(lo, Math.min(hi, initialGuess))
                         : lo + (hi - lo) / 2L;
-                final long start = Math.max(moovEnd, guess - PROBE_BYTES / 2L);
-                // Use one Telegram 1 MiB part per probe. The range fetcher normally
-                // uses four 256 KiB parts, each separated by the account-wide
-                // playback-yield gate; that made the six-probe / 12 s budget
-                // effectively permit only two or three observations.
-                final long dataOffset = alignDown(start, PROBE_BYTES);
+                // Use the 1 MiB part containing the current byte-space guess.
+                // The range fetcher normally uses four 256 KiB parts, each
+                // separated by the account-wide playback-yield gate; a single
+                // legal 1 MiB part makes the existing probe budget useful.
+                final long dataOffset = alignDown(guess, PROBE_BYTES);
                 final long probeLength = Math.min((long) PROBE_BYTES, fileLength - dataOffset);
                 if (probeLength <= 0L) {
                     break;
