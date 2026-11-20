@@ -186,6 +186,12 @@ public class FileStreamLoadOperation extends BaseDataSource implements FileLoadO
                 }
 
                 long availableLength = active.getKnownDownloadedLengthFast(currentOffset, readLength);
+                if (availableLength < 0L) {
+                    // No conservative snapshot yet. Ask the authoritative stage-queue
+                    // range list once; do not wait for a notification that may already
+                    // have happened before this read began.
+                    availableLength = active.getDownloadedLengthFromOffset(currentOffset, readLength)[0];
+                }
                 if (availableLength <= 0 && active.isFinished()) {
                     // Once finished, the range bitmap may be gone. The final file length is then
                     // the authoritative readable boundary.
