@@ -87,6 +87,10 @@ jobs:
           java -cp /tmp/preview-rules org.telegram.ui.Components.seek.SeekCoverageRulesTest
           java -cp /tmp/preview-rules org.telegram.ui.Components.seek.RemoteFragmentRulesTest
           java -cp /tmp/preview-rules org.telegram.ui.Components.seek.PendingSeekRulesTest
+          javac -d /tmp/preview-rules \
+            TMessagesProj/src/main/java/org/telegram/messenger/FragmentMoofParser.java \
+            TMessagesProj/src/test/java/org/telegram/messenger/FragmentMoofParserTest.java
+          java -cp /tmp/preview-rules org.telegram.messenger.FragmentMoofParserTest
       - name: Set up Ccache
         uses: hendrikmuhs/ccache-action@v1.2.23
         with:
