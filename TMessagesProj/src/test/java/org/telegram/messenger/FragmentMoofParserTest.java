@@ -48,7 +48,7 @@ public final class FragmentMoofParserTest {
 
     private static void testPerSampleFlagsOverrideFirstSampleFlags() throws Exception {
         Map<Integer, FragmentMoofParser.Track> tracks = tracks();
-        byte[] video = traf(1, 0, 180_000L, 0x20, 0x404, 0, 0, NON_SYNC);
+        byte[] video = traf(1, 0, 180_000L, 0x20, 0x404, 0, NON_SYNC);
         List<FragmentMoofParser.Fragment> fragments =
                 FragmentMoofParser.parse(video, tracks);
         check(fragments != null && fragments.size() == 1,
