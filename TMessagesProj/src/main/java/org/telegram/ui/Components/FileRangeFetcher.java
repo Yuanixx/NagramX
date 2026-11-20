@@ -432,12 +432,11 @@ public final class FileRangeFetcher {
         // Fixed blocks, aligned down, always requested in full.
         //
         // The server accepts only limits that divide 1MB evenly (4K, 8K ... 1M),
-        // so a limit derived from the keyframe size — say 81920, which is 4K
-        // aligned but does not divide 1MB — comes back LIMIT_INVALID. Every
-        // failed request in the last capture had exactly that shape. Asking for
-        // a whole 256KB block removes the whole class of problem, and the server
-        // simply returns fewer bytes near the end of the file.
-        final long aligned = (offset / requestBlockBytes) * requestBlockBytes();
+        // so a limit derived from the requested byte length — say 81920, which
+        // is 4K aligned but does not divide 1MB — comes back LIMIT_INVALID.
+        // Callers may choose a larger legal block to reduce serialized range
+        // requests, while the global playback-yield gate remains unchanged.
+        final long aligned = (offset / requestBlockBytes) * requestBlockBytes;
         final int delta = (int) (offset - aligned);
 
         // How many whole blocks does the caller need? A keyframe can easily
