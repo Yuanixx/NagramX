@@ -175,7 +175,10 @@ public final class RemoteSeekProbe {
             final double durationUs = durationSec * 1_000_000.0;
             final double targetFraction = Math.max(0.0,
                     Math.min(1.0, targetTimeUs / durationUs));
-            final long initialGuess = lo + (long) ((hi - lo) * targetFraction);
+            final long byteSpan = hi - lo;
+            final long estimatedDelta = Math.min(byteSpan,
+                    Math.max(0L, (long) (byteSpan * targetFraction)));
+            final long initialGuess = lo + estimatedDelta;
 
             for (int probe = 0; probe < MAX_PROBES && lo < hi; probe++) {
                 // 每次请求前重新计算剩余预算；rate limit 的等待也可能吃掉时间。
