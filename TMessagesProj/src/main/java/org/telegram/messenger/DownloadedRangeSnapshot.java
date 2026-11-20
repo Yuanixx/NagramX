@@ -32,15 +32,12 @@ final class DownloadedRangeSnapshot {
         this.missingEnds = ends.clone();
         this.totalBytes = totalBytes;
         this.complete = complete;
-        long previousEnd = 0;
         for (int i = 0; i < missingStarts.length; i++) {
             long start = missingStarts[i];
             long end = missingEnds[i];
-            if (start < 0 || end < start || end > totalBytes
-                    || (i > 0 && start < previousEnd)) {
-                throw new IllegalArgumentException("Unsorted or invalid missing range at " + i);
+            if (start < 0 || end < start || end > totalBytes) {
+                throw new IllegalArgumentException("Invalid missing range at " + i);
             }
-            previousEnd = end;
         }
     }
 
@@ -63,24 +60,21 @@ final class DownloadedRangeSnapshot {
             return -1;
         }
 
-        // First missing interval whose end is strictly after the requested offset.
-        int low = 0;
-        int high = missingEnds.length;
-        while (low < high) {
-            int mid = (low + high) >>> 1;
-            if (missingEnds[mid] <= offset) {
-                low = mid + 1;
-            } else {
-                high = mid;
+        // The legacy range mutators do not promise list ordering, so derive the
+        // nearest missing boundary without relying on array order.
+        long nearestMissingStart = Long.MAX_VALUE;
+        for (int i = 0; i < missingStarts.length; i++) {
+            final long missingStart = missingStarts[i];
+            final long missingEnd = missingEnds[i];
+            if (missingStart <= offset && offset < missingEnd) {
+                return 0;
+            }
+            if (missingStart > offset && missingStart < nearestMissingStart) {
+                nearestMissingStart = missingStart;
             }
         }
-        if (low == missingStarts.length) {
-            return boundedLength;
-        }
-        final long missingStart = missingStarts[low];
-        if (missingStart <= offset) {
-            return 0;
-        }
-        return Math.min(boundedLength, missingStart - offset);
+        return nearestMissingStart == Long.MAX_VALUE
+                ? boundedLength
+                : Math.min(boundedLength, nearestMissingStart - offset);
     }
 }
