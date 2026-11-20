@@ -131,9 +131,14 @@ public class VideoPlayer implements Player.Listener, AnalyticsListener, Notifica
         void onStateChanged(boolean playWhenReady, int playbackState);
 
         /**
-         * Identity-carrying overload. The generation is captured when the callback is produced,
-         * not read later by the consumer, so a late callback from an older prepare of a reused
-         * player cannot pass an identity check.
+         * 带身份的回调重载。
+         *
+         * generation 必须在“回调产生时”由 VideoPlayer 传入，而不是让消费方在回调到达时
+         * 再去读 player.getPrepareGeneration()。原因：同一个 VideoPlayer 包装对象可能被
+         * 复用并再次 prepare；消费时读到的是当前 generation，旧 prepare 的迟到回调
+         * 会伪装成当前回调。只有产生时捕获的 generation 才能证明回调来源。
+         *
+         * 未覆写的其他 delegate 实现继续走下面这个不带身份的默认方法，零改动兼容。
          */
         default void onStateChanged(VideoPlayer player, int generation,
                                     boolean playWhenReady, int playbackState) {
@@ -279,7 +284,11 @@ public class VideoPlayer implements Player.Listener, AnalyticsListener, Notifica
     private volatile int recoveryGeneration = -1;
     private volatile int prepareGeneration = 0;
 
-    /** Generation of the current prepare; used to bind a deferred seek to its owner player. */
+    /**
+     * 当前 prepare 的代次。每次 preparePlayer* 都会递增。
+     * PhotoViewer 用它把待重放 seek 绑定到产生它的那一次 prepare；
+     * 旧 prepare 即使复用同一个包装对象，generation 也不同，无法消费新目标。
+     */
     public int getPrepareGeneration() {
         return prepareGeneration;
     }
@@ -2158,6 +2167,7 @@ public class VideoPlayer implements Player.Listener, AnalyticsListener, Notifica
         int playbackState = player.getPlaybackState();
         if (lastReportedPlayWhenReady != playWhenReady || lastReportedPlaybackState != playbackState) {
             if (delegate != null) {
+                // 把产生回调时的实例和代次一起传出去，消费方据此判断是否来自当前 prepare。
                 delegate.onStateChanged(this, prepareGeneration, playWhenReady, playbackState);
             }
             lastReportedPlayWhenReady = playWhenReady;

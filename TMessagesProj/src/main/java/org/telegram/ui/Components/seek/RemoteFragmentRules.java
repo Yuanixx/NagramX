@@ -1,15 +1,14 @@
 package org.telegram.ui.Components.seek;
 
-/** Pure selection/validation rules for remote fragmented-MP4 probes. */
+/** 纯规则：远端片段选择、时间区间证明与拒绝条件。 */
 public final class RemoteFragmentRules {
 
     private RemoteFragmentRules() {
     }
 
     /**
-     * Index of the latest fragment starting at or before the target, or -1 when every
-     * fragment starts after the target. A later fragment is only a search bound; it is
-     * never a seek position.
+     * 选择“起始时间不晚于目标”的最后一个片段。
+     * 返回 -1 表示窗口里没有可用片段；晚于目标的片段只能作为二分边界，不能作为落点。
      */
     public static int bestAtOrBefore(long[] timesUs, int count, long targetUs) {
         int best = -1;
@@ -22,29 +21,34 @@ public final class RemoteFragmentRules {
     }
 
     /**
-     * Span of the chosen fragment derived from the next fragment's tfdt. Returns -1 when
-     * no later fragment exists in the window: the probe must then fail explicitly instead
-     * of inventing a duration.
+     * 用同一视频轨道的下一个片段时间推导区间跨度。
+     * 窗口内没有后继、时间重复或乱序时返回 -1：跨度无法证明，探测必须明确失败。
      */
     public static long spanAfter(long[] timesUs, int count, int index) {
-        if (index < 0 || index >= count) {
+        if (index < 0 || index >= count || count <= 0) {
             return -1L;
         }
         long next = Long.MAX_VALUE;
         for (int i = 0; i < count; i++) {
-            if (timesUs[i] > timesUs[index] && timesUs[i] < next) {
+            if (timesUs[i] <= timesUs[index]) {
+                continue;
+            }
+            if (next == Long.MAX_VALUE || timesUs[i] < next) {
                 next = timesUs[i];
             }
         }
-        return next == Long.MAX_VALUE ? -1L : next - timesUs[index];
+        if (next == Long.MAX_VALUE || next <= timesUs[index]) {
+            return -1L;
+        }
+        return next - timesUs[index];
     }
 
-    /** The target must lie inside the proved fragment, not merely near its start. */
+    /** 目标必须落在已证明的左闭右开区间内，不能只靠“离起点不太远”。 */
     public static boolean containsTarget(long startUs, long spanUs, long targetUs) {
-        return spanUs > 0L && targetUs >= startUs && targetUs <= startUs + spanUs;
+        return spanUs > 0L && targetUs >= startUs && targetUs < startUs + spanUs;
     }
 
-    /** tfdt at or beyond Long.MAX_VALUE is not a usable decode time. */
+    /** u64 解析出的 tfdt 若溢出成负数，必须拒绝而不是当成有效解码时间。 */
     public static boolean validDecodeTime(long ticks) {
         return ticks >= 0L;
     }

@@ -26,15 +26,19 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * Per-player {@link ExtractorsFactory} that injects a prebuilt {@link ChunkIndex} into every
- * {@link FragmentedMp4Extractor} instance it creates. Media3 removed the fork's
- * {@code setChunkIndex} hook, so the index is injected by wrapping {@link ExtractorOutput}:
- * until the file provides its own Sidx (a real {@link ChunkIndex}), the extractor's fallback
- * seek map is replaced by the prebuilt index.
+ * 每个播放器实例一个的 extractors 工厂。
  *
- * The index is built lazily on ExoPlayer's loader thread (createExtractors), never on the UI
- * thread. PhotoViewer only resolves local paths / document metadata synchronously and creates one
- * factory per prepare; there is no asynchronous UI callback and therefore no stale-player race.
+ * 为什么包装 ExtractorOutput：media3 没有旧 fork 的 setChunkIndex 钩子，
+ * 只能在 extractor 提交 seekMap 时，把库的 fallback（不可 seek）替换成我们准备好的索引。
+ * 文件自带真实 sidx 时优先保留库自己的 ChunkIndex，因为那是服务端认证过的索引。
+ *
+ * 三个时间概念必须严格分开，混用就会重现“拖到未下载位置跳回开头”：
+ * 1) declaredDurationUs：媒体声明的完整时长，只用于显示和时间轴，不代表能 seek 到任意位置；
+ * 2) localCoveredEndUs：本地分片索引实际覆盖的时间终点（最后 chunk 起点 + 时长）；
+ * 3) remoteProbeInterval：远端探测证明过的 [起点, 终点) 区间，只对目标所在的那个片段有效。
+ *
+ * 索引在 ExoPlayer 的 loader 线程（createExtractors）里惰性构建，绝不在 UI 线程扫描或联网。
+ * PhotoViewer 每次 prepare 新建一个工厂，探测结果只属于这一次 prepare 的目标。
  */
 public final class Mp4IndexExtractorsFactory implements ExtractorsFactory {
 
@@ -65,9 +69,11 @@ public final class Mp4IndexExtractorsFactory implements ExtractorsFactory {
     private volatile long remoteSpanUs;
 
     /**
-     * Enables remote fragment probing for a target time that the local (partial) index does
-     * not cover yet. Must be set before the first createExtractors call. All network work
-     * stays on ExoPlayer's loader thread inside index().
+     * 为本次 prepare 设置需要探测的远端目标。必须在第一次 createExtractors 之前调用。
+     *
+     * 为什么由 PhotoViewer 传入而不是工厂自己猜：目标来自用户拖动/续播恢复，
+     * 属于 PhotoViewer 的待重放 seek；工厂只在 loader 线程使用它发探测请求。
+     * 所有网络工作都留在 index() 里，UI 线程不会阻塞。
      */
     public void setSeekTarget(@Nullable TLRPC.Document document, int account,
                               long targetTimeUs, double durationSec) {
@@ -110,15 +116,18 @@ public final class Mp4IndexExtractorsFactory implements ExtractorsFactory {
         return stamp(delegate.createExtractors(uri, responseHeaders));
     }
 
-    /** Side-effect-free: true once this player has a resolved seek map. */
+    /**
+     * 无副作用的查询：本次 prepare 是否已经拿到可用的 seek 映射。
+     * 不能在这里触发探测，否则 UI 线程会被网络请求阻塞。
+     */
     public boolean hasIndex() {
         return attempted && (resolvedIndex != null || remotePoint != null);
     }
 
     /**
-     * True when the current map can resolve this time to a real byte position. A probed
-     * remote point is only valid near the time it was probed for; asking for a different
-     * remote time must trigger a fresh probe (and therefore a fresh prepare).
+     * 当前映射能否把目标时间解析成真实字节位置。
+     * 本地只认索引实际覆盖的区间；远端只认探测证明过的左闭右开区间。
+     * 不再用固定秒数容差，超出区间必须重新探测（并因此重新 prepare）。
      */
     public boolean canSeekTo(long timeUs) {
         if (!attempted) {
@@ -126,6 +135,7 @@ public final class Mp4IndexExtractorsFactory implements ExtractorsFactory {
         }
         ChunkIndex local = resolvedIndex;
         if (SeekCoverageRules.coversLocal(local != null ? local.timesUs : null,
+                local != null ? local.durationsUs : null,
                 local != null ? local.length : 0, timeUs)) {
             return true;
         }
@@ -134,6 +144,15 @@ public final class Mp4IndexExtractorsFactory implements ExtractorsFactory {
                 remote.timeUs, remote.timeUs + remoteSpanUs, timeUs);
     }
 
+    /**
+     * 惰性解析索引：只在 loader 线程执行一次（attempted 保证幂等）。
+     *
+     * 顺序：先按文档 id 查持久化索引（文件删掉后仍可用），再扫描本地临时文件；
+     * 都拿不到可用覆盖时才联网探测目标片段。
+     *
+     * 注意 resolvedIndex 可能为 null（没有任何索引），此时不能把“没有索引”缓存成
+     * “可 seek”——canSeekTo 会如实返回 false，调用方因此延迟 seek 而不是交给 media3 归零。
+     */
     @Nullable
     private ChunkIndex index() {
         if (prebuiltIndex != null) {
@@ -160,13 +179,19 @@ public final class Mp4IndexExtractorsFactory implements ExtractorsFactory {
                         Log.w(TAG, "index missing doc=" + docId + " size=" + docSize
                                 + " (no persisted copy, no local file)");
                     }
-                    final long coveredEndUs = SeekCoverageRules.coveredUs(
-                            idx != null ? idx.timesUs : null, idx != null ? idx.length : 0);
+                    // 本地索引的时间覆盖终点与字节覆盖边界必须分别计算，绝不能混用单位。
+                    // 目标超出时间覆盖才启动远端探测；探测结果还要通过字节边界校验。
+                    final long coveredEndUs = SeekCoverageRules.coveredEndUs(
+                            idx != null ? idx.timesUs : null,
+                            idx != null ? idx.durationsUs : null,
+                            idx != null ? idx.length : 0);
                     if (seekTargetTimeUs > 0 && seekDocument != null
                             && (idx == null || seekTargetTimeUs > coveredEndUs)) {
                         RemoteSeekProbe.ProbeResult probed = RemoteSeekProbe.find(
                                 seekAccount, seekDocument, path, docSize,
                                 seekTargetTimeUs, seekDurationSec);
+                        // 只有“目标落在证明区间内 + 片段在文件内且位于本地已覆盖字节之后”
+                        // 才接受远端结果；否则明确拒绝，绝不把低精度猜测伪装成成功。
                         if (probed != null && probed.point != null) {
                             long start = probed.point.timeUs;
                             long end = start + probed.spanUs;
@@ -196,6 +221,11 @@ public final class Mp4IndexExtractorsFactory implements ExtractorsFactory {
         return resolvedIndex;
     }
 
+    /**
+     * 给DefaultExtractorsFactory 产出的每个 FragmentedMp4Extractor 套一层包装。
+     * 即使 index 和远端点都为空也要包装，这样有索引和无索引走完全相同的代码路径，
+     * 避免“某条路径忘了注入”导致静默归零。
+     */
     private Extractor[] stamp(Extractor[] extractors) {
         ChunkIndex idx = index();
         int n = 0;
@@ -249,6 +279,12 @@ public final class Mp4IndexExtractorsFactory implements ExtractorsFactory {
                     output.endTracks();
                 }
 
+                /**
+                 * extractor 提交 seekMap 时做替换：
+                 * - 真实 sidx 产生的 ChunkIndex 最权威，原样放行；
+                 * - 其余情况（库的 unseekable fallback）用我们的本地/远端组合映射替换。
+                 * 这样 media3 看到的永远是 isSeekable()==true，不会把 seek 解析成 0。
+                 */
                 @Override
                 public void seekMap(SeekMap seekMap) {
                     // A ChunkIndex emitted by the extractor comes from a real Sidx and is more
@@ -287,7 +323,10 @@ public final class Mp4IndexExtractorsFactory implements ExtractorsFactory {
         }
     }
 
-    /** Local index for already-downloaded bytes plus one probed point further ahead. */
+    /**
+     * 组合 seek 映射：本地索引负责已下载范围，远端探测结果只负责它自己证明过的区间。
+     * 两者都不覆盖的时间不得伪造可用 SeekPoint。
+     */
     private static final class RemoteExtendedSeekMap implements SeekMap {
 
         @Nullable
@@ -315,6 +354,10 @@ public final class Mp4IndexExtractorsFactory implements ExtractorsFactory {
         }
 
         @Override
+        /**
+         * 本地区间走本地索引；远端区间走探测到的片段起点；
+         * 都不覆盖时没有有效映射，调用方的 canSeekTo 会挡住这次 seek。
+         */
         public SeekPoints getSeekPoints(long timeUs) {
             if (SeekCoverageRules.coversLocal(local != null ? local.timesUs : null,
                     local != null ? local.length : 0, timeUs)) {

@@ -58,6 +58,9 @@ jobs:
         with:
           distribution: 'temurin'
           java-version: '21'
+      # 先跑纯规则测试（含本次新增的 seek 覆盖/远端片段/待重放状态机规则）。
+      # 任何一项失败都会让该步骤退出码非零，后续 Gradle 构建不会执行，
+      # 避免“测试失败但构建成功”的假通过。
       - name: Check preview rules
         run: |
           mkdir -p /tmp/preview-rules

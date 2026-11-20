@@ -1127,15 +1127,24 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
     private float seekToProgressPending;
     private long seekToProgressSinceMs;
     private boolean logNextReadyPosition;
-    // A streaming fMP4 prepared before its download started has no time-to-byte map. Seeking it
-    // makes media3 clamp the target to t=0 ("jump back to the start"). Remember the real target
-    // and re-prepare once the live .temp exists, so the index factory can build a seek map.
+    // 延迟 seek 的状态。为什么需要这几个字段：
+    // 流式 fMP4 在开始下载前 prepare 时拿不到本地文件，也就没有时间→字节映射；
+    // 这时 media3 会把任何 seek 钳到 t=0（表现为“跳回开头”）。
+    // 正确做法是记住用户真实目标，等下载临时文件出现后重新 prepare，
+    // 让索引工厂有机会构建本地覆盖或远端探测结果，再在新播放器 READY 时重放目标。
+    // owner/generation 保证只有“那次重建产生的新播放器”能消费这个目标；
+    // 旧实例或旧代次的迟到 READY 必须被忽略，否则会清空或错误重放新目标。
     private long pendingStreamSeekMs = -1L;
     private long pendingStreamSeekDocId = -1L;
     private boolean pendingStreamSeekRebuilt;
     @Nullable
     private VideoPlayer pendingStreamSeekOwner;
     private int pendingStreamSeekGeneration = -1;
+    // 单调递增的请求 ID：新拖动覆盖旧目标；旧请求的 READY 即使迟到也不能消费新目标。
+    private long seekRequestIdSeq;
+    private long pendingStreamSeekRequestId = -1L;
+    /** 当前回调产生时的 generation，由带身份的 onStateChanged 重载写入。 */
+    private int lastCallbackGeneration = -1;
     // Last genuine user drag target (ms). Used to restore the real watch position when a
     // near-zero dirty seek is rejected, so the fix never leaves the user stuck at frame 0.
     // Bound to the document id so a target from a previous video can never be replayed on a new one.
@@ -1591,14 +1600,19 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
         if (pendingStreamSeekRebuilt && pendingStreamSeekMs == targetMs && pendingStreamSeekDocId == doc.id) {
             return true;
         }
+        // 新请求覆盖旧请求：只有最后一个目标会存活，A/B 的迟到 READY 无法消费 C。
         pendingStreamSeekMs = targetMs;
         pendingStreamSeekDocId = doc.id;
+        pendingStreamSeekRequestId = ++seekRequestIdSeq;
         pendingStreamSeekRebuilt = false;
         pendingStreamSeekOwner = null;
         pendingStreamSeekGeneration = -1;
         FileLog.d("ABPV: stream seek deferred, re-prepare for index target=" + targetMs);
+        final long requestId = pendingStreamSeekRequestId;
         AndroidUtilities.runOnUIThread(() -> {
-            if (currentMessageObject != null && currentMessageObject.getDocument() != null
+            // 如果这期间用户又拖了一次，旧请求不再触发重建，也不能覆盖新目标的 owner。
+            if (requestId == pendingStreamSeekRequestId
+                    && currentMessageObject != null && currentMessageObject.getDocument() != null
                     && currentMessageObject.getDocument().id == pendingStreamSeekDocId) {
                 onActionClick(false);
                 // Bind the target to the exact player/generation the rebuild created. An
@@ -11123,27 +11137,41 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
             }
         }
         if (playbackState == ExoPlayer.STATE_READY) {
+            // 待重放目标的消费点。
+            // 顺序很重要：先验来源身份（播放器实例 + 回调产生时的 generation + 文档 + 请求 ID），
+            // 再验覆盖，最后才 seek；任何一步失败都不能清空用户目标。
             if (pendingStreamSeekRebuilt && pendingStreamSeekMs >= 0 && videoPlayer != null) {
                 final long target = pendingStreamSeekMs;
+                final long requestId = pendingStreamSeekRequestId;
                 TLRPC.Document doc = currentMessageObject != null ? currentMessageObject.getDocument() : null;
                 final boolean owned = PendingSeekRules.canConsume(
                         pendingStreamSeekRebuilt, pendingStreamSeekOwner, videoPlayer,
-                        pendingStreamSeekGeneration, videoPlayer.getPrepareGeneration(),
-                        pendingStreamSeekDocId, doc != null ? doc.id : -1L);
-                pendingStreamSeekMs = -1L;
-                pendingStreamSeekDocId = -1L;
-                pendingStreamSeekRebuilt = false;
-                pendingStreamSeekOwner = null;
-                pendingStreamSeekGeneration = -1;
+                        pendingStreamSeekGeneration, lastCallbackGeneration,
+                        pendingStreamSeekDocId, doc != null ? doc.id : -1L,
+                        requestId, requestId);
                 if (!owned) {
-                    FileLog.d("ABPV: stream seek ignored, stale owner target=" + target);
+                    // 旧播放器/旧代次/旧文档的 READY：既不能消费，也不能清掉新目标。
+                    FileLog.d("ABPV: stream seek ignored, stale owner target=" + target
+                            + " req=" + requestId);
                 } else if (videoPlayer.hasSeekIndexFor(target)) {
-                    FileLog.d("ABPV: stream seek replay after re-prepare target=" + target);
+                    // 覆盖已证明：交付 seek 成功后才清理这次请求的所有状态。
+                    FileLog.d("ABPV: stream seek replay after re-prepare target=" + target
+                            + " req=" + requestId);
                     videoPlayer.seekTo(target);
+                    pendingStreamSeekMs = -1L;
+                    pendingStreamSeekDocId = -1L;
+                    pendingStreamSeekRequestId = -1L;
+                    pendingStreamSeekRebuilt = false;
+                    pendingStreamSeekOwner = null;
+                    pendingStreamSeekGeneration = -1;
                 } else {
-                    // The re-prepare still has no reliable coverage. Issuing the seek now would
-                    // be clamped to 0 or land at the frontier, so leave playback where it is.
-                    FileLog.d("ABPV: stream seek dropped, no reliable coverage target=" + target);
+                    // 重建后仍没有可靠覆盖：保留用户目标，等待后续可定位事件。
+                    // 不能发 seek（会被钳到 0 或落下载前沿），也不能静默清空目标。
+                    pendingStreamSeekRebuilt = false;
+                    pendingStreamSeekOwner = null;
+                    pendingStreamSeekGeneration = -1;
+                    FileLog.d("ABPV: stream seek deferred, no reliable coverage yet target="
+                            + target + " req=" + requestId);
                 }
             }
             if (logNextReadyPosition && videoPlayer != null) {
@@ -11637,6 +11665,9 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
                     if (player != videoPlayer || generation != videoPlayer.getPrepareGeneration()) {
                         return;
                     }
+                    // 把“回调产生时”的代次保存下来，供 READY 里的 pending 消费校验使用；
+                    // 消费时不能再调用 getPrepareGeneration()，那会读到当前代次。
+                    lastCallbackGeneration = generation;
                     onStateChanged(playWhenReady, playbackState);
                 }
 
