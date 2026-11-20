@@ -160,6 +160,7 @@ public final class RemoteSeekProbe {
             final long moovEnd = moov.offset + moov.data.length;
             final long trackId = track.trackId;
             final long timescale = track.timescale;
+            final long trexDefaultSampleFlags = readTrexDefaultSampleFlags(moov.data, trackId);
 
             // 第二步：在 [moovEnd, fileLength) 上按字节二分。
             // 注意：字节位置和时间不是线性关系（片段大小差异很大），
@@ -214,7 +215,7 @@ public final class RemoteSeekProbe {
                     return null;
                 }
                 Fragment found = nearestFragment(result.data, dataOffset, fileLength,
-                        timescale, trackId, targetTimeUs);
+                        timescale, trackId, targetTimeUs, trexDefaultSampleFlags);
                 if (found == null) {
                     // 窗口落在 mdat 中间或没有完整 moof：向前挪一个窗口继续找。
                     lo = Math.min(hi, dataOffset + result.data.length);
@@ -351,7 +352,8 @@ public final class RemoteSeekProbe {
      * 这样可以避免把跨窗口被截断的 moof 当成有效片段，进而推导出错误跨度。
      */
     private static Fragment nearestFragment(byte[] data, long dataOffset, long fileLength,
-                                             long timescale, long trackId, long targetTimeUs) {
+                                             long timescale, long trackId, long targetTimeUs,
+                                             long trexDefaultSampleFlags) {
         List<Fragment> fragments = new ArrayList<>();
         int position = 0;
         while (position + 8 <= data.length) {
@@ -372,7 +374,10 @@ public final class RemoteSeekProbe {
             byte[] moof = new byte[(int) size];
             System.arraycopy(data, position, moof, 0, moof.length);
             long timeUs = fragmentTimeUs(moof, timescale, trackId);
-            if (timeUs >= 0L) {
+            // The local FragmentIndexBuilder only exposes random-access samples.
+            // Mirror its first-sample sync check for remote fragments; a valid
+            // tfdt on a non-sync fragment is not a safe decoder entry point.
+            if (timeUs >= 0L && hasSyncFirstSample(moof, trackId, trexDefaultSampleFlags)) {
                 Fragment f = new Fragment();
                 f.position = absolute;
                 f.end = absolute + size;
@@ -403,6 +408,186 @@ public final class RemoteSeekProbe {
         // 跨度必须来自同一轨道的后继片段；没有后继或时间乱序时返回 -1，区间无法证明。
         chosen.spanUs = RemoteFragmentRules.spanAfter(times, times.length, best);
         return chosen;
+    }
+
+    /**
+     * Reads trex.default_sample_flags for the selected video track.
+     * A missing trex uses ISO BMFF's zero-valued default, matching the local
+     * FragmentIndexBuilder's handling of absent defaults.
+     */
+    private static long readTrexDefaultSampleFlags(byte[] moov, long trackId) {
+        if (moov == null || moov.length < 16 || !isType(moov, 4, "moov")) {
+            return 0L;
+        }
+        long moovSize = u32(moov, 0);
+        int moovHeaderSize = 8;
+        if (moovSize == 1L) {
+            if (moov.length < 16) {
+                return 0L;
+            }
+            moovSize = u64(moov, 8);
+            moovHeaderSize = 16;
+        }
+        if (moovSize < moovHeaderSize || moovSize > moov.length) {
+            return 0L;
+        }
+        final int moovEnd = (int) moovSize;
+        int position = moovHeaderSize;
+        while (position + 8 <= moovEnd) {
+            long size = u32(moov, position);
+            int headerSize = 8;
+            if (size == 1L) {
+                if (position + 16 > moovEnd) {
+                    return 0L;
+                }
+                size = u64(moov, position + 8);
+                headerSize = 16;
+            }
+            if (size < headerSize || size > moovEnd - position) {
+                return 0L;
+            }
+            final int boxEnd = position + (int) size;
+            if (isType(moov, position + 4, "mvex")) {
+                int child = position + headerSize;
+                while (child + 8 <= boxEnd) {
+                    long childSize = u32(moov, child);
+                    int childHeaderSize = 8;
+                    if (childSize == 1L) {
+                        if (child + 16 > boxEnd) {
+                            return 0L;
+                        }
+                        childSize = u64(moov, child + 8);
+                        childHeaderSize = 16;
+                    }
+                    if (childSize < childHeaderSize || childSize > boxEnd - child) {
+                        return 0L;
+                    }
+                    if (isType(moov, child + 4, "trex")
+                            && childSize >= childHeaderSize + 24L) {
+                        final long trexTrackId = u32(moov, child + childHeaderSize + 4);
+                        if (trexTrackId == trackId) {
+                            return u32(moov, child + childHeaderSize + 20);
+                        }
+                    }
+                    child += (int) childSize;
+                }
+            }
+            position = boxEnd;
+        }
+        return 0L;
+    }
+
+    /**
+     * Returns true only when the first sample in the selected video traf is
+     * marked sync by trun, tfhd, or trex. A malformed/incomplete sample table
+     * cannot be used as a remote decoder entry point.
+     */
+    private static boolean hasSyncFirstSample(byte[] moof, long trackId,
+                                              long trexDefaultSampleFlags) {
+        int i = 0;
+        while (i + 8 <= moof.length) {
+            if (!isType(moof, i + 4, "traf")) {
+                i++;
+                continue;
+            }
+            long trafSize = u32(moof, i);
+            if (trafSize < 8 || trafSize > moof.length - i) {
+                i++;
+                continue;
+            }
+            final int end = (int) (i + trafSize);
+            int p = i + 8;
+            long foundTrackId = -1L;
+            long defaultFlags = trexDefaultSampleFlags;
+            long firstSampleFlags = defaultFlags;
+            boolean firstSampleFound = false;
+            boolean malformed = false;
+            while (p + 8 <= end) {
+                long childSize = u32(moof, p);
+                if (childSize < 8 || childSize > end - p) {
+                    malformed = true;
+                    break;
+                }
+                final int childEnd = p + (int) childSize;
+                if (isType(moof, p + 4, "tfhd")) {
+                    if (childSize < 16L) {
+                        malformed = true;
+                        break;
+                    }
+                    final long flags = u32(moof, p + 8) & 0xFFFFFFL;
+                    foundTrackId = u32(moof, p + 12);
+                    int q = p + 16;
+                    if ((flags & 0x000001L) != 0L) {
+                        q += 8;
+                    }
+                    if ((flags & 0x000002L) != 0L) {
+                        q += 4;
+                    }
+                    if ((flags & 0x000008L) != 0L) {
+                        q += 4;
+                    }
+                    if ((flags & 0x000010L) != 0L) {
+                        q += 4;
+                    }
+                    if ((flags & 0x000020L) != 0L) {
+                        if (q + 4 > childEnd) {
+                            malformed = true;
+                            break;
+                        }
+                        defaultFlags = u32(moof, q);
+                    }
+                } else if (isType(moof, p + 4, "trun")
+                        && foundTrackId == trackId && !firstSampleFound) {
+                    if (childSize < 16L) {
+                        malformed = true;
+                        break;
+                    }
+                    final long flags = u32(moof, p + 8) & 0xFFFFFFL;
+                    final long sampleCount = u32(moof, p + 12);
+                    if (sampleCount > 100000L) {
+                        malformed = true;
+                        break;
+                    }
+                    if (sampleCount > 0L) {
+                        int q = p + 16;
+                        if ((flags & 0x000001L) != 0L) {
+                            q += 4;
+                        }
+                        long flagsForFirstSample = defaultFlags;
+                        if ((flags & 0x000004L) != 0L) {
+                            if (q + 4 > childEnd) {
+                                malformed = true;
+                                break;
+                            }
+                            flagsForFirstSample = u32(moof, q);
+                            q += 4;
+                        }
+                        if ((flags & 0x000400L) != 0L) {
+                            if ((flags & 0x000100L) != 0L) {
+                                q += 4;
+                            }
+                            if ((flags & 0x000200L) != 0L) {
+                                q += 4;
+                            }
+                            if (q + 4 > childEnd) {
+                                malformed = true;
+                                break;
+                            }
+                            flagsForFirstSample = u32(moof, q);
+                        }
+                        firstSampleFlags = flagsForFirstSample;
+                        firstSampleFound = true;
+                    }
+                }
+                p = childEnd;
+            }
+            if (foundTrackId == trackId) {
+                return !malformed && firstSampleFound
+                        && (firstSampleFlags & 0x00010000L) == 0L;
+            }
+            i = end;
+        }
+        return false;
     }
 
     /**
