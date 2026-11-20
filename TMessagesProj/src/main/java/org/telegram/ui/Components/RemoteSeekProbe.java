@@ -168,13 +168,27 @@ public final class RemoteSeekProbe {
             long hi = fileLength - 1;
             Fragment converged = null;
             int requests = 0;
+
+            // Duration/file-size proportionality is only a first-probe hint. VBR,
+            // interleaved tracks and uneven fragment sizes make it unsuitable as
+            // a seek mapping; acceptance still requires a real tfdt interval below.
+            final double durationUs = durationSec * 1_000_000.0;
+            final double targetFraction = Math.max(0.0,
+                    Math.min(1.0, targetTimeUs / durationUs));
+            final long initialGuess = lo + (long) ((hi - lo) * targetFraction);
+
             for (int probe = 0; probe < MAX_PROBES && lo < hi; probe++) {
                 // 每次请求前重新计算剩余预算；rate limit 的等待也可能吃掉时间。
                 final long remaining = deadline - System.currentTimeMillis();
                 if (remaining <= 0) {
                     break;
                 }
-                final long guess = lo + (hi - lo) / 2L;
+                // Start near the requested timeline fraction to avoid spending
+                // half the probe budget walking from the file midpoint for early
+                // or late seeks. All subsequent decisions use observed tfdt values.
+                final long guess = probe == 0
+                        ? Math.max(lo, Math.min(hi, initialGuess))
+                        : lo + (hi - lo) / 2L;
                 final long start = Math.max(moovEnd, guess - PROBE_BYTES / 2L);
                 final FileRangeFetcher.FetchResult result = FileRangeFetcher.fetchSyncUntil(
                         account, document, alignDown(start), PROBE_BYTES,
