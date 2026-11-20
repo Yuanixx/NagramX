@@ -234,9 +234,27 @@ public final class FileRangeFetcher {
     public static FetchResult fetchSyncUntil(int account, TLRPC.Document document,
                                              long offset, long length, long timeoutMs,
                                              long deadlineMs, FetchHandle handle) {
+        return fetchSyncUntil(account, document, offset, length, timeoutMs,
+                deadlineMs, blockBytes(), handle);
+    }
+
+    /**
+     * Fetches a range using a caller-selected legal Telegram part size.
+     * The override is intended for latency-sensitive index probes; ordinary
+     * callers continue to use the configured block size and account-wide gate.
+     */
+    public static FetchResult fetchSyncUntil(int account, TLRPC.Document document,
+                                             long offset, long length, long timeoutMs,
+                                             long deadlineMs, int requestBlockBytes,
+                                             FetchHandle handle) {
         final long started = System.currentTimeMillis();
+        if (requestBlockBytes <= 0 || requestBlockBytes > 1024 * 1024
+                || (1024 * 1024) % requestBlockBytes != 0) {
+            return failure(FetchResult.Status.ERROR, 0, -1,
+                    "invalid request block size", false, 0, started);
+        }
         return fetchSync(account, document, offset, length, timeoutMs, true,
-                handle, started, deadlineMs);
+                handle, started, deadlineMs, requestBlockBytes);
     }
 
     public static FetchResult fetchSync(int account, TLRPC.Document document,
@@ -348,6 +366,14 @@ public final class FileRangeFetcher {
                                          long offset, long length, long timeoutMs,
                                          boolean allowRetry, FetchHandle handle, long started,
                                          long deadlineMs) {
+        return fetchSync(account, document, offset, length, timeoutMs, allowRetry,
+                handle, started, deadlineMs, blockBytes());
+    }
+
+    private static FetchResult fetchSync(int account, TLRPC.Document document,
+                                         long offset, long length, long timeoutMs,
+                                         boolean allowRetry, FetchHandle handle, long started,
+                                         long deadlineMs, int requestBlockBytes) {
         if (document == null || length <= 0 || account < 0) {
             return failure(FetchResult.Status.ERROR, 0, -1, "invalid-args", false, 0, started);
         }
@@ -380,7 +406,7 @@ public final class FileRangeFetcher {
         try {
             final FetchResult result = fetchBlocks(account, document, offset, length,
                     timeoutMs, allowRetry, downloadActive, handle, started, deadlineMs,
-                    probe[0]);
+                    probe[0], requestBlockBytes);
             // Only the probe may reopen the gate. A request that was already in
             // flight when another thread got a 420 must not erase that fresh
             // cooldown just because it happened to finish successfully.
@@ -401,7 +427,8 @@ public final class FileRangeFetcher {
                                            long offset, long length, long timeoutMs,
                                            boolean allowRetry, boolean downloadActive,
                                            FetchHandle handle, long started,
-                                           long deadlineMs, boolean probeHeldByThisFetch) {
+                                           long deadlineMs, boolean probeHeldByThisFetch,
+                                           int requestBlockBytes) {
         // Fixed blocks, aligned down, always requested in full.
         //
         // The server accepts only limits that divide 1MB evenly (4K, 8K ... 1M),
@@ -410,13 +437,13 @@ public final class FileRangeFetcher {
         // failed request in the last capture had exactly that shape. Asking for
         // a whole 256KB block removes the whole class of problem, and the server
         // simply returns fewer bytes near the end of the file.
-        final long aligned = (offset / blockBytes()) * blockBytes();
+        final long aligned = (offset / requestBlockBytes) * requestBlockBytes();
         final int delta = (int) (offset - aligned);
 
         // How many whole blocks does the caller need? A keyframe can easily
         // span more than one, and a fetch that stops after the first block hands
         // the decoder a truncated payload.
-        final int blocks = (int) ((delta + length + blockBytes() - 1L) / blockBytes());
+        final int blocks = (int) ((delta + length + requestBlockBytes - 1L) / requestBlockBytes);
 
         final TLRPC.InputFileLocation location = resolveLocation(account, document);
         if (location == null) {
@@ -433,7 +460,7 @@ public final class FileRangeFetcher {
 
         if (blocks <= 1) {
             final FetchResult slice = fetchOneBlock(account, document, location,
-                    aligned, delta, blockBytes(), effectiveTimeout(timeoutMs, deadlineMs),
+                    aligned, delta, requestBlockBytes, effectiveTimeout(timeoutMs, deadlineMs),
                     handle, dcId, started);
             if (!slice.ok() && slice.status == FetchResult.Status.ERROR
                     && slice.text != null
@@ -453,7 +480,7 @@ public final class FileRangeFetcher {
                     FileLog.d("ABPV: range retry after file reference error: " + slice.text);
                     return fetchBlocks(account, document, offset, length, timeoutMs,
                             false, downloadActive, handle, started, deadlineMs,
-                            probeHeldByThisFetch);
+                            probeHeldByThisFetch, requestBlockBytes);
                 }
                 return failure(FetchResult.Status.RETRY_LIMIT, slice.code, -1,
                         RETRY_LIMIT_TEXT, true, slice.requests, started);
@@ -497,10 +524,10 @@ public final class FileRangeFetcher {
                         "budget exhausted", true, sent, started)
                         .rewrap(filled > 0, sent, started);
             }
-            final long blockAligned = aligned + (long) b * blockBytes();
+            final long blockAligned = aligned + (long) b * requestBlockBytes;
             final int blockDelta = (b == 0) ? delta : 0;
             final FetchResult chunk = fetchOneBlock(account, document, location,
-                    blockAligned, blockDelta, blockBytes(), blockTimeout, handle, dcId, started);
+                    blockAligned, blockDelta, requestBlockBytes, blockTimeout, handle, dcId, started);
             sent += chunk.requests;
             if (!chunk.ok()) {
                 FileLog.d("ABPV: range multi-block failed at block " + (b + 1)
