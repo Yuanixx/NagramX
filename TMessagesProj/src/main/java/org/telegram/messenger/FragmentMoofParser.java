@@ -48,6 +48,7 @@ final class FragmentMoofParser {
         int timescale = 1;
         long duration;
         boolean video;
+        boolean audio;
         int defaultDuration;
         int defaultFlags;
 
@@ -92,7 +93,9 @@ final class FragmentMoofParser {
             int tfhdFlags = i32(data, tfhdBody) & 0x00FFFFFF;
             int trackId = i32(data, tfhdBody + 4);
             Track track = tracks.get(trackId);
-            if (track == null) {
+            if (track == null || (!track.video && !track.audio)) {
+                // Ignore subtitle, metadata, and other non A/V tracks. They are
+                // not random-access video points and must not become audio spans.
                 continue;
             }
 
