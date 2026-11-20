@@ -94,8 +94,8 @@ jobs:
             exit 1
           fi
           MIRROR=Yuanixx/NagramX-releases
-          ARM64="NagramX-${VERSION_NAME}-arm64-v8a.apk"
-          UNIVERSAL="NagramX-${VERSION_NAME}-universal.apk"
+          ARM64="StreamX-${VERSION_NAME}-arm64-v8a.apk"
+          UNIVERSAL="StreamX-${VERSION_NAME}-universal.apk"
           # Never copy a commit message verbatim into a public Release: it can
           # carry paths, hosts or credentials. Use a fixed plain-language line.
           NOTES='这一版改好了视频拖动时的画面预览，已经过真机验收。'
