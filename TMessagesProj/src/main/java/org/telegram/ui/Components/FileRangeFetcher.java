@@ -230,6 +230,15 @@ public final class FileRangeFetcher {
                 handle, started, deadline);
     }
 
+    /** 使用调用方的绝对截止时间，避免嵌套范围读取重新开始预算。 */
+    public static FetchResult fetchSyncUntil(int account, TLRPC.Document document,
+                                             long offset, long length, long timeoutMs,
+                                             long deadlineMs, FetchHandle handle) {
+        final long started = System.currentTimeMillis();
+        return fetchSync(account, document, offset, length, timeoutMs, true,
+                handle, started, deadlineMs);
+    }
+
     public static FetchResult fetchSync(int account, TLRPC.Document document,
                                         long offset, long length, long timeoutMs) {
         return fetchSync(account, document, offset, length, timeoutMs,
@@ -363,7 +372,8 @@ public final class FileRangeFetcher {
         }
         final boolean downloadActive = active != null;
         final boolean[] probe = new boolean[1];
-        final FetchResult gate = awaitRateSlot(downloadActive, handle, probe);
+        final FetchResult gate = awaitRateSlot(downloadActive, handle, probe,
+                false, deadlineMs);
         if (gate != null) {
             return gate.rewrap(false, 0, started);
         }
@@ -632,15 +642,29 @@ public final class FileRangeFetcher {
      */
     private static FetchResult awaitRateSlot(boolean downloadActive, FetchHandle handle,
                                              boolean[] probeGranted) {
-        return awaitRateSlot(downloadActive, handle, probeGranted, false);
+        return awaitRateSlot(downloadActive, handle, probeGranted, false, Long.MAX_VALUE);
     }
 
     /** @param probeHeldByThisFetch true for later blocks of a fetch whose first block got the probe */
     private static FetchResult awaitRateSlot(boolean downloadActive, FetchHandle handle,
                                              boolean[] probeGranted, boolean probeHeldByThisFetch) {
+        return awaitRateSlot(downloadActive, handle, probeGranted,
+                probeHeldByThisFetch, Long.MAX_VALUE);
+    }
+
+    /** 限流排队同样受调用方绝对截止时间约束。 */
+    private static FetchResult awaitRateSlot(boolean downloadActive, FetchHandle handle,
+                                             boolean[] probeGranted, boolean probeHeldByThisFetch,
+                                             long deadlineMs) {
         final long baseGap = downloadActive
                 ? MIN_REQUEST_GAP_MS_ACTIVE : MIN_REQUEST_GAP_MS_IDLE;
         while (true) {
+            final long remaining = deadlineMs == Long.MAX_VALUE
+                    ? Long.MAX_VALUE : deadlineMs - System.currentTimeMillis();
+            if (remaining <= 0L) {
+                return failure(FetchResult.Status.TIMEOUT, 0, -1,
+                        "rate-slot deadline exceeded", true, 0, 0L);
+            }
             if (handle != null && handle.cancelled) {
                 return failure(FetchResult.Status.CANCELLED, 0, -1,
                         "cancelled", false, 0, 0L);
@@ -683,7 +707,11 @@ public final class FileRangeFetcher {
                 }
             }
             try {
-                Thread.sleep(Math.min(50L, wait));
+                long sleepMs = Math.min(50L, wait);
+                if (remaining != Long.MAX_VALUE) {
+                    sleepMs = Math.min(sleepMs, remaining);
+                }
+                Thread.sleep(Math.max(1L, sleepMs));
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
                 return failure(FetchResult.Status.CANCELLED, 0, -1,
