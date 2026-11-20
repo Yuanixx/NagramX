@@ -1600,10 +1600,10 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
     }
 
     /**
-     *  streamed fragmented 文件 prepared before 其 download began carries no time-到-byte
-     * 索引. media3 turns every seek 在 such 媒体 into t=0, which 是  "jump back 到 
-     * 启动"  用户 sees.  factory can only 参见  live .temp after  download has
-     * started, so re-prepare once 和 replay  target when  new player 是 ready.
+     * 流式分片视频在开始下载前 prepare 时拿不到本地文件，也就没有时间到字节的映射。
+     * media3 对这种媒体的任何 seek 都会钳到 t=0，用户看到的就是“跳回开头”。
+     * 索引工厂只有在下载开始、临时文件出现后才能看到它，
+     * 所以这里先记住用户真实目标，重建一次播放器，等新播放器 READY 后再重放目标。
      */
     private boolean deferStreamSeekIfUnseekable(VideoPlayer player, long targetMs) {
         TLRPC.Document doc = currentMessageObject != null ? currentMessageObject.getDocument() : null;
@@ -1638,8 +1638,8 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
                     && currentMessageObject != null && currentMessageObject.getDocument() != null
                     && currentMessageObject.getDocument().id == pendingStreamSeekDocId) {
                 onActionClick(false);
-                // Bind  target 到  exact player/generation  rebuild 已创建. 
-                // older instance 或  later re-prepare can no longer consume 该 target.
+                // 把目标绑定到这次重建实际创建的播放器实例与代次；
+                // 更旧的实例或后续重建都不能再消费这个目标。
                 pendingStreamSeekOwner = videoPlayer;
                 pendingStreamSeekGeneration = videoPlayer != null ? videoPlayer.getPrepareGeneration() : -1;
                 pendingStreamSeekRebuilt = true;
@@ -11139,8 +11139,8 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
                 final long knownDuration = videoPlayer != null
                         ? videoPlayer.getDuration()
                         : (photoViewerWebView != null ? photoViewerWebView.getVideoDuration() : C.TIME_UNSET);
-                // Keep  pending seek until  real duration exists. Seeking 使用
-                // TIME_UNSET 用于 clamp 到 byte 0 和 restart  视频.
+                // 没有真实时长前一直保留待处理 seek：用 TIME_UNSET 去 seek
+                // 会被当作 0 点，导致视频从头开始。
                 if (knownDuration != C.TIME_UNSET && knownDuration > 0) {
                     final float pending = seekToProgressPending;
                     diagRingPush("PENDING-FUNNEL", "raw=" + pending + " durMs=" + knownDuration + " doc=" + diagDocIdHash());
@@ -11155,9 +11155,8 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
                         skipFirstBufferingProgress = true;
                     }
                 } else {
-                    // Some fragmented/live streams never report  duration. Do 不
-                    // let  pending seek hang forever 和 freeze  bubble: drop
-                    // 它 after  bounded wait so  UI recovers.
+                    // 某些分片/直播流永远不报时长。不能让待处理 seek 无限挂住、
+                    // 卡住进度气泡：等待超过上限后丢弃它，让界面恢复。
                     final long now = SystemClock.elapsedRealtime();
                     if (seekToProgressSinceMs == 0L) {
                         seekToProgressSinceMs = now;
