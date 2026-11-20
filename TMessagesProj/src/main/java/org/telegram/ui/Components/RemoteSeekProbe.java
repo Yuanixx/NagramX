@@ -7,7 +7,7 @@
  */
 package org.telegram.ui.Components;
 
-import androidx.media3.extractor.SeekMap;
+import androidx.media3.extractor.SeekPoint;
 
 import org.telegram.messenger.FileLog;
 import org.telegram.tgnet.TLRPC;
@@ -56,7 +56,7 @@ public final class RemoteSeekProbe {
      * Runs on a background thread. Returns null on flood, timeout or unusable data;
      * callers must keep their old (safe, non-zero-clamping) behaviour in that case.
      */
-    public static SeekMap.SeekPoint find(int account, TLRPC.Document document,
+    public static SeekPoint find(int account, TLRPC.Document document,
                                           String localPath, long fileLength,
                                           long targetTimeUs, double durationSec) {
         if (document == null || fileLength <= 0 || targetTimeUs <= 0 || durationSec <= 0) {
@@ -117,7 +117,7 @@ public final class RemoteSeekProbe {
             }
             FileLog.d("FMPIDX: remote probe pos=" + bestPosition + " t=" + bestTimeUs
                     + " target=" + targetTimeUs);
-            return new SeekMap.SeekPoint(bestTimeUs, bestPosition);
+            return new SeekPoint(bestTimeUs, bestPosition);
         } catch (Throwable e) {
             FileLog.e("FMPIDX: remote probe failed", e);
             return null;

@@ -13,6 +13,7 @@ import androidx.media3.extractor.ExtractorOutput;
 import androidx.media3.extractor.ExtractorsFactory;
 import androidx.media3.extractor.PositionHolder;
 import androidx.media3.extractor.SeekMap;
+import androidx.media3.extractor.SeekPoint;
 import androidx.media3.extractor.TrackOutput;
 import androidx.media3.extractor.mp4.FragmentedMp4Extractor;
 
@@ -59,7 +60,7 @@ public final class Mp4IndexExtractorsFactory implements ExtractorsFactory {
     private long seekTargetTimeUs;
     private double seekDurationSec;
     @Nullable
-    private volatile SeekMap.SeekPoint remotePoint;
+    private volatile SeekPoint remotePoint;
 
     /**
      * Enables remote fragment probing for a target time that the local (partial) index does
@@ -173,11 +174,11 @@ public final class Mp4IndexExtractorsFactory implements ExtractorsFactory {
         @Nullable
         private final ChunkIndex chunkIndex;
         @Nullable
-        private final SeekMap.SeekPoint remotePoint;
+        private final SeekPoint remotePoint;
         private final double durationSec;
 
         ChunkIndexInjectingExtractor(Extractor delegate, @Nullable ChunkIndex chunkIndex,
-                                     @Nullable SeekMap.SeekPoint remotePoint, double durationSec) {
+                                     @Nullable SeekPoint remotePoint, double durationSec) {
             this.delegate = delegate;
             this.chunkIndex = chunkIndex;
             this.remotePoint = remotePoint;
@@ -272,3 +273,4 @@ public final class Mp4IndexExtractorsFactory implements ExtractorsFactory {
         }
     }
 }
+
