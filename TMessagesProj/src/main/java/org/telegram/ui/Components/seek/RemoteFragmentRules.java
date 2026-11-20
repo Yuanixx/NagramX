@@ -1,3 +1,11 @@
+/**
+ * ZH-COMMENT-BY-AGENT
+ * 文件：RemoteFragmentRules.java
+ * 模块：TMessagesProj/src/main/java/org/telegram/ui/Components/seek
+ * 类型：RemoteFragmentRules（RemoteFragmentRules）
+ * 主要成员：RemoteFragmentRules（RemoteFragmentRules）、bestAtOrBefore（bestAtOrBefore）、spanAfter（spanAfter）、containsTarget（containsTarget）、validDecodeTime（validDecodeTime）
+ * 说明：本文件由中文注释引擎自动生成结构化说明；业务语义详见各成员处注释。
+ */
 package org.telegram.ui.Components.seek;
 
 /** 纯规则：远端片段选择、时间区间证明与拒绝条件。 */

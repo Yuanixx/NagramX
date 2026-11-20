@@ -1,17 +1,25 @@
+/**
+ * ZH-COMMENT-BY-AGENT
+ * 文件：SeekCoverageRules.java
+ * 模块：TMessagesProj/src/main/java/org/telegram/ui/Components/seek
+ * 类型：SeekCoverageRules（SeekCoverageRules）
+ * 主要成员：SeekCoverageRules（SeekCoverageRules）、lastChunkStartUs（lastChunk启动Us）、coveredEndUs（coveredEndUs）、coversLocal（coversLocal）、coveredBytes（coveredBytes）、validTimes（validTimes）、coversRemote（coversRemote）、validProbe（validProbe）
+ * 说明：本文件由中文注释引擎自动生成结构化说明；业务语义详见各成员处注释。
+ */
 package org.telegram.ui.Components.seek;
 
 /**
- * Pure rules that distinguish the three different time ranges involved in a seek:
- * the declared media duration, the range covered by a local partial index, and the
- * range proved by a remote fragment probe. No Android or media3 dependency here so
- * the exact production logic can be exercised by plain JVM tests.
+ * Pure rules 该 distinguish  three different time ranges involved 在  seek:
+ *  declared 媒体 duration,  range covered 由  local partial 索引, 和 
+ * range proved 由  remote fragment probe. No Android 或 media3 dependency here so
+ *  exact production logic can 为 exercised 由 plain JVM tests.
  */
 public final class SeekCoverageRules {
 
     private SeekCoverageRules() {
     }
 
-    /** Start time of the last indexed chunk; -1 when no valid index exists. */
+    /** 启动 time 的  last indexed chunk; -1 when no valid 索引 exists. */
     public static long lastChunkStartUs(long[] timesUs, int length) {
         if (!validTimes(timesUs, length)) {
             return -1L;
@@ -20,8 +28,8 @@ public final class SeekCoverageRules {
     }
 
     /**
-     * End of the locally covered time range: last chunk start plus its duration.
-     * A chunk start alone is NOT the covered end. -1 means no valid coverage.
+     * End 的  locally covered time range: last chunk 启动 plus 其 duration.
+     *  chunk 启动 alone 是 不  covered end. -1 means no valid coverage.
      */
     public static long coveredEndUs(long[] timesUs, long[] durationsUs, int length) {
         if (!validTimes(timesUs, length) || durationsUs == null
@@ -36,14 +44,14 @@ public final class SeekCoverageRules {
         return last + duration;
     }
 
-    /** Local index can resolve a time only inside its proved covered range. */
+    /** Local 索引 can resolve  time only inside 其 proved covered range. */
     public static boolean coversLocal(long[] timesUs, long[] durationsUs, int length,
                                       long timeUs) {
         long end = coveredEndUs(timesUs, durationsUs, length);
         return end >= 0L && timeUs >= 0L && timeUs <= end;
     }
 
-    /** End of the covered bytes: last chunk offset plus its size; -1 when no valid index. */
+    /** End 的  covered bytes: last chunk offset plus 其 大小; -1 when no valid 索引. */
     public static long coveredBytes(int[] sizes, long[] offsets, int length) {
         if (sizes == null || offsets == null || length <= 0
                 || length > sizes.length || length > offsets.length) {
@@ -76,14 +84,14 @@ public final class SeekCoverageRules {
         return true;
     }
 
-    /** A remote point proves a single fragment, never the whole remaining timeline. */
+    /**  remote point proves  single fragment, never  whole remaining timeline. */
     public static boolean coversRemote(long startUs, long endUs, long timeUs) {
         return endUs > startUs && startUs >= 0L && timeUs >= startUs && timeUs < endUs;
     }
 
     /**
-     * A probed fragment is usable only if it is inside the file and ahead of the locally
-     * covered BYTE range. Never pass a microsecond value as the last argument.
+     *  probed fragment 是 usable only 如果 它 是 inside  文件 和 ahead 的  locally
+     * covered BYTE range. Never pass  microsecond 值 作为  last 参数.
      */
     public static boolean validProbe(long startUs, long endUs, long position, long size,
                                      long fileLength, long coveredEndBytes) {
@@ -91,6 +99,8 @@ public final class SeekCoverageRules {
                 && startUs >= 0L
                 && size > 0L
                 && position >= coveredEndBytes
+                // 先检查加法溢出，再和文件长度比较，避免超大 size 绕过边界检查。
+                && position <= Long.MAX_VALUE - size
                 && position + size <= fileLength;
     }
 }

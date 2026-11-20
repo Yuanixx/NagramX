@@ -1,3 +1,11 @@
+/**
+ * ZH-COMMENT-BY-AGENT
+ * 文件：PendingSeekRulesTest.java
+ * 模块：TMessagesProj/src/test/java/org/telegram/ui/Components/seek
+ * 类型：PendingSeekRulesTest（PendingSeekRulesTest）
+ * 主要成员：Object（对象）、main（main）、testDeferGate（testDeferGate）、testFullIdentityBinding（testFullIdentityBinding）、testConsecutiveRequests（testConsecutiveRequests）、testReplayIsOneShotByCaller（testReplay是否OneShotByCaller）、println（println）、canConsume（能否Consume）、check（检查）、AssertionError（Assertion错误）
+ * 说明：本文件由中文注释引擎自动生成结构化说明；业务语义详见各成员处注释。
+ */
 package org.telegram.ui.Components.seek;
 
 /**
@@ -45,7 +53,7 @@ public final class PendingSeekRulesTest {
     }
 
     private static void testConsecutiveRequests() {
-        // A/B/C 连续拖动：只有 C 的 (instance, generation, requestId) 能通过校验。
+        // /B/C 连续拖动：只有 C 的 (instance, generation, requestId) 能通过校验。
         boolean aReady = PendingSeekRules.canConsume(true, PLAYER_A, PLAYER_A, 1, 1, 1L, 1L, 1L, 1L);
         boolean bReady = PendingSeekRules.canConsume(true, PLAYER_A, PLAYER_A, 2, 1, 1L, 1L, 2L, 1L);
         boolean cReady = PendingSeekRules.canConsume(true, PLAYER_A, PLAYER_A, 3, 3, 1L, 1L, 3L, 3L);

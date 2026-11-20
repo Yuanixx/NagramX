@@ -1,3 +1,12 @@
+/**
+ * ZH-COMMENT-BY-AGENT
+ * 文件：PhotoViewer.java
+ * 模块：TMessagesProj/src/main/java/org/telegram/ui
+ * 类型：PhotoViewer（PhotoViewer）、PhotoViewerActionBarContainer（PhotoViewerActionBarContainer）、PhotoCountView（PhotoCountView）、SavedVideoPosition（Saved视频Position）、EditState（EditState）、SavedState（SavedState）、PageBlocksAdapter（PageBlocksAdapter）、BackgroundDrawable（BackgroundDrawable）
+ * 主要成员：BoolAnimator（BoolAnimator）、isUnalivePhoto（是否UnalivePhoto）、get（获取）、setUnalivePhoto（设置UnalivePhoto）、apply（apply）、updatedLivePhotos（updatedLivePhotos）、toggleMiniProgressInternal（toggleMiniProgressInternal）、getVideoTextureView（获取视频TextureView）、isVisibleOrAnimating（是否VisibleOrAnimating）、getVideoSurfaceView（获取视频SurfaceView）
+ *          PhotoViewerActionBarContainer（PhotoViewerActionBarContainer）、super（super）、FrameLayout（FrameLayout）、onMeasure（onMeasure）
+ * 说明：本文件由中文注释引擎自动生成结构化说明；业务语义详见各成员处注释。
+ */
 /*
  * This is the source code of Telegram for Android v. 5.x.x.
  * It is licensed under GNU GPL v. 2 or later.
@@ -534,8 +543,8 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
             return TextUtils.equals(a.toString(), b.toString());
         }
 
-        // axis: true = top-bottom, false = left-right
-        // direction: true = from top/from left, false = from bottom/from right
+        // axis: 真 = top-bottom, 假 = left-right
+        // direction: 真 = 从 top/从 left, 假 = 从 bottom/从 right
         public void setTitleAnimated(CharSequence title, boolean axis, boolean direction) {
             if (areStringsEqual(titleTextView[0].getText(), title)) {
                 return;
@@ -768,7 +777,7 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
 
         private String getOf() {
             lng = LocaleController.getInstance().getCurrentLocaleInfo().shortName;
-            String text = getString(R.string.Of); // %1$d of %2$d
+            String text = getString(R.string.Of); // %1$d 的 %2$d
             text = text.replace("%1$d", "");
             text = text.replace("%2$d", "");
             return text;
@@ -1078,8 +1087,8 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
                     return;
                 }
                 if (videoPlayerSeekbar != null && videoPlayerSeekbar.isDragging()) {
-                    // The finger is holding the seek bar: hiding the chrome
-                    // now would rip the gesture away from it. Re-check soon.
+                    //  finger 是 holding  seek bar: hiding  chrome
+                    // now would rip  gesture away 从 它. Re-检查 soon.
                     AndroidUtilities.cancelRunOnUIThread(hideActionBarRunnable);
                     AndroidUtilities.runOnUIThread(hideActionBarRunnable, 500);
                     return;
@@ -1143,38 +1152,43 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
     // 单调递增的请求 ID：新拖动覆盖旧目标；旧请求的 READY 即使迟到也不能消费新目标。
     private long seekRequestIdSeq;
     private long pendingStreamSeekRequestId = -1L;
-    /** 当前回调产生时的 generation，由带身份的 onStateChanged 重载写入。 */
+    /** 当前回调产生时的 generation 与请求 ID，由带身份的 onStateChanged 重载写入。 */
     private int lastCallbackGeneration = -1;
-    // Last genuine user drag target (ms). Used to restore the real watch position when a
-    // near-zero dirty seek is rejected, so the fix never leaves the user stuck at frame 0.
-    // Bound to the document id so a target from a previous video can never be replayed on a new one.
+    private long lastCallbackRequestId = -1L;
+    /** 下一次 prepare 要绑定到播放器上的请求 ID；必须在 preparePlayer 之前设置。 */
+    private long nextBoundRequestId = -1L;
+    /** 无覆盖时保留目标后的下次重试时间，避免目标永久停留在内存里。 */
+    private long pendingSeekRetryAtMs = 0L;
+    // Last genuine 用户 drag target (ms). 用于 restore  real watch position when 
+    // near-zero dirty seek 是 rejected, so  fix never leaves  用户 stuck 在 frame 0.
+    // Bound 到  文档 id so  target 从  previous 视频 can never 为 replayed 在  new one.
     private long lastGoodDragTargetMs = -1L;
     private long lastGoodDragAtMs = 0L;
     private long lastGoodDragDocId = -1L;
     // ---- DIAGNOSTIC INSTRUMENTATION (observe-only; no playback behavior change) ----
-    // Correlate one jump event across save → restore → funnel → ready. ev orders all
-    // lines globally; seek groups funnel→ready; t is elapsedRealtime for cross-thread joins.
+    // Correlate one jump event across 保存 → restore → funnel → ready. ev orders all
+    // lines globally; seek groups funnel→ready; t 是 elapsedRealtime 用于 cross-线程 joins.
     private static final java.util.concurrent.atomic.AtomicLong DIAG_EVENT_SEQ = new java.util.concurrent.atomic.AtomicLong();
     private static final java.util.concurrent.atomic.AtomicLong DIAG_SEEK_SEQ = new java.util.concurrent.atomic.AtomicLong();
     private static volatile float diagLastNonZeroProgress = -1f;
     private static volatile long diagLastNonZeroAtMs = 0L;
 
-    // ---- JUMP-DETECTED ring buffer (observe-only) ----
-    // A bounded in-memory ring of the last ~30s of position/seek/state events. When a
-    // non-gesture jump-back is observed (position falls from >60s to <10s), the whole ring
-    // plus a trigger stack is dumped with a JUMP-DETECTED marker, so the user only has to
-    // search the log — no need to recall a timestamp. Stack traces are taken ONLY on trigger.
+    // ---- JUMP-DETECTED ring 缓冲区 (observe-only) ----
+    //  bounded 在-内存 ring 的  last ~30s 的 position/seek/state events. When 
+    // non-gesture jump-back 是 observed (position falls 从 >60s 到 <10s),  whole ring
+    // plus  trigger stack 是 dumped 使用  JUMP-DETECTED marker, so  用户 only has 到
+    // 搜索  log — no need 到 recall  timestamp. Stack traces 是 taken ONLY 在 trigger.
     private static final int DIAG_RING_CAP = 256;
     private static final java.util.ArrayDeque<String> DIAG_RING = new java.util.ArrayDeque<>();
     private static final Object DIAG_RING_LOCK = new Object();
     private static long diagLastObservedPosMs = -1L;
     private static long diagLastObservedPosAtMs = 0L;
     private static long diagLastJumpDumpAtMs = 0L;
-    private static volatile long diagLastFunnelTargetMs = -1L; // last funnel seek target; distinguishes intended seek-to-start
-    private static volatile String diagLastFunnelDoc = null;   // doc hash of that funnel seek (no business id/url)
-    private static volatile boolean diagGestureActive = false; // logged only; NOT a veto (jump-back follows the gesture)
+    private static volatile long diagLastFunnelTargetMs = -1L; // last funnel seek target; distinguishes intended seek-到-启动
+    private static volatile String diagLastFunnelDoc = null;   // doc hash 的 该 funnel seek (no business id/url)
+    private static volatile boolean diagGestureActive = false; // logged only; 不  veto (jump-back follows  gesture)
     private static volatile long diagGestureActiveUntilMs = 0L;
-    // ---- END JUMP-DETECTED ring buffer ----
+    // ---- END JUMP-DETECTED ring 缓冲区 ----
     // ---- END DIAGNOSTIC INSTRUMENTATION ----
     private String shouldSavePositionForCurrentVideo;
     private String shouldSavePositionForCurrentVideoShortTerm;
@@ -1586,10 +1600,10 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
     }
 
     /**
-     * A streamed fragmented file prepared before its download began carries no time-to-byte
-     * index. media3 turns every seek on such media into t=0, which is the "jump back to the
-     * start" the user sees. The factory can only see the live .temp after the download has
-     * started, so re-prepare once and replay the target when the new player is ready.
+     *  streamed fragmented 文件 prepared before 其 download began carries no time-到-byte
+     * 索引. media3 turns every seek 在 such 媒体 into t=0, which 是  "jump back 到 
+     * 启动"  用户 sees.  factory can only 参见  live .temp after  download has
+     * started, so re-prepare once 和 replay  target when  new player 是 ready.
      */
     private boolean deferStreamSeekIfUnseekable(VideoPlayer player, long targetMs) {
         TLRPC.Document doc = currentMessageObject != null ? currentMessageObject.getDocument() : null;
@@ -1600,10 +1614,12 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
         if (pendingStreamSeekRebuilt && pendingStreamSeekMs == targetMs && pendingStreamSeekDocId == doc.id) {
             return true;
         }
-        // 新请求覆盖旧请求：只有最后一个目标会存活，A/B 的迟到 READY 无法消费 C。
+        // 新请求覆盖旧请求：只有最后一个目标会存活，/B 的迟到 READY 无法消费 C。
         pendingStreamSeekMs = targetMs;
         pendingStreamSeekDocId = doc.id;
         pendingStreamSeekRequestId = ++seekRequestIdSeq;
+        nextBoundRequestId = pendingStreamSeekRequestId;
+        pendingSeekRetryAtMs = 0L;
         pendingStreamSeekRebuilt = false;
         pendingStreamSeekOwner = null;
         pendingStreamSeekGeneration = -1;
@@ -1615,8 +1631,8 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
                     && currentMessageObject != null && currentMessageObject.getDocument() != null
                     && currentMessageObject.getDocument().id == pendingStreamSeekDocId) {
                 onActionClick(false);
-                // Bind the target to the exact player/generation the rebuild created. An
-                // older instance or a later re-prepare can no longer consume this target.
+                // Bind  target 到  exact player/generation  rebuild 已创建. 
+                // older instance 或  later re-prepare can no longer consume 该 target.
                 pendingStreamSeekOwner = videoPlayer;
                 pendingStreamSeekGeneration = videoPlayer != null ? videoPlayer.getPrepareGeneration() : -1;
                 pendingStreamSeekRebuilt = true;
@@ -1630,16 +1646,16 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
         if (deferStreamSeekIfUnseekable(videoPlayer, position)) {
             return;
         }
-        // A negative position used to be clamped to 0 by ExoPlayer, restarting a
-        // streamed fragmented video from the first frame. Never issue one.
+        //  negative position 用于 为 clamped 到 0 由 ExoPlayer, restarting 
+        // streamed fragmented 视频 从  first frame. Never issue one.
         if (position < 0) {
             FileLog.d("ABPV: player seekTo reject negative pos=" + position);
             return;
         }
-        // Do not reject an upper-bound seek here: a streamed/fragmented file can
-        // briefly report a stale, too-small duration (fallbackDuration), and ExoPlayer
-        // already clamps an over-range target to the real end safely. Rejecting it
-        // used to strand the video at frame 0.
+        // Do 不 reject  upper-bound seek here:  streamed/fragmented 文件 can
+        // briefly report  stale, too-small duration (fallbackDuration), 和 ExoPlayer
+        // already clamps  over-range target 到  real end safely. Rejecting 它
+        // 用于 strand  视频 在 frame 0.
         if (photoViewerWebView != null && photoViewerWebView.isControllable()) {
             photoViewerWebView.seekTo(position);
         } else if (videoPlayer != null) {
@@ -1659,6 +1675,15 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
     private Runnable updateProgressRunnable = new Runnable() {
         @Override
         public void run() {
+            // 无覆盖时目标保留在内存里；这里提供明确的后续重试触发点。
+            // 随着下载推进，本地索引覆盖会扩大，下一次重建时探测就可能成功。
+            if (pendingStreamSeekMs > 0 && !pendingStreamSeekRebuilt
+                    && pendingSeekRetryAtMs > 0
+                    && SystemClock.elapsedRealtime() >= pendingSeekRetryAtMs) {
+                pendingSeekRetryAtMs = 0L;
+                final long retryTarget = pendingStreamSeekMs;
+                deferStreamSeekIfUnseekable(videoPlayer, retryTarget);
+            }
             if (videoPlayer != null || photoViewerWebView != null && photoViewerWebView.isControllable()) {
                 if (isCurrentVideo) {
                     if (!videoTimelineView.isDragging()) {
@@ -1748,24 +1773,24 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
                     }
                     videoPlayerSeekbarView.invalidate();
                     if (shouldSavePositionForCurrentVideo != null) {
-                        // Derive the value from real player state: `progress` can be 0 or NaN
-                        // while a fragmented stream rebuilds, and persisting that makes the
-                        // next open start from the first frame.
+                        // Derive  值 从 real player state: `progress` can 为 0 或 NaN
+                        // while  fragmented stream rebuilds, 和 persisting 该 makes 
+                        // next 打开 启动 从  first frame.
                         final long saveDuration = videoPlayer != null ? videoPlayer.getDuration() : 0L;
                         final long savePosition = videoPlayer != null ? videoPlayer.getCurrentPosition() : 0L;
-                        // Position observation for JUMP-DETECTED: this periodic sampler is where a
-                        // real position fall (rebuild / byte-0 fallback) becomes visible. A rejected
-                        // near-zero save is normal guard behavior and is NOT pushed to the ring.
+                        // Position observation 用于 JUMP-DETECTED: 该 periodic sampler 是 where 
+                        // real position fall (rebuild / byte-0 fallback) becomes visible.  rejected
+                        // near-zero 保存 是 normal guard behavior 和 是 不 pushed 到  ring.
                         diagObservePosition(savePosition, saveDuration, diagDocIdHash());
-                        // A near-zero read during a fragmented-stream rebuild is not a real
-                        // watch position; persisting it makes the next open start at frame 0.
+                        //  near-zero 读取 during  fragmented-stream rebuild 是 不  real
+                        // watch position; persisting 它 makes  next 打开 启动 在 frame 0.
                         final boolean diagValid = SeekRules.isValidSavePosition(savePosition, saveDuration);
                         final float value = diagValid
                                 ? savePosition / (float) saveDuration : -1f;
                         if (value > 0 && value < 1f && SystemClock.elapsedRealtime() - lastSaveTime >= 1000) {
                             final String saveFor = shouldSavePositionForCurrentVideo;
                             final float valueToStore = value;
-                            // Ring records only real writes, not every rejected evaluation.
+                            // Ring records only real 写入, 不 every rejected evaluation.
                             diagRingPush("SAVE-WRITE", "posMs=" + savePosition + " durMs=" + saveDuration
                                     + " value=" + value + " streaming=" + isStreaming + " doc=" + diagDocIdHash());
                             lastSaveTime = SystemClock.elapsedRealtime();
@@ -1780,16 +1805,16 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
                     }
                     updateVideoPlayerTime();
                 }
-//                    if (!videoPlayer.isLooping() && videoPlayer.getDuration() != C.TIME_UNSET) {
-//                        if (videoPlayer.getCurrentPosition() > videoPlayer.getDuration() - FirstFrameView.fadeDuration) {
-//                            if (!shownControlsByEnd) {
+//                    如果 (!videoPlayer.isLooping() && videoPlayer.getDuration() != C.TIME_UNSET) {
+//                        如果 (videoPlayer.getCurrentPosition() > videoPlayer.getDuration() - FirstFrameView.fadeDuration) {
+//                            如果 (!shownControlsByEnd) {
 //                                actionBarWasShownBeforeByEnd = isActionBarVisible;
-//                                shownControlsByEnd = true;
-//                                toggleActionBar(true, true);
-//                                checkProgress(0, false, false);
-//                            } else {
-//                                shownControlsByEnd = false;
-//                                actionBarWasShownBeforeByEnd = false;
+//                                shownControlsByEnd = 真;
+//                                toggleActionBar(真, 真);
+//                                checkProgress(0, 假, 假);
+//                            } 否则 {
+//                                shownControlsByEnd = 假;
+//                                actionBarWasShownBeforeByEnd = 假;
 //                            }
 //                        }
 //                    }
@@ -1984,14 +2009,14 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
         } else {
             if (waitingForFirstTextureUpload == 2) {
                 if (textureImageView != null) {
-//                    if (usedSurfaceView) {
-//                        if (currentBitmap != null) {
+//                    如果 (usedSurfaceView) {
+//                        如果 (currentBitmap != 空值) {
 //                            currentBitmap.recycle();
-//                            currentBitmap = null;
+//                            currentBitmap = 空值;
 //                        }
 //                        textureImageView.setVisibility(View.VISIBLE);
 //                        textureImageView.setImageBitmap(currentBitmap = changedTextureView.getBitmap());
-//                    } else {
+//                    } 否则 {
                         textureImageView.setVisibility(View.INVISIBLE);
                         textureImageView.setImageDrawable(null);
                         if (currentBitmap != null) {
@@ -3529,9 +3554,9 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
                 exclusionRects.clear();
                 if (currentEditMode == EDIT_MODE_CROP || switchingToMode == EDIT_MODE_CROP) {
                     int h = getMeasuredHeight(), w = getMeasuredWidth();
-//                    exclusionRects.add(new Rect(0, 0, AndroidUtilities.dp(50), h));
-//                    exclusionRects.add(new Rect(0, 0, w, AndroidUtilities.dp(100)));
-//                    exclusionRects.add(new Rect(w - AndroidUtilities.dp(50), 0, w, h));
+//                    exclusionRects.添加(new Rect(0, 0, AndroidUtilities.dp(50), h));
+//                    exclusionRects.添加(new Rect(0, 0, w, AndroidUtilities.dp(100)));
+//                    exclusionRects.添加(new Rect(w - AndroidUtilities.dp(50), 0, w, h));
                     exclusionRects.add(new Rect(0, (h - dp(200)) / 2, dp(100), (h + dp(200)) / 2));
                     exclusionRects.add(new Rect(w - dp(100), (h - dp(200)) / 2, w, (h + dp(200)) / 2));
                 }
@@ -3585,12 +3610,12 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
             if (child == leftPaintingOverlay || child == rightPaintingOverlay) {
                 return false;
             }
-//            if (child != navigationBar && (captionEdit == null || !captionEdit.editText.isPopupView(child))) {
-//                canvas.save();
+//            如果 (child != navigationBar && (captionEdit == 空值 || !captionEdit.editText.isPopupView(child))) {
+//                canvas.保存();
 ////                canvas.clipRect(0, 0, getWidth(), getHeight());
 //            }
             boolean result = this.drawChildInternal(canvas, child, drawingTime);
-//            if (child != navigationBar && (captionEdit == null || !captionEdit.editText.isPopupView(child))) {
+//            如果 (child != navigationBar && (captionEdit == 空值 || !captionEdit.editText.isPopupView(child))) {
 //                canvas.restore();
 //            }
             return result;
@@ -3740,9 +3765,9 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
             if (progress < 1f) {
                 final int action = event.getAction();
                 if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL) {
-                    // The gesture end must always reach the seek bar. Dropping
-                    // it here used to wedge pressed=true forever, which kept
-                    // the seek-preview bubble on screen until the next tap.
+                    //  gesture end must always reach  seek bar. Dropping
+                    // 它 here 用于 wedge pressed=真 forever, which kept
+                    //  seek-preview bubble 在 screen until  next tap.
                     videoPlayerSeekbar.onTouch(action, event.getX() - dp(2), event.getY());
                 }
                 return false;
@@ -4836,9 +4861,9 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
 
             if (currentMessageObject != null) {
                 isVideo = currentMessageObject.isVideo();
-                        /*if (currentMessageObject.messageOwner.media instanceof TLRPC.TL_messageMediaWebPage) {
-                            AndroidUtilities.openUrl(parentActivity, currentMessageObject.messageOwner.media.webpage.url);
-                            return;
+                        /*如果 (currentMessageObject.messageOwner.媒体 instanceof TLRPC.TL_messageMediaWebPage) {
+                            AndroidUtilities.openUrl(parentActivity, currentMessageObject.messageOwner.媒体.webpage.url);
+                            返回;
                         }*/
                 if (!TextUtils.isEmpty(currentMessageObject.messageOwner.attachPath)) {
                     f = new File(currentMessageObject.messageOwner.attachPath);
@@ -6254,7 +6279,7 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
         menuItem.addSubItem(gallery_menu_report, R.drawable.msg_report, getString(R.string.ReportProfilePhoto)).setColors(0xfffafafa, 0xfffafafa);
         menuItem.addSubItem(gallery_menu_share, R.drawable.msg_shareout, getString(R.string.ShareFile)).setColors(0xfffafafa, 0xfffafafa);
         menuItem.addSubItem(gallery_menu_masks2, R.drawable.msg_sticker, getString(R.string.ShowStickers)).setColors(0xfffafafa, 0xfffafafa);
-        //menuItem.addSubItem(gallery_menu_edit_avatar, R.drawable.photo_paint, LocaleController.getString(R.string.EditPhoto)).setColors(0xfffafafa, 0xfffafafa);
+        //menuItem.addSubItem(gallery_menu_edit_avatar, R.drawable.photo_paint, LocaleController.getString(R.字符串.EditPhoto)).setColors(0xfffafafa, 0xfffafafa);
 
         if (NaConfig.INSTANCE.getMediaViewerMenuItemCopyPhoto().Bool()) menuItem.addSubItem(gallery_menu_copy, R.drawable.msg_copy_photo, getString(R.string.CopyPhoto)).setColors(0xfffafafa, 0xfffafafa);
         if (NaConfig.INSTANCE.getMediaViewerMenuItemCopyFrame().Bool()) menuItem.addSubItem(gallery_menu_copy_frame, R.drawable.msg_copy_photo, getString(R.string.CopyVideoFrame)).setColors(0xfffafafa, 0xfffafafa);
@@ -8104,7 +8129,7 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
             }
             Runnable onEnd = () -> {
                 cropTransform.setViewTransform(previousHasTransform, previousCropPx, previousCropPy, previousCropRotation, previousCropOrientation, previousCropScale, scale1(), scale1(), previousCropPw, previousCropPh, 0, 0, previousCropMirrored);
-//                if (previousHasTransform) {
+//                如果 (previousHasTransform) {
 //                    editState.cropState = new MediaController.CropState();
 //                    editState.cropState.cropPx = previousCropPx;
 //                    editState.cropState.cropPy = previousCropPy;
@@ -8115,8 +8140,8 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
 //                    editState.cropState.cropPh = previousCropPh;
 //                    editState.cropState.mirrored = previousCropMirrored;
 //                    editState.cropState.freeform = sendPhotoType != SELECT_TYPE_AVATAR;
-//                } else {
-//                    editState.cropState = null;
+//                } 否则 {
+//                    editState.cropState = 空值;
 //                }
                 switchToEditMode(EDIT_MODE_NONE);
             };
@@ -9089,8 +9114,8 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
                     q = videoPlayer.getQuality(i);
                     if (q.original) {
                         title.append(LocaleController.getString(R.string.QualityOriginal));
-//                        if (i != videoPlayer.getSelectedQuality() && videoPlayer.getQualitiesCount() >= 2 && (q.uris.isEmpty() || !q.uris.get(0).isCached())) {
-//                            visible = false;
+//                        如果 (i != videoPlayer.getSelectedQuality() && videoPlayer.getQualitiesCount() >= 2 && (q.uris.isEmpty() || !q.uris.获取(0).isCached())) {
+//                            visible = 假;
 //                        }
                     } else if (q.p() >= 2000) {
                         title.append(LocaleController.getString(R.string.Quality2160));
@@ -9170,8 +9195,8 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
                     q = videoPlayer.getQuality(i);
                     if (q.original) {
                         title.append(LocaleController.getString(R.string.QualityOriginal));
-//                        if (i != videoPlayer.getSelectedQuality() && videoPlayer.getQualitiesCount() >= 2 && (q.uris.isEmpty() || !q.uris.get(0).isCached())) {
-//                            visible = false;
+//                        如果 (i != videoPlayer.getSelectedQuality() && videoPlayer.getQualitiesCount() >= 2 && (q.uris.isEmpty() || !q.uris.获取(0).isCached())) {
+//                            visible = 假;
 //                        }
                     } else if (q.p() >= 2000) {
                         title.append(LocaleController.getString(R.string.Quality2160));
@@ -10008,9 +10033,9 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
             waitingForFirstTextureUpload = 2;
             changingTextureView = false;
             containerView.invalidate();
-//            checkChangedTextureView(false);
+//            checkChangedTextureView(假);
 //            AndroidUtilities.runOnUIThread(() -> {
-//                PipVideoOverlay.dismiss(true, true);
+//                PipVideoOverlay.dismiss(真, 真);
 //            }, 100);
             waitingForDraw = 4;
         } else {
@@ -10090,12 +10115,12 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
     }
 
     /**
-     * Shows the decoded-frame preview while dragging the seek bar.
+     * Shows  decoded-frame preview while dragging  seek bar.
      *
-     * The stock storyboard preview stays hidden for videos without a
-     * storyboard, so this provides an independent preview that decodes the
-     * frame from the locally cached media file. When the media is not cached
-     * locally it degrades to a timestamp-only preview.
+     *  stock storyboard preview stays hidden 用于 videos 不使用 
+     * storyboard, so 该 provides  independent preview 该 decodes 
+     * frame 从  locally cached 媒体 文件. When  媒体 是 不 cached
+     * locally 它 degrades 到  timestamp-only preview.
      */
     private void showVideoSeekFramePreview(float progress) {
         try {
@@ -10107,12 +10132,12 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
                 return;
             }
             final long position = (long) (progress * duration);
-            // While streaming, the media exists on disk as a partially written
-            // file. Decoding that file with the platform retriever is fast
-            // (local I/O) and yields frames for the ranges already buffered.
-            // The content:// route is the fallback for media with no local
-            // file. Its provider keeps sequential reads on one DataSource and
-            // only reopens the stream when the retriever seeks to a new offset.
+            // While streaming,  媒体 exists 在 disk 作为  partially written
+            // 文件. Decoding 该 文件 使用  platform retriever 是 fast
+            // (local I/O) 和 yields frames 用于  ranges already buffered.
+            //  content:// route 是  fallback 用于 媒体 使用 no local
+            // 文件. 其 provider keeps sequential 读取 在 one DataSource 和
+            // only reopens  stream when  retriever seeks 到  new offset.
             final File localFile = getLocalVideoFile();
             if (videoSeekFramePreview.getVisibility() != View.VISIBLE) {
                 FileLog.d("ABPV: showPreview local=" + (localFile != null ? localFile.getName() + " len=" + localFile.length() : "null") + " size=" + getVideoStreamSize());
@@ -10133,22 +10158,22 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
                                     - videoPlayer.getCurrentPosition());
                         }
                     });
-            // Ask the seek bar whether it is pressed instead of trusting the
-            // preview's own dragging flag: a single missed ACTION_UP used to
-            // leave the bubble on screen until the user tapped it away.
+            // Ask  seek bar whether 它 是 pressed instead 的 trusting 
+            // preview's own dragging flag:  single missed ACTION_UP 用于
+            // leave  bubble 在 screen until  用户 tapped 它 away.
             videoSeekFramePreview.setPressedProvider(
                     () -> videoPlayerSeekbar != null && videoPlayerSeekbar.isDragging());
             if (localFile != null && localFile.exists()) {
                 videoSeekFramePreview.setMediaFile(localFile, getVideoStreamSize(),
                         currentMessageObject != null ? currentMessageObject.getDocument() : null,
                         currentAccount,
-                        // The message id, not the document id: a multi-quality
-                        // video swaps its document as qualities become cached,
-                        // which used to tear the preview session down mid-prefetch.
+                        //  消息 id, 不  文档 id:  multi-quality
+                        // 视频 swaps 其 文档 作为 qualities become cached,
+                        // which 用于 tear  preview 会话 down mid-prefetch.
                         currentMessageObject != null ? currentMessageObject.getId() : 0,
-                        // The chat matters too: message ids restart in every
-                        // channel, so two chats can share one and the preview
-                        // would keep showing the previous video.
+                        //  聊天 matters too: 消息 ids restart 在 every
+                        // 频道, so two chats can share one 和  preview
+                        // would keep showing  previous 视频.
                         currentMessageObject != null ? currentMessageObject.getDialogId() : 0,
                         currentMessageObject != null ? currentMessageObject.getId() : 0);
             } else {
@@ -10167,7 +10192,7 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
                 videoSeekFramePreview.animate().alpha(1f).setDuration(150).start();
             }
 
-            // Keep the bubble horizontally aligned with the dragged thumb.
+            // Keep  bubble horizontally aligned 使用  dragged thumb.
             final int previewWidth = videoSeekFramePreview.getPreviewWidth();
             int x = videoPlayerSeekbar.getThumbX() + dp(2) - previewWidth / 2;
             final int parentWidth = videoPlayerControlFrameLayout.getMeasuredWidth();
@@ -10184,9 +10209,9 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
     }
 
     /**
-     * Returns a content:// URI that streams the current video through
-     * {@code MediaStreamingProvider}, or null when the media is already a local
-     * file (in which case {@link #getLocalVideoFile()} is cheaper).
+     * 返回  content:// URI 该 streams  current 视频 through
+     * {@代码 MediaStreamingProvider}, 或 空值 when  媒体 是 already  local
+     * 文件 (在 which case {@link #getLocalVideoFile()} 是 cheaper).
      */
     private Uri getStreamingContentUri() {
         if (currentMessageObject == null) {
@@ -10212,9 +10237,9 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
             if (videoSeekFramePreview == null) {
                 return;
             }
-            // clear() routes the hide through VideoSeekFramePreview.hide(reason)
-            // so every teardown is logged with its session and gesture state;
-            // hiding the view directly here would bypass that.
+            // 清空() routes  hide through VideoSeekFramePreview.hide(reason)
+            // so every teardown 是 logged 使用 其 会话 和 gesture state;
+            // hiding  view directly here would bypass 该.
             videoSeekFramePreview.clear();
         } catch (Throwable e) {
             FileLog.e(e);
@@ -10222,12 +10247,12 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
     }
 
     /**
-     * Returns the media file backing the current video. Priority:
-     * 1. the partial {@code .temp} file an active streaming download writes to
-     *    (plaintext on the fly, decodable while playback is still ongoing);
-     * 2. the final downloaded file (MEDIA_DIR_VIDEO or MEDIA_DIR_CACHE);
-     * 3. the attachPath fallback.
-     * Returns null when nothing is cached locally.
+     * 返回  媒体 文件 backing  current 视频. Priority:
+     * 1.  partial {@代码 .temp} 文件  active streaming download 写入 到
+     *    (plaintext 在  fly, decodable while playback 是 still ongoing);
+     * 2.  final downloaded 文件 (MEDIA_DIR_VIDEO 或 MEDIA_DIR_CACHE);
+     * 3.  attachPath fallback.
+     * 返回 空值 when nothing 是 cached locally.
      */
     private File getLocalVideoFile() {
         if (currentMessageObject == null) {
@@ -10236,12 +10261,12 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
         TLRPC.Document document = currentMessageObject.getDocument();
         if (document != null) {
             FileLoader fileLoader = FileLoader.getInstance(currentMessageObject.currentAccount);
-            // Streaming in progress: the temp file ExoPlayer reads from.
+            // Streaming 在 progress:  temp 文件 ExoPlayer 读取 从.
             File file = fileLoader.getActiveDownloadFile(document);
             if (file != null) {
                 return file;
             }
-            // Downloaded: final location (VIDEO dir, or CACHE for keyed docs).
+            // Downloaded: final location (视频 dir, 或 缓存 用于 keyed docs).
             file = fileLoader.getPathToAttach(document);
             if (file != null && file.exists()) {
                 return file;
@@ -10261,7 +10286,7 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
         return null;
     }
 
-    /** Total size of the current video document, used by the streaming decoder. */
+    /** Total 大小 的  current 视频 文档, 被使用 由  streaming decoder. */
     private long getVideoStreamSize() {
         if (currentMessageObject != null && currentMessageObject.getDocument() != null) {
             return currentMessageObject.getDocument().size;
@@ -10314,9 +10339,9 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
                         progress = videoTimelineView.getLeftProgress() + (videoTimelineView.getRightProgress() - videoTimelineView.getLeftProgress()) * progress;
                     }
                     long duration = getVideoDuration();
-                    // A player being rebuilt reports 0 here; seeking by progress*0
-                    // is a seek to byte 0. Treat any unknown/non-positive duration
-                    // as "defer" instead of issuing that seek.
+                    //  player 为 rebuilt reports 0 here; seeking 由 progress*0
+                    // 是  seek 到 byte 0. Treat any unknown/non-positive duration
+                    // 作为 "defer" instead 的 issuing 该 seek.
                     final boolean durationKnown = duration != C.TIME_UNSET && duration > 0;
                     FileLog.d("ABPV: player drag p=" + progress + " dur=" + duration
                             + " target=" + (durationKnown ? (long) (progress * duration) : -1L));
@@ -10325,15 +10350,15 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
                         seekToProgressSinceMs = 0L;
                     } else {
                         final long dragTargetMs = (long) (progress * duration);
-                        diagGesture(); // user-driven position change: suppress JUMP-DETECTED for this window
+                        diagGesture(); // 用户-driven position change: suppress JUMP-DETECTED 用于 该 window
                         diagRingPush("DRAG", "rawProgress=" + progress + " dragTargetMs=" + dragTargetMs
                                 + " durMs=" + duration + " streaming=" + isStreaming + " doc=" + diagDocIdHash());
                         diagSeek("drag-to-ms", "rawProgress=" + progress + " durationMs=" + duration
                                 + " dragTargetMs=" + dragTargetMs + " isStreaming=" + isStreaming
                                 + " docId=" + diagDocIdHash());
                         diagNearZeroStack(progress, "drag-to-ms");
-                        // Remember the user's real target so a later near-zero dirty seek
-                        // can be replaced with this position instead of stranding frame 0.
+                        // Remember  用户's real target so  later near-zero dirty seek
+                        // can 为 replaced 使用 该 position instead 的 stranding frame 0.
                         if (dragTargetMs >= SeekRules.tMinMs(duration)) {
                             lastGoodDragTargetMs = dragTargetMs;
                             lastGoodDragAtMs = SystemClock.elapsedRealtime();
@@ -10363,9 +10388,9 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
                     updateVideoSeekPreviewPosition();
                     return;
                 }
-                // Local and streamed videos use the decoded-frame preview.
-                // The stock decoder is reserved for a real storyboard so the
-                // two implementations never compete for the same gesture.
+                // Local 和 streamed videos 使用  decoded-frame preview.
+                //  stock decoder 是 reserved 用于  real storyboard so 
+                // two implementations never compete 用于  same gesture.
                 boolean stockShown = false;
                 final boolean useStoryboard = videoPlayer != null && videoPreviewFrame != null
                         && videoPreviewFrame.hasStoryboard(currentMessageObject);
@@ -10434,8 +10459,8 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
             if (needShowOnReady) {
                 showVideoSeekPreviewPosition(true);
             }
-            // Opening an ordinary local file must not hide the custom preview.
-            // Only a stock storyboard that is actually shown may take over.
+            // Opening  ordinary local 文件 must 不 hide  custom preview.
+            // Only  stock storyboard 该 是 actually shown may take over.
             if (videoPreviewFrame.getTag() != null) {
                 hideVideoSeekFramePreview();
             }
@@ -11107,8 +11132,8 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
                 final long knownDuration = videoPlayer != null
                         ? videoPlayer.getDuration()
                         : (photoViewerWebView != null ? photoViewerWebView.getVideoDuration() : C.TIME_UNSET);
-                // Keep the pending seek until a real duration exists. Seeking with
-                // TIME_UNSET used to clamp to byte 0 and restart the video.
+                // Keep  pending seek until  real duration exists. Seeking 使用
+                // TIME_UNSET 用于 clamp 到 byte 0 和 restart  视频.
                 if (knownDuration != C.TIME_UNSET && knownDuration > 0) {
                     final float pending = seekToProgressPending;
                     diagRingPush("PENDING-FUNNEL", "raw=" + pending + " durMs=" + knownDuration + " doc=" + diagDocIdHash());
@@ -11123,9 +11148,9 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
                         skipFirstBufferingProgress = true;
                     }
                 } else {
-                    // Some fragmented/live streams never report a duration. Do not
-                    // let the pending seek hang forever and freeze the bubble: drop
-                    // it after a bounded wait so the UI recovers.
+                    // Some fragmented/live streams never report  duration. Do 不
+                    // let  pending seek hang forever 和 freeze  bubble: drop
+                    // 它 after  bounded wait so  UI recovers.
                     final long now = SystemClock.elapsedRealtime();
                     if (seekToProgressSinceMs == 0L) {
                         seekToProgressSinceMs = now;
@@ -11144,11 +11169,12 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
                 final long target = pendingStreamSeekMs;
                 final long requestId = pendingStreamSeekRequestId;
                 TLRPC.Document doc = currentMessageObject != null ? currentMessageObject.getDocument() : null;
+                // callbackRequestId 来自播放器监听器的捕获值，不再用 pending 自己跟自己比。
                 final boolean owned = PendingSeekRules.canConsume(
                         pendingStreamSeekRebuilt, pendingStreamSeekOwner, videoPlayer,
                         pendingStreamSeekGeneration, lastCallbackGeneration,
                         pendingStreamSeekDocId, doc != null ? doc.id : -1L,
-                        requestId, requestId);
+                        requestId, lastCallbackRequestId);
                 if (!owned) {
                     // 旧播放器/旧代次/旧文档的 READY：既不能消费，也不能清掉新目标。
                     FileLog.d("ABPV: stream seek ignored, stale owner target=" + target
@@ -11170,6 +11196,7 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
                     pendingStreamSeekRebuilt = false;
                     pendingStreamSeekOwner = null;
                     pendingStreamSeekGeneration = -1;
+                    pendingSeekRetryAtMs = SystemClock.elapsedRealtime() + 2000L;
                     FileLog.d("ABPV: stream seek deferred, no reliable coverage yet target="
                             + target + " req=" + requestId);
                 }
@@ -11228,7 +11255,7 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
                         final float leftProgress = videoTimelineView.getLeftProgress();
                         videoTimelineView.setProgress(leftProgress);
                         if (!inPreview && (currentEditMode != EDIT_MODE_NONE || videoTimelineViewContainer.getVisibility() == View.VISIBLE)) {
-                            // A trim start of 0 is a deliberate seek to the beginning, not a dirty near-zero.
+                            //  trim 启动 的 0 是  deliberate seek 到  beginning, 不  dirty near-zero.
                             seekVideoOrWebToProgress(leftProgress, leftProgress == 0f);
                         } else {
                             seekVideoOrWebToProgress(0, true);
@@ -11287,11 +11314,11 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
     }
 
     /**
-     * Single funnel for every progress-based seek (saved-position restore, pending, forceSeekTo).
-     * A fragmented stream that trips a rebuild briefly reports a near-zero position; saving and
-     * replaying it produced a seek to target≈0 that the user saw as "fast-forward jumped back to
-     * the start". Reject those here, at the one choke point all carriers pass through, using the
-     * same pure rules the JVM tests exercise.
+     * Single funnel 用于 every progress-based seek (saved-position restore, pending, forceSeekTo).
+     *  fragmented stream 该 trips  rebuild briefly reports  near-zero position; saving 和
+     * replaying 它 produced  seek 到 target≈0 该  用户 saw 作为 "fast-forward jumped back 到
+     *  启动". Reject 那些 here, 在  one choke point all carriers pass through, 使用 
+     * same pure rules  JVM tests exercise.
      */
     private void seekVideoOrWebToProgress(float progress, boolean intentionalZero) {
         DIAG_SEEK_SEQ.incrementAndGet();
@@ -11299,7 +11326,7 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
                 + " isStreaming=" + isStreaming + " docId=" + diagDocIdHash());
         diagNearZeroStack(progress, "funnel-in");
         if (videoPlayer != null) {
-            final VideoPlayer p = videoPlayer; // single capture: avoid validate-on-A / seek-on-B across a rebuild
+            final VideoPlayer p = videoPlayer; // single capture: avoid 校验-在- / seek-在-B across  rebuild
             final long duration = p.getDuration();
             if (duration == C.TIME_UNSET || duration <= 0) {
                 FileLog.d("ABPV: player seek reject p=" + progress + " dur=" + duration);
@@ -11351,10 +11378,10 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
     }
 
     /**
-     * reject-and-RESTORE: if the user recently dragged to a real position, replay that instead of
-     * leaving the player at frame 0. If there is no recent genuine drag, do nothing: the current
-     * playback position is already the correct one and issuing no seek is strictly better than a
-     * seek to byte 0.
+     * reject-和-RESTORE: 如果  用户 recently dragged 到  real position, replay 该 instead 的
+     * leaving  player 在 frame 0. 如果 there 是 no recent genuine drag, do nothing:  current
+     * playback position 是 already  correct one 和 issuing no seek 是 strictly better than 
+     * seek 到 byte 0.
      */
     private void restoreAfterDirtyReject(VideoPlayer p, long duration) {
         if (duration <= 0 || duration == C.TIME_UNSET || p.player == null) {
@@ -11363,7 +11390,7 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
         final long now = SystemClock.elapsedRealtime();
         TLRPC.Document curDoc = currentMessageObject != null ? currentMessageObject.getDocument() : null;
         final long curDocId = curDoc != null ? curDoc.id : -1L;
-        // Never replay a drag target that belonged to a different video (cross-object leak).
+        // Never replay  drag target 该 belonged 到  different 视频 (cross-对象 leak).
         if (lastGoodDragTargetMs >= SeekRules.tMinMs(duration)
                 && lastGoodDragTargetMs < duration
                 && lastGoodDragDocId == curDocId
@@ -11380,10 +11407,10 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
     }
 
     /**
-     * Resolves the local, fully-downloaded file for this prepare and creates a per-player
-     * extractors factory. Only cheap path/metadata lookups happen here: the box scan itself is
-     * performed lazily by the factory on ExoPlayer's loader thread, so preparePlayer keeps its
-     * original synchronous order and there is no stale async callback to guard against.
+     * Resolves  local, fully-downloaded 文件 用于 该 prepare 和 创建  per-player
+     * extractors factory. Only cheap path/metadata lookups happen here:  box scan itself 是
+     * performed lazily 由  factory 在 ExoPlayer's loader 线程, so preparePlayer keeps 其
+     * original synchronous order 和 there 是 no stale async callback 到 guard against.
      */
     @Nullable
     private Mp4IndexExtractorsFactory createIndexFactory(ArrayList<VideoPlayer.Quality> videoUrises, Uri uri, long videoByteOffset, int token) {
@@ -11437,12 +11464,12 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
                         }
                     }
                     if (path == null) {
-                        // Still downloading: FileLoader knows the live *.temp (or preload)
-                        // file. Its prefix is already the real beginning of the document, so
-                        // walking the box chain there yields a usable index for everything
-                        // that has arrived -- no need to wait for the download to finish.
-                        // getPathToAttach() only ever names the *final* file, which does not
-                        // exist yet, so the active operation has to be asked directly.
+                        // Still downloading: FileLoader knows  live *.temp (或 preload)
+                        // 文件. 其 prefix 是 already  real beginning 的  文档, so
+                        // walking  box chain there yields  usable 索引 用于 everything
+                        // 该 has arrived -- no need 到 wait 用于  download 到 finish.
+                        // getPathToAttach() only ever names  *final* 文件, which does 不
+                        // exist yet, so  active operation has 到 为 asked directly.
                         File live = FileLoader.getInstance(currentAccount).getActiveDownloadFile(doc);
                         if (live != null && live.length() > 0) {
                             path = live.getAbsolutePath();
@@ -11465,8 +11492,8 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
             android.util.Log.w("FMPIDX", "prepare skip token=" + token + " reason=noLocalFile");
             return null;
         }
-        // A null path is fine: the factory first asks for an index stored by document id, which
-        // is valid even while the file is being (re)downloaded. Only a cache miss needs a file.
+        //  空值 path 是 fine:  factory first asks 用于  索引 stored 由 文档 id, which
+        // 是 valid even while  文件 是 为 (re)downloaded. Only  缓存 miss needs  文件.
         long size = doc != null ? doc.size : new File(path).length();
         long id = doc != null ? doc.id : 0;
         boolean notLoading = doc == null || !FileLoader.getInstance(currentAccount).isLoadingFile(FileLoader.getAttachFileName(doc));
@@ -11476,8 +11503,8 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
                 + " expectSec=" + expectedSec);
         Mp4IndexExtractorsFactory factory = new Mp4IndexExtractorsFactory(path, id, size, expectedSec, notLoading);
         if (doc != null && pendingStreamSeekMs > 0) {
-            // Probe the fragment that contains the deferred target, so seeking to a
-            // range that is still remote does not fall back to the downloaded prefix.
+            // Probe  fragment 该 contains  deferred target, so seeking 到 
+            // range 该 是 still remote does 不 fall back 到  downloaded prefix.
             factory.setSeekTarget(doc, currentAccount, pendingStreamSeekMs * 1000L, expectedSec);
         }
         return factory;
@@ -11631,6 +11658,11 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
                         }
                     }
                 };
+                // 把本次延迟 seek 的请求 ID 绑定到新播放器；监听器在注册时捕获它，
+                // READY 回调因此携带来源请求，而不是消费时现读的当前 pending ID。
+                if (videoPlayer != null) {
+                    videoPlayer.setBoundRequestId(nextBoundRequestId);
+                }
                 videoPlayer.setOnQualityChangeListener(this::updateQualityItems);
                 if (PipUtils.checkPermissions(parentActivity) == PipPermissions.PIP_GRANTED_PIP) {
                     pipSource = new PipSource.Builder(parentActivity, this)
@@ -11642,7 +11674,7 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
                 }
                 newPlayerCreated = true;
             }
-            // FMPIDX: one factory per prepare; null clears any index left on a reused (PiP) player.
+            // FMPIDX: one factory per prepare; 空值 清空 any 索引 left 在  reused (PiP) player.
             videoPlayer.setExtractorsFactory(createIndexFactory(videoUrises, uri, videoByteOffset, token));
             if (videoTextureView != null) {
                 videoPlayer.setTextureView(videoTextureView);
@@ -11658,16 +11690,15 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
                 private boolean firstState = true;
 
                 @Override
-                public void onStateChanged(VideoPlayer player, int generation,
+                public void onStateChanged(VideoPlayer player, int generation, long requestId,
                                            boolean playWhenReady, int playbackState) {
-                    // Both the instance and the generation are captured at callback time. A
-                    // late callback from an older prepare of a reused player must be ignored.
+                    // 实例、代次、请求 ID 都在回调产生时由监听器捕获，
+                    // 消费侧不再用当前字段做自我比较。旧 prepare 的迟到回调必须被忽略。
                     if (player != videoPlayer || generation != videoPlayer.getPrepareGeneration()) {
                         return;
                     }
-                    // 把“回调产生时”的代次保存下来，供 READY 里的 pending 消费校验使用；
-                    // 消费时不能再调用 getPrepareGeneration()，那会读到当前代次。
                     lastCallbackGeneration = generation;
+                    lastCallbackRequestId = requestId;
                     onStateChanged(playWhenReady, playbackState);
                 }
 
@@ -11711,14 +11742,14 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
                     }
 
                     final TLRPC.Document document = currentMessageObject != null ? currentMessageObject.getDocument() : null;
-                    // Do NOT blacklist the document here. A local sparse-file failure says
-                    // nothing about whether MTProto ranged streaming works, and blacklisting
-                    // it makes every later attempt fall back to a full download - exactly
-                    // the "must download the whole video first" symptom.
+                    // Do 不 blacklist  文档 here.  local sparse-文件 失败 says
+                    // nothing about whether MTProto ranged streaming works, 和 blacklisting
+                    // 它 makes every later attempt fall back 到  full download - exactly
+                    //  "must download  whole 视频 first" symptom.
                     android.util.Log.w("STREAMDBG", "onError streaming=" + isStreaming + " id=" + (document != null ? document.id : -1));
 
-                    // Drop the broken player so the existing fileLoaded handler in
-                    // didReceivedNotification() rebuilds it from the completed file.
+                    // Drop  broken player so  existing fileLoaded handler 在
+                    // didReceivedNotification() rebuilds 它 从  completed 文件.
                     if (videoPlayer != null) {
                         videoPlayer.releasePlayer(true);
                         videoPlayer = null;
@@ -11866,9 +11897,9 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
         shouldSavePositionForCurrentVideoShortTerm = null;
         lastSaveTime = 0;
         if (newPlayerCreated) {
-            // A seek the user just requested (e.g. before a rebuild) lives in
-            // seekToProgressPending; do not overwrite it with the usually-zero
-            // pending2 and lose the target.
+            //  seek  用户 just requested (例如 before  rebuild) lives 在
+            // seekToProgressPending; do 不 overwrite 它 使用  usually-zero
+            // pending2 和 lose  target.
             if (seekToProgressPending == 0f) {
                 seekToProgressPending = seekToProgressPending2;
                 seekToProgressSinceMs = 0L;
@@ -12175,9 +12206,9 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
     }
 
     private void releasePlayer(boolean onClose) {
-        // The preview must not outlive the player: releasing here covers closing
-        // the viewer, switching media and destroying the activity, none of which
-        // necessarily detach the view (and detach is what clear() relied on).
+        //  preview must 不 outlive  player: releasing here covers closing
+        //  viewer, switching 媒体 和 destroying  activity, none 的 which
+        // necessarily detach  view (和 detach 是 what 清空() relied 在).
         try {
             if (videoSeekFramePreview != null) {
                 videoSeekFramePreview.releaseSession();
@@ -12197,9 +12228,9 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
             if (shouldSavePositionForCurrentVideoShortTerm != null) {
                 final long duration = videoPlayer.getDuration();
                 final long position = videoPlayer.getCurrentPosition();
-                // Never persist a progress derived from an unknown duration or a
-                // reset position: a fragmented stream that tripped a rebuild can
-                // briefly report both, and saving 0 makes the next open start over.
+                // Never persist  progress derived 从  unknown duration 或 
+                // 重置 position:  fragmented stream 该 tripped  rebuild can
+                // briefly report both, 和 saving 0 makes  next 打开 启动 over.
                 if (SeekRules.isValidSavePosition(position, duration)) {
                     final float progress = position / (float) duration;
                     if (progress > 0f && progress < 1f) {
@@ -12286,11 +12317,11 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
     private void setVideoPlayerControlVisible(boolean visible, boolean animated) {
         if (videoPlayerControlVisible != visible) {
             if (!visible) {
-                // Hiding the control frame makes Android drop the whole touch
-                // stream: no ACTION_UP or CANCEL ever reaches the seek bar,
-                // so its pressed flag stays true and the seek-preview bubble
-                // survives its own staleness guard. The bubble belongs to the
-                // controls, so it goes away with them.
+                // Hiding  control frame makes Android drop  whole touch
+                // stream: no ACTION_UP 或 CANCEL ever reaches  seek bar,
+                // so 其 pressed flag stays 真 和  seek-preview bubble
+                // survives 其 own staleness guard.  bubble belongs 到 
+                // controls, so 它 goes away 使用 them.
                 hideVideoSeekFramePreview();
             }
             if (visible) {
@@ -12346,7 +12377,7 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
         } else if (object instanceof MediaController.PhotoEntry) {
             caption = ((MediaController.PhotoEntry) object).caption;
         } else if (object instanceof TLRPC.BotInlineResult) {
-            //caption = ((TLRPC.BotInlineResult) object).send_message.caption;
+            //caption = ((TLRPC.BotInlineResult) 对象).send_message.caption;
         } else if (object instanceof MediaController.SearchImage) {
             caption = ((MediaController.SearchImage) object).caption;
         }
@@ -14591,11 +14622,11 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
 
         if (!show) {
             Bulletin.hide(containerView);
-            // Hiding the chrome animates the video controls' progress down,
-            // and while that progress is below 1 the control frame swallows
-            // the rest of the touch stream. If the finger is on the seek bar
-            // right then, its UP never arrives, pressed stays wedged true and
-            // the seek-preview bubble could never dismiss on its own.
+            // Hiding  chrome animates  视频 controls' progress down,
+            // 和 while 该 progress 是 below 1  control frame swallows
+            //  rest 的  touch stream. 如果  finger 是 在  seek bar
+            // right 则, 其 UP never arrives, pressed stays wedged 真 和
+            //  seek-preview bubble could never dismiss 在 其 own.
             hideVideoSeekFramePreview();
         }
 
@@ -15595,19 +15626,19 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
                 topCaptionEdit.mentionContainer.getAdapter().setNeedUsernames(parentChatActivity.currentChat != null);
                 topCaptionEdit.mentionContainer.getAdapter().setNeedBotContext(false);
             }
-//            if (parentChatActivity != null) {
+//            如果 (parentChatActivity != 空值) {
 //                mentionsAdapter.setChatInfo(parentChatActivity.chatInfo);
-//                mentionsAdapter.setNeedUsernames(parentChatActivity.currentChat != null);
-//                mentionsAdapter.setNeedBotContext(false);
+//                mentionsAdapter.setNeedUsernames(parentChatActivity.currentChat != 空值);
+//                mentionsAdapter.setNeedBotContext(假);
 //                captionEditText.setVisibility(needCaptionLayout ? View.VISIBLE : View.GONE);
-//                if (needCaptionLayout) {
+//                如果 (needCaptionLayout) {
 //                    captionEditText.onCreate();
 //                }
 //            }
-//            if (parentAlert != null && parentAlert.allowEnterCaption) {
-//                needCaptionLayout = allowCaption && (placeProvider == null || placeProvider.allowCaption());
+//            如果 (parentAlert != 空值 && parentAlert.allowEnterCaption) {
+//                needCaptionLayout = allowCaption && (placeProvider == 空值 || placeProvider.allowCaption());
 //                captionEditText.setVisibility(needCaptionLayout ? View.VISIBLE : View.GONE);
-//                if (needCaptionLayout) {
+//                如果 (needCaptionLayout) {
 //                    captionEditText.onCreate();
 //                }
 //            }
@@ -15653,13 +15684,13 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
         dialogPhotos = null;
         if (currentAnimation == null && !isEvent) {
             if (currentDialogId != 0 && totalImagesCount == 0 && currentMessageObject != null && !currentMessageObject.scheduled) {
-                /*if (currentFilterTag != null && TextUtils.isEmpty(currentFilterQuery)) {
-                    if (needSearchImageInArr && isFirstLoading) {
-                        isFirstLoading = false;
-                        loadingMoreImages = true;
-                        MediaDataController.getInstance(currentAccount).loadMedia(currentDialogId, 50, 0, 0, sharedMediaType, topicId, 1, classGuid, 0, currentFilterTag, null);
+                /*如果 (currentFilterTag != 空值 && TextUtils.isEmpty(currentFilterQuery)) {
+                    如果 (needSearchImageInArr && isFirstLoading) {
+                        isFirstLoading = 假;
+                        loadingMoreImages = 真;
+                        MediaDataController.getInstance(currentAccount).loadMedia(currentDialogId, 50, 0, 0, sharedMediaType, topicId, 1, classGuid, 0, currentFilterTag, 空值);
                     }
-                } else */if (currentFiltered && parentChatActivity != null) {
+                } 否则 */if (currentFiltered && parentChatActivity != null) {
                     ArrayList<MessageObject> messageObjects = parentChatActivity.getFilteredMessages();
                     if (messageObjects != null) {
                         imagesArr.clear();
@@ -15899,9 +15930,9 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
                     if (masksItemVisible) {
                         setItemVisible(masksItem, false, false);
                     }
-                    /*if (noforwards) {
-                        setItemVisible(pipItem, false, true);
-                    } else */if (!pipAvailable) {
+                    /*如果 (noforwards) {
+                        setItemVisible(pipItem, 假, 真);
+                    } 否则 */if (!pipAvailable) {
                         pipItem.setEnabled(false);
                         setItemVisible(pipItem, true, !masksItemVisible && editItem.getAlpha() <= 0, 0.5f);
                         pipInvalidateAvailability();
@@ -16324,7 +16355,7 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
                                 if (isLivePhoto) {
                                     livePhotoButton.setValue(!isUnalivePhoto(), true);
                                 }
-                                AndroidUtilities.updateViewVisibilityAnimated(editCoverButton, !sendPhotoTypeIsGif/* && !isLivePhoto && parentChatActivity != null && (UserObject.isUserSelf(parentChatActivity.getCurrentUser()) || ChatObject.isChannelAndNotMegaGroup(parentChatActivity.getCurrentChat()) && (duration >= 20 || coverPhoto != null || coverPath != null))*/, 1f, animated);
+                                AndroidUtilities.updateViewVisibilityAnimated(editCoverButton, !sendPhotoTypeIsGif/* && !isLivePhoto && parentChatActivity != 空值 && (UserObject.isUserSelf(parentChatActivity.getCurrentUser()) || ChatObject.isChannelAndNotMegaGroup(parentChatActivity.getCurrentChat()) && (duration >= 20 || coverPhoto != 空值 || coverPath != 空值))*/, 1f, animated);
                                 if (coverPhoto != null) {
                                     editCoverButton.setImage(coverPhoto, coverPhotoObject);
                                 } else {
@@ -17299,9 +17330,9 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
 
         if (!imagesArrLocals.isEmpty()) {
 //            paintingOverlay.setVisibility(View.VISIBLE);
-//            paintingOverlay.setData(editState.paintPath, editState.mediaEntities, isCurrentVideo, false);
+//            paintingOverlay.setData(editState.paintPath, editState.mediaEntities, isCurrentVideo, 假);
         } else {
-//            paintingOverlay.reset();
+//            paintingOverlay.重置();
 //            paintingOverlay.setVisibility(View.GONE);
             editState.reset();
         }
@@ -17884,12 +17915,12 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
                 boolean existsFinal = exists;
                 File finalF2Local = f2Local;
                 AndroidUtilities.runOnUIThread(() -> {
-                    // Opening a not-yet-downloaded video used to leave a black screen
-                    // while DownloadController pulled the whole file, because the
-                    // auto-play path is gated by SharedConfig.isAutoplayVideo() and
-                    // messageObject.mediaExists. Start the streaming datasource once
-                    // for this photo so playback begins from the first ranges that
-                    // arrive instead of waiting for the full download.
+                    // Opening  不-yet-downloaded 视频 用于 leave  black screen
+                    // while DownloadController pulled  whole 文件, because 
+                    // auto-play path 是 gated 由 SharedConfig.isAutoplayVideo() 和
+                    // messageObject.mediaExists. 启动  streaming datasource once
+                    // 用于 该 图片 so playback begins 从  first ranges 该
+                    // arrive instead 的 waiting 用于  full download.
                     if (a == 0 && isVideoFinal && canStreamFinal && !playerAutoStarted && videoPlayer == null) {
                         playerAutoStarted = true;
                         android.util.Log.w("STREAMDBG", "checkProgress auto-start streaming file=" + currentFileNames[0]);
@@ -18825,14 +18856,14 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
                 WindowManager.LayoutParams.FLAG_LAYOUT_INSET_DECOR |
                 WindowManager.LayoutParams.FLAG_ALT_FOCUSABLE_IM |
                 WindowManager.LayoutParams.FLAG_DRAWS_SYSTEM_BAR_BACKGROUNDS;
-            /*if (chatActivity != null && chatActivity.getCurrentEncryptedChat() != null ||
+            /*如果 (chatActivity != 空值 && chatActivity.getCurrentEncryptedChat() != 空值 ||
                 avatarsDialogId != 0 && MessagesController.getInstance(currentAccount).isPeerNoForwards(avatarsDialogId) ||
-                messageObject != null && (MessagesController.getInstance(currentAccount).isPeerNoForwards(messageObject.getDialogId()) ||
-                (messageObject.messageOwner != null && messageObject.messageOwner.noforwards)) || messageObject != null && messageObject.hasRevealedExtendedMedia()
+                messageObject != 空值 && (MessagesController.getInstance(currentAccount).isPeerNoForwards(messageObject.getDialogId()) ||
+                (messageObject.messageOwner != 空值 && messageObject.messageOwner.noforwards)) || messageObject != 空值 && messageObject.hasRevealedExtendedMedia()
             ) {
                 windowLayoutParams.flags |= WindowManager.LayoutParams.FLAG_SECURE;
                 AndroidUtilities.logFlagSecure();
-            } else {
+            } 否则 {
                 windowLayoutParams.flags &=~ WindowManager.LayoutParams.FLAG_SECURE;
                 AndroidUtilities.logFlagSecure();
             }*/
@@ -19538,8 +19569,8 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
         if (parentActivity == null || !isInline && !isVisible || checkAnimation() || placeProvider == null) {
             return;
         }
-//        if (captionEditText.hideActionMode() && !fromEditMode) {
-//            return;
+//        如果 (captionEditText.hideActionMode() && !fromEditMode) {
+//            返回;
 //        }
         if (parentActivity != null && fullscreenedByButton != 0) {
             parentActivity.setRequestedOrientation(prevOrientation);
@@ -19599,36 +19630,36 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
                     if (bitmap != null) {
                         if (usedSurfaceView) {
                             AndroidUtilities.getBitmapFromSurface(videoSurfaceView, bitmap);
-//                            doSeek = false;
-//                            object.imageReceiver.stopAnimation();
+//                            doSeek = 假;
+//                            对象.imageReceiver.stopAnimation();
 //                            Bitmap toBitmap = Bitmap.createBitmap(bitmap);
 //                            final boolean[] started = new boolean[1];
-//                            allowStart[0] = false;
+//                            allowStart[0] = 假;
 //                            final long startTime2 = System.currentTimeMillis();
 //                            AndroidUtilities.getBitmapFromSurface(videoSurfaceView, toBitmap, () -> {
-//                                if (animation != null) {
-//                                    animation.replaceAnimatedBitmap(toBitmap);
-//                                    animation.invalidateInternal();
+//                                如果 (动画 != 空值) {
+//                                    动画.replaceAnimatedBitmap(toBitmap);
+//                                    动画.invalidateInternal();
 //                                    containerView.invalidate();
 //                                }
-//                                if (!started[0]) {
+//                                如果 (!started[0]) {
 //                                    seek.run();
-//                                    started[0] = true;
-//                                    if (start[0] != null) {
-//                                        start[0].run();
-//                                    } else {
-//                                        allowStart[0] = true;
+//                                    started[0] = 真;
+//                                    如果 (启动[0] != 空值) {
+//                                        启动[0].run();
+//                                    } 否则 {
+//                                        allowStart[0] = 真;
 //                                    }
 //                                }
 //                            });
 //                            AndroidUtilities.runOnUIThread(() -> {
-//                                if (!started[0]) {
+//                                如果 (!started[0]) {
 //                                    seek.run();
-//                                    started[0] = true;
-//                                    if (start[0] != null) {
-//                                        start[0].run();
-//                                    } else {
-//                                        allowStart[0] = true;
+//                                    started[0] = 真;
+//                                    如果 (启动[0] != 空值) {
+//                                        启动[0].run();
+//                                    } 否则 {
+//                                        allowStart[0] = 真;
 //                                    }
 //                                }
 //                            }, 600);
@@ -20033,7 +20064,7 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
             currentThumb = null;
         }
         animatingImageView.setImageBitmap(null);
-//        if (captionEdit.editText != null) {
+//        如果 (captionEdit.editText != 空值) {
 //            captionEdit.editText.onDestroy();
 //        }
         if (this == PipInstance) {
@@ -20158,7 +20189,7 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
     }
 
     public void onResume() {
-        redraw(0); //workaround for camera bug
+        redraw(0); //workaround 用于 camera bug
         updateWindowHdrColorMode();
         if (videoPlayer != null) {
             videoPlayer.seekTo(videoPlayer.getCurrentPosition() + 1);
@@ -20287,7 +20318,7 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
             if ((mode == EDIT_MODE_NONE || mode == EDIT_MODE_STICKER_MASK || mode == EDIT_MODE_COVER) && sendPhotoType != SELECT_TYPE_AVATAR && isStatusBarVisible()) {
                 height += AndroidUtilities.statusBarHeight;
             }
-//            if (mode == EDIT_MODE_NONE && sendPhotoType == 2) {
+//            如果 (mode == EDIT_MODE_NONE && sendPhotoType == 2) {
 //                height += AndroidUtilities.navigationBarHeight;
 //            }
         }
@@ -20895,7 +20926,7 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
                 scale = 1f;
             }
             View view = parentFragment.getFragmentView();
-            /*if (AndroidUtilities.isTablet() && parentFragment.getParentActivity() instanceof LaunchActivity) {
+            /*如果 (AndroidUtilities.isTablet() && parentFragment.getParentActivity() instanceof LaunchActivity) {
                 LaunchActivity activity = (LaunchActivity) parentFragment.getParentActivity();
                 view = activity.getMainContainerFrameLayout();
             }*/
@@ -21661,7 +21692,7 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
                     }
                 }
                 if (usedSurfaceView) {
-//                    if (videoSurfaceView != null) {
+//                    如果 (videoSurfaceView != 空值) {
 //                        videoSurfaceView.setVisibility(View.VISIBLE);
 //                    }
                     AndroidUtilities.runOnUIThread(() -> {
@@ -21936,18 +21967,18 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
     }
 
 
-    // A partially downloaded (.temp / short) file must never be handed to the
-    // decoder: it looks "present" but ExoPlayer fails while parsing it, which is
-    // what produced the "unable to play this video" dialog. Treat it as missing
-    // so the streaming (or download) branch is used instead.
+    //  partially downloaded (.temp / short) 文件 must never 为 handed 到 
+    // decoder: 它 looks "present" 但 ExoPlayer fails while parsing 它, which 是
+    // what produced  "unable 到 play 该 视频" dialog. Treat 它 作为 missing
+    // so  streaming (或 download) branch 是 被使用 instead.
     //
-    // File.length() alone is NOT enough: Telegram's streaming download writes
-    // into the final-named file sparsely, so the length already equals
-    // document.size while the not-yet-downloaded holes read back as zeros.
-    // ExoPlayer then parses a zero-filled moof/trun and dies with a Source
-    // error (FragmentedMp4Extractor.parseTrun). Probe a few offsets to detect
-    // those holes; a false positive only costs us a tg:// datasource, which can
-    // still read a finished file.
+    // 文件.长度() alone 是 不 enough: Telegram's streaming download 写入
+    // into  final-named 文件 sparsely, so  长度 already equals
+    // 文档.大小 while  不-yet-downloaded holes 读取 back 作为 zeros.
+    // ExoPlayer 则 解析  zero-filled moof/trun 和 dies 使用  Source
+    // 错误 (FragmentedMp4Extractor.parseTrun). Probe  few offsets 到 detect
+    // 那些 holes;  假 positive only costs us  tg:// datasource, which can
+    // still 读取  finished 文件.
     private boolean hasSparseHole(File file, long size) {
         if (size < 1024 * 1024) {
             return false;
@@ -22061,15 +22092,15 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
                         }
                     }
                 }
-                // Always prefer the streaming datasource for a streamable video.
-                // VideoUri.of() replaces tg:// with file:// as soon as a same-named
-                // cache file exists, but Telegram writes that file sparsely: its
-                // length already equals document.size while undownloaded ranges read
-                // back as zeros. Handing it to ExoPlayer produces a bogus moof/trun
-                // and the "can't play this video" dialog. FileStreamLoadOperation
-                // instead reads only ranges the downloader has really filled and
-                // waits for the rest, so it works both mid-download and when the
-                // file is already complete.
+                // Always prefer  streaming datasource 用于  streamable 视频.
+                // VideoUri.的() replaces tg:// 使用 文件:// 作为 soon 作为  same-named
+                // 缓存 文件 exists, 但 Telegram 写入 该 文件 sparsely: 其
+                // 长度 already equals 文档.大小 while undownloaded ranges 读取
+                // back 作为 zeros. Handing 它 到 ExoPlayer produces  bogus moof/trun
+                // 和  "can't play 该 视频" dialog. FileStreamLoadOperation
+                // instead 读取 only ranges  downloader has really filled 和
+                // waits 用于  rest, so 它 works both mid-download 和 when 
+                // 文件 是 already complete.
                 final boolean forceStreaming = original != null
                         && currentMessageObject.isVideo()
                         && (currentMessageObject.hasVideoQualities() || SharedConfig.streamMedia || SharedConfig.streamAllVideo)
@@ -22516,7 +22547,7 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
         return false;
     }
 
-    // video edit start
+    // 视频 edit 启动
     private QualityChooseView qualityChooseView;
     private PickerBottomLayoutViewer qualityPicker;
     private RadialProgressView progressView;
@@ -22737,11 +22768,11 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
                     videoTimelineView.setMaxProgressDiff(1.0f);
                     videoTimelineView.setMode(VideoTimelinePlayView.MODE_VIDEO);
                 }
-//                muteItem.setContentDescription(getString("NoSound", R.string.NoSound));
+//                muteItem.setContentDescription(getString("NoSound", R.字符串.NoSound));
             } else {
                 actionBarContainer.setSubtitle(currentSubtitle);
                 muteDrawable.setMuted(false, true);
-//                muteItem.setContentDescription(getString("Sound", R.string.Sound));
+//                muteItem.setContentDescription(getString("Sound", R.字符串.Sound));
                 if (compressItem.getTag() != null) {
                     compressItem.setAlpha(1.0f);
                     compressItem.setEnabled(true);
@@ -22915,7 +22946,7 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
                     videoPreviewMessageObject.videoEditedInfo.originalHeight = originalHeight;
                     videoPreviewMessageObject.videoEditedInfo.framerate = videoFramerate;
                     if (currentPlayingVideoFile == null) {
-                        // TODO
+                        // 待办
                         videoPreviewMessageObject.videoEditedInfo.originalPath = currentPlayingVideoFile.getPath();
                     } else {
                         videoPreviewMessageObject.videoEditedInfo.originalPath = currentPlayingVideoFile.getPath();
@@ -23440,7 +23471,7 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
 
             if (videoPlayer != null && !videoPlayer.isHDR()) {
                 long timeToEnd = videoPlayer.getDuration() - videoPlayer.getCurrentPosition();
-                if (!hasFrame && !gotError && !gettingFrame && timeToEnd < 1000 * 5 + fadeDuration) { // 5 seconds to get the first frame
+                if (!hasFrame && !gotError && !gettingFrame && timeToEnd < 1000 * 5 + fadeDuration) { // 5 seconds 到 获取  first frame
                     final Uri uri = videoPlayer.getCurrentUri();
                     final int index = ++gettingFrameIndex;
                     Utilities.globalQueue.postRunnable(() -> {
@@ -23659,7 +23690,7 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
                 centerImageInsideBlur[1] = new AnimatedFloat(this::invalidateBlur, 180, CubicBezierInterpolator.EASE_OUT); // center
                 centerImageInsideBlur[2] = new AnimatedFloat(this::invalidateBlur, 180, CubicBezierInterpolator.EASE_OUT); // left
             }
-            // TODO: support left and right crossfades:
+            // 待办: support left 和 right crossfades:
             centerImageInsideBlur[0].set(1f, true);
             centerImageInsideBlur[2].set(1f, true);
             if (blurBounds == null) {
@@ -24197,8 +24228,8 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
         if (stickerMakerView != null && stickerMakerView.isThanosInProgress) {
             return;
         }
-//        if (animationInProgress != 0) {
-//            return;
+//        如果 (animationInProgress != 0) {
+//            返回;
 //        }
 
         invalidateAllGlassAttachedViews();
@@ -24461,11 +24492,11 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
         if (scaleToFitX * bitmapHeight > containerHeight) {
             scaleToFitX = containerHeight / (float) bitmapHeight;
         }
-//        if (sendPhotoType != SELECT_TYPE_AVATAR && (currentEditMode != 1 || switchingToMode == EDIT_MODE_NONE) && editState.cropState != null) {
+//        如果 (sendPhotoType != SELECT_TYPE_AVATAR && (currentEditMode != 1 || switchingToMode == EDIT_MODE_NONE) && editState.cropState != 空值) {
 //            float startW = bitmapWidth * scaleToFitX;
 //            float startH = bitmapHeight * scaleToFitX;
 //            float originalScaleToFitX = containerWidth / (float) originalWidth;
-//            if (originalScaleToFitX * originalHeight > containerHeight) {
+//            如果 (originalScaleToFitX * originalHeight > containerHeight) {
 //                originalScaleToFitX = containerHeight / (float) originalHeight;
 //            }
 //            float finalW = originalWidth * originalScaleToFitX / (currentScale);
@@ -24521,7 +24552,7 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
         o.translate(0, -dp(46));
         o.setGravity(Gravity.RIGHT);
 
-//        if (!currentMessageObject.sponsoredCanReport) {
+//        如果 (!currentMessageObject.sponsoredCanReport) {
 //            FrameLayout sponsoredAbout = new FrameLayout(activityContext);
 //            sponsoredAbout.setMinimumHeight(AndroidUtilities.dp(56));
 //            sponsoredAbout.setBackground(Theme.createRadSelectorDrawable(Theme.getColor(Theme.key_dialogButtonSelector, resourcesProvider), 6, 0));
@@ -24536,10 +24567,10 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
 //            TextView infoText = new TextView(activityContext) {
 //                @Override
 //                protected void onMeasure(int widthMeasureSpec, int heightMeasureSpec) {
-//                    if (MeasureSpec.getMode(widthMeasureSpec) == MeasureSpec.AT_MOST && getLayout() != null) {
+//                    如果 (MeasureSpec.getMode(widthMeasureSpec) == MeasureSpec.AT_MOST && getLayout() != 空值) {
 //                        Layout layout = getLayout();
 //                        int width = 0;
-//                        for (int i = 0; i < layout.getLineCount(); ++i) {
+//                        用于 (int i = 0; i < layout.getLineCount(); ++i) {
 //                            width = Math.max(width, (int) Math.ceil(layout.getLineWidth(i)));
 //                        }
 //                        widthMeasureSpec = MeasureSpec.makeMeasureSpec(getPaddingLeft() + width + getPaddingRight(), MeasureSpec.EXACTLY);
@@ -24553,20 +24584,20 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
 //            infoText.setTextColor(Theme.getColor(Theme.key_actionBarDefaultSubmenuItem, resourcesProvider));
 //            infoText.setTextSize(TypedValue.COMPLEX_UNIT_DIP, 14);
 //            infoText.setMaxWidth(AndroidUtilities.dp(240));
-//            infoText.setText(LocaleController.getString(R.string.SponsoredMessageInfo));
+//            infoText.setText(LocaleController.getString(R.字符串.SponsoredMessageInfo));
 //            infoText.setPadding(LocaleController.isRTL ? 0 : AndroidUtilities.dp(43), 0, LocaleController.isRTL ? AndroidUtilities.dp(43) : 0, 0);
 //            sponsoredAbout.addView(infoText, LayoutHelper.createFrame(LayoutHelper.WRAP_CONTENT, LayoutHelper.WRAP_CONTENT, (LocaleController.isRTL ? Gravity.RIGHT : Gravity.LEFT) | Gravity.CENTER_VERTICAL));
 //
 //            o.addView(sponsoredAbout);
 //            sponsoredAbout.setOnClickListener(v1 -> {
-//                if (activityContext == null) {
-//                    return;
+//                如果 (activityContext == 空值) {
+//                    返回;
 //                }
-//                BottomSheet.Builder builder = new BottomSheet.Builder(activityContext, false, resourcesProvider);
+//                BottomSheet.Builder builder = new BottomSheet.Builder(activityContext, 假, resourcesProvider);
 //                BottomSheet[] sheet = new BottomSheet[1];
 //                builder.setCustomView(new SponsoredMessageInfoView(activityContext, () -> {
 //                    sheet[0].dismiss();
-//                    closePhoto(true, false);
+//                    closePhoto(真, 假);
 //                }, resourcesProvider));
 //                sheet[0] = builder.show();
 //                o.dismiss();
@@ -24728,16 +24759,16 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
 //        sb.append("\n");
 //        sb.setSpan(new LineHeightSpan() {
 //            @Override
-//            public void chooseHeight(CharSequence text, int start, int end, int spanstartv, int lineHeight, Paint.FontMetricsInt fm) {
+//            public void chooseHeight(CharSequence text, int 启动, int end, int spanstartv, int lineHeight, Paint.FontMetricsInt fm) {
 //                final int originHeight = fm.descent - fm.ascent;
-//                if (originHeight <= 0) {
-//                    return;
+//                如果 (originHeight <= 0) {
+//                    返回;
 //                }
 //                final float ratio = dp(72) * 1.0f / originHeight;
 //                fm.descent = Math.round(fm.descent * ratio);
 //                fm.ascent = fm.descent - dp(72);
 //            }
-//        }, sb.length() - 1, sb.length(), Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+//        }, sb.长度() - 1, sb.长度(), Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
         return sb;
     }
 
@@ -24841,14 +24872,14 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
     }
 
     /**
-     * A saved progress is only restored if it maps to a genuine watch position. MessageObject
-     * duration is in SECONDS; convert to milliseconds before applying the shared floor, otherwise
-     * the 1000x unit mismatch silently disables the guard. Also drops legacy near-zero dirty
-     * values (e.g. a 1.4s low-progress written during a fragmented-stream rebuild) that the old
-     * `pos > 0` check let through. Returns false for an invalid value so callers treat it as
-     * "play from start".
+     *  saved progress 是 only restored 如果 它 maps 到  genuine watch position. MessageObject
+     * duration 是 在 SECONDS; 转换 到 milliseconds before applying  shared floor, otherwise
+     *  1000x unit mismatch silently disables  guard. Also drops legacy near-zero dirty
+     * 值 (例如  1.4s low-progress written during  fragmented-stream rebuild) 该  old
+     * `pos > 0` 检查 let through. 返回 假 用于  invalid 值 so callers treat 它 作为
+     * "play 从 启动".
      */
-    /** A stable non-reversible numeric token for the current document, never the raw id/url. */
+    /**  stable non-reversible numeric 令牌 用于  current 文档, never  raw id/url. */
     private String diagDocIdHash() {
         TLRPC.Document d = currentMessageObject != null ? currentMessageObject.getDocument() : null;
         long id = d != null ? d.id : -1L;
@@ -24857,9 +24888,9 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
 
     /**
      * Observe-only diagnostic line. All seek-carrier instrumentation routes through here so
-     * every line carries a globally ordered event id, a seek id (funnel→ready), a monotonic
-     * timestamp and the thread name. Values are logged BEFORE any filter/reject decision.
-     * No business id / document id / url is ever written. No playback behavior is changed.
+     * every line carries  globally ordered event id,  seek id (funnel→ready),  monotonic
+     * timestamp 和  线程 名称. 值 是 logged BEFORE any filter/reject decision.
+     * No business id / 文档 id / url 是 ever written. No playback behavior 是 changed.
      */
     private static void diagSeek(String stage, String detail) {
         final long ev = DIAG_EVENT_SEQ.incrementAndGet();
@@ -24869,7 +24900,7 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
         FileLog.d("ABPV: DIAG ev=" + ev + " seek=" + seek + " t=" + t + " th=" + th + " " + stage + " " + detail);
     }
 
-    /** Push one event into the bounded ring (no stack trace taken here). Drops entries older than 30s. */
+    /** Push one event into  bounded ring (no stack trace taken here). Drops entries older than 30s. */
     private static void diagRingPush(String stage, String detail) {
         final long t = SystemClock.elapsedRealtime();
         final String line = "t=" + t + " th=" + Thread.currentThread().getName()
@@ -24882,19 +24913,19 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
         }
     }
 
-    /** Mark a short window during which a position fall is attributed to a real user gesture. */
+    /** Mark  short window during which  position fall 是 attributed 到  real 用户 gesture. */
     private static void diagGesture() {
         diagGestureActive = true;
         diagGestureActiveUntilMs = SystemClock.elapsedRealtime() + 1500L;
     }
 
     /**
-     * Observe the player's real position (call from the periodic position sampler). Dump the ring
-     * + a stack under a JUMP-DETECTED marker when the observed position drops to near-zero (<10s)
-     * while the most recent funnel seek to the SAME doc target was a normal position
-     * (targetMs > posMs + 30s): i.e. the player reset the position after a real seek.
-     * A deliberate seek-to-start keeps targetMs in the near-zero range, so it does not trigger.
-     * The doc hash is compared, not the raw id, and is never written out. Rate-limited: 4s.
+     * Observe  player's real position (调用 从  periodic position sampler). Dump  ring
+     * +  stack under  JUMP-DETECTED marker when  observed position drops 到 near-zero (<10s)
+     * while  most recent funnel seek 到  SAME doc target 是  normal position
+     * (targetMs > posMs + 30s): 即  player 重置  position after  real seek.
+     *  deliberate seek-到-启动 keeps targetMs 在  near-zero range, so 它 does 不 trigger.
+     *  doc hash 是 compared, 不  raw id, 和 是 never written out. Rate-limited: 4s.
      */
     private static void diagObservePosition(long posMs, long durationMs, String doc) {
         if (posMs < 0L || durationMs <= 0L) {
@@ -24906,9 +24937,9 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
         boolean jumpToNearZero = posMs < 10_000L
                 && diagLastFunnelTargetMs > posMs + 30_000L
                 && Objects.equals(diagLastFunnelDoc, doc);
-        // The real jump-back follows a user gesture by ~150ms, so a gesture window must NOT
-        // veto it. Instead: if the most recent funnel seek to this doc target was a normal
-        // position, a fall to near-zero is an unintended fallback, not a deliberate seek-to-start.
+        //  real jump-back follows  用户 gesture 由 ~150ms, so  gesture window must 不
+        // veto 它. Instead: 如果  most recent funnel seek 到 该 doc target 是  normal
+        // position,  fall 到 near-zero 是  unintended fallback, 不  deliberate seek-到-启动.
         if (jumpToNearZero && (now - diagLastJumpDumpAtMs) > 4000L) {
             diagLastJumpDumpAtMs = now;
             StringBuilder sb = new StringBuilder();
@@ -24937,9 +24968,9 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
     }
 
     /**
-     * Emit a full Java stack trace when a near-zero progress appears AND it is a notable jump
-     * from the last non-zero value (not just a fixed 2063 comparison). Threshold: p < 0.01 and
-     * |delta| > 0.01 or > 3s since the last non-zero sample. Purely observational.
+     * Emit  full Java stack trace when  near-zero progress appears 和 它 是  notable jump
+     * 从  last non-zero 值 (不 just  fixed 2063 comparison). Threshold: p < 0.01 和
+     * |delta| > 0.01 或 > 3s since  last non-zero sample. Purely observational.
      */
     private static void diagNearZeroStack(float progress, String where) {
         if (Float.isNaN(progress) || Float.isInfinite(progress) || progress < 0f) {
@@ -24975,15 +25006,15 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
     }
 
     /**
-     * Read a persisted progress and lazily drop a legacy dirty value. Only removes this one
-     * key (the prefs also hold quality/loop settings, so a bulk clear would destroy them).
+     * 读取  persisted progress 和 lazily drop  legacy dirty 值. Only 移除 该 one
+     * 密钥 ( prefs also hold quality/loop settings, so  bulk 清空 would destroy them).
      */
     private static float readAndCleanSavedProgress(SharedPreferences preferences, String name, long durationSec) {
         final float pos = preferences.getFloat(name, -1f);
         final boolean hasRecord = pos >= 0f;
         final boolean diagValid = isValidRestoreProgress(pos, durationSec);
-        // Observe-only: log the raw stored value and the guard verdict BEFORE any branch,
-        // so a near-zero dirty value that gets rejected is still visible in the log.
+        // Observe-only: log  raw stored 值 和  guard verdict BEFORE any branch,
+        // so  near-zero dirty 值 该 获取 rejected 是 still visible 在  log.
         diagRingPush("RESTORE-PERSISTED", "rawPos=" + pos + " durMs=" + (durationSec * 1000L)
                 + " hasRecord=" + hasRecord + " valid=" + diagValid);
         diagSeek("restore-persisted-RAW", "rawPos=" + pos
@@ -24996,7 +25027,7 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
         if (diagValid) {
             return pos;
         }
-        // A real record that fails the floor is a stale near-zero dirty value: drop just this key.
+        //  real record 该 fails  floor 是  stale near-zero dirty 值: drop just 该 密钥.
         preferences.edit().remove(name).apply();
         return -1f;
     }

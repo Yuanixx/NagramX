@@ -1,3 +1,12 @@
+/**
+ * ZH-COMMENT-BY-AGENT
+ * 文件：Mp4IndexExtractorsFactory.java
+ * 模块：TMessagesProj/src/main/java/org/telegram/ui/Components
+ * 类型：Mp4IndexExtractorsFactory（Mp4索引ExtractorsFactory）、ChunkIndexInjectingExtractor（Chunk索引InjectingExtractor）、RemoteExtendedSeekMap（RemoteExtendedSeekMap）
+ * 主要成员：DefaultExtractorsFactory（DefaultExtractorsFactory）、setSeekTarget（设置SeekTarget）、Mp4IndexExtractorsFactory（Mp4索引ExtractorsFactory）、createExtractors（创建Extractors）、hasIndex（是否含有索引）、canSeekTo（能否SeekTo）、coversRemote（coversRemote）、index（索引）、synchronized（synchronized）、lookup（lookup）
+ *          w（w）、build（构建）、coveredEndUs（coveredEndUs）、find（查找）
+ * 说明：本文件由中文注释引擎自动生成结构化说明；业务语义详见各成员处注释。
+ */
 package org.telegram.ui.Components;
 
 import android.net.Uri;
@@ -73,7 +82,7 @@ public final class Mp4IndexExtractorsFactory implements ExtractorsFactory {
      *
      * 为什么由 PhotoViewer 传入而不是工厂自己猜：目标来自用户拖动/续播恢复，
      * 属于 PhotoViewer 的待重放 seek；工厂只在 loader 线程使用它发探测请求。
-     * 所有网络工作都留在 index() 里，UI 线程不会阻塞。
+     * 所有网络工作都留在 索引() 里，UI 线程不会阻塞。
      */
     public void setSeekTarget(@Nullable TLRPC.Document document, int account,
                               long targetTimeUs, double durationSec) {
@@ -83,7 +92,7 @@ public final class Mp4IndexExtractorsFactory implements ExtractorsFactory {
         this.seekDurationSec = durationSec;
     }
 
-    /** Eager mode, for callers that already built the index. */
+    /** 立即模式：调用方已经构建好索引时直接传入，不再扫描或探测。 */
     public Mp4IndexExtractorsFactory(@Nullable ChunkIndex prebuiltIndex) {
         this.prebuiltIndex = prebuiltIndex;
         this.path = null;
@@ -95,7 +104,7 @@ public final class Mp4IndexExtractorsFactory implements ExtractorsFactory {
         this.attempted = true;
     }
 
-    /** Lazy mode: the scan runs on the loader thread inside createExtractors. */
+    /** Lazy mode:  scan runs 在  loader 线程 inside createExtractors. */
     public Mp4IndexExtractorsFactory(@Nullable String path, long docId, long docSize,
                                      double expectedDurationSec, boolean notLoading) {
         this.prebuiltIndex = null;
@@ -150,8 +159,8 @@ public final class Mp4IndexExtractorsFactory implements ExtractorsFactory {
      * 顺序：先按文档 id 查持久化索引（文件删掉后仍可用），再扫描本地临时文件；
      * 都拿不到可用覆盖时才联网探测目标片段。
      *
-     * 注意 resolvedIndex 可能为 null（没有任何索引），此时不能把“没有索引”缓存成
-     * “可 seek”——canSeekTo 会如实返回 false，调用方因此延迟 seek 而不是交给 media3 归零。
+     * 注意 resolvedIndex 可能为 空值（没有任何索引），此时不能把“没有索引”缓存成
+     * “可 seek”——canSeekTo 会如实返回 假，调用方因此延迟 seek 而不是交给 media3 归零。
      */
     @Nullable
     private ChunkIndex index() {
@@ -161,16 +170,16 @@ public final class Mp4IndexExtractorsFactory implements ExtractorsFactory {
         if (!attempted) {
             synchronized (this) {
                 if (!attempted) {
-                    // 1) Document identity only: works while streaming and after the local
-                    //    file was deleted, because the payload behind a document id never
-                    //    changes. This is the desktop-client behaviour: the demuxer already
-                    //    owns an index, so a seek is just a byte offset.
+                    // 1) 先按文档身份查持久化索引。
+                    // 只要文档 id 不变，即使本地文件被删掉，这份索引仍然可用；
+                    // 此时 seek 只是把时间映射到文件字节偏移，不依赖本地是否还有数据。
                     ChunkIndex idx = FragmentIndexBuilder.lookup(docId, docSize, expectedDurationSec);
                     if (idx != null) {
                         Log.w(TAG, "index source=persisted chunks=" + idx.length + " doc=" + docId);
                     } else if (path != null) {
-                        // 2) No persisted copy yet: scan the fully downloaded file, and persist
-                        //    the result so every later play of this document can seek instantly.
+                        // 2) 没有持久化索引时扫描本地文件。
+                        // 对已下载完整的文件会构建完整索引并落盘，
+                        // 这样之后同一个文档再播放时可以直接查到，不必重复扫描。
                         idx = FragmentIndexBuilder.build(path, docId, docSize,
                                 expectedDurationSec, notLoading);
                         Log.w(TAG, "index source=scan result="
@@ -223,7 +232,7 @@ public final class Mp4IndexExtractorsFactory implements ExtractorsFactory {
 
     /**
      * 给DefaultExtractorsFactory 产出的每个 FragmentedMp4Extractor 套一层包装。
-     * 即使 index 和远端点都为空也要包装，这样有索引和无索引走完全相同的代码路径，
+     * 即使 索引 和远端点都为空也要包装，这样有索引和无索引走完全相同的代码路径，
      * 避免“某条路径忘了注入”导致静默归零。
      */
     private Extractor[] stamp(Extractor[] extractors) {
@@ -231,7 +240,7 @@ public final class Mp4IndexExtractorsFactory implements ExtractorsFactory {
         int n = 0;
         for (int i = 0; i < extractors.length; i++) {
             if (extractors[i] instanceof FragmentedMp4Extractor) {
-                // Always wrap, even with a null index: keeps the path identical for both cases.
+                // Always wrap, even 使用  空值 索引: keeps  path identical 用于 both cases.
                 extractors[i] = new ChunkIndexInjectingExtractor(extractors[i], idx, remotePoint,
                         remoteSpanUs, expectedDurationSec);
                 n++;
@@ -283,13 +292,13 @@ public final class Mp4IndexExtractorsFactory implements ExtractorsFactory {
                  * extractor 提交 seekMap 时做替换：
                  * - 真实 sidx 产生的 ChunkIndex 最权威，原样放行；
                  * - 其余情况（库的 unseekable fallback）用我们的本地/远端组合映射替换。
-                 * 这样 media3 看到的永远是 isSeekable()==true，不会把 seek 解析成 0。
+                 * 这样 media3 看到的永远是 isSeekable()==真，不会把 seek 解析成 0。
                  */
                 @Override
                 public void seekMap(SeekMap seekMap) {
-                    // A ChunkIndex emitted by the extractor comes from a real Sidx and is more
-                    // authoritative than the scanned index. Anything else is the fallback
-                    // (restartable/unseekable) that the old fork replaced with the injected one.
+                    //  ChunkIndex emitted 由  extractor comes 从  real Sidx 和 是 more
+                    // authoritative than  scanned 索引. Anything 否则 是  fallback
+                    // (restartable/unseekable) 该  old fork replaced 使用  injected one.
                     if (seekMap instanceof ChunkIndex) {
                         output.seekMap(seekMap);
                     } else if (remotePoint != null) {
@@ -360,6 +369,7 @@ public final class Mp4IndexExtractorsFactory implements ExtractorsFactory {
          */
         public SeekPoints getSeekPoints(long timeUs) {
             if (SeekCoverageRules.coversLocal(local != null ? local.timesUs : null,
+                    local != null ? local.durationsUs : null,
                     local != null ? local.length : 0, timeUs)) {
                 return local.getSeekPoints(timeUs);
             }
@@ -367,9 +377,9 @@ public final class Mp4IndexExtractorsFactory implements ExtractorsFactory {
                     remote.timeUs + remoteSpanUs, timeUs)) {
                 return new SeekPoints(remote);
             }
-            // Never present a stale remote point as valid for an unrelated time. When there is
-            // no local index either, there is no valid mapping at all; return START only as a
-            // non-answer. canSeekTo() is false for this target, so callers must not seek here.
+            // Never present  stale remote point 作为 valid 用于  unrelated time. When there 是
+            // no local 索引 either, there 是 no valid mapping 在 all; 返回 启动 only 作为 
+            // non-answer. canSeekTo() 是 假 用于 该 target, so callers must 不 seek here.
             return local != null ? local.getSeekPoints(timeUs) : new SeekPoints(SeekPoint.START);
         }
     }

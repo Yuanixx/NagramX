@@ -1,3 +1,12 @@
+/**
+ * ZH-COMMENT-BY-AGENT
+ * 文件：RemoteSeekProbe.java
+ * 模块：TMessagesProj/src/main/java/org/telegram/ui/Components
+ * 类型：RemoteSeekProbe（RemoteSeekProbe）、MoovBox（MoovBox）、Fragment（Fragment）、ProbeResult（Probe结果）
+ * 主要成员：RemoteSeekProbe（RemoteSeekProbe）、ProbeResult（Probe结果）、find（查找）、currentTimeMillis（currentTimeMillis）、readMoov（读取Moov）、parseTrackConfig（解析TrackConfig）、min（min）、max（max）、alignDown（alignDown）、nearestFragment（nearestFragment）
+ *          d（d）、e（e）、readFully（读取Fully）、findMoov（查找Moov）
+ * 说明：本文件由中文注释引擎自动生成结构化说明；业务语义详见各成员处注释。
+ */
 /*
  * Copyright (C) 2024 NagramX Team
  *
@@ -34,8 +43,11 @@ import java.util.List;
  * 因此片段起点早于目标不会导致解错帧，但晚于目标一定会导致播放位置错乱。
  *
  * <p>失败语义：限流、超时、moov 解析失败、窗口内没有完整 moof、没有后继片段
- * （无法证明区间终点）、达到探测上限仍未收敛，统统返回 null。调用方必须保留
+ * （无法证明区间终点）、达到探测上限仍未收敛，统统返回 空值。调用方必须保留
  * “不归零”的兜底行为，绝不能把一次低精度探测当成成功。
+ */
+/**
+ * 类：Remote定位到Probe，封装了相关的业务逻辑与数据处理。
  */
 public final class RemoteSeekProbe {
 
@@ -55,12 +67,19 @@ public final class RemoteSeekProbe {
     /** 单次多块抓取的总预算。 */
     private static final long FETCH_BUDGET_MS = 3000L;
 
+    /**
+     * Remote定位到Probe。
+     * @return private 类型的结果
+     */
     private RemoteSeekProbe() {
     }
 
     /**
      * moov 盒子内容以及它在文件中的绝对偏移。
      * 偏移很重要：本地临时文件开头还有 ftyp，moov 不一定从 0 开始。
+     */
+    /**
+     * 类：MoovBox，封装了相关的业务逻辑与数据处理。
      */
     private static final class MoovBox {
         byte[] data;
@@ -70,9 +89,12 @@ public final class RemoteSeekProbe {
     /**
      * 从远端窗口里解析出来的一个完整 moof 片段。
      * position 是 moof 盒子的文件偏移（ExoPlayer 要的就是这个位置），
-     * size 是 moof 盒子长度，timeUs 是 tfdt 换算出的视频时间，
+     * 大小 是 moof 盒子长度，timeUs 是 tfdt 换算出的视频时间，
      * spanUs 是到同一轨道下一个片段的时间跨度（证明区间用），
      * end 是 moof 盒子结束位置，仅用于推进二分下界。
+     */
+    /**
+     * 类：片段，封装了相关的业务逻辑与数据处理。
      */
     private static final class Fragment {
         long position;
@@ -86,6 +108,9 @@ public final class RemoteSeekProbe {
      * 探测成功的结果：一个 SeekPoint（片段起点）+ 该片段被证明的时间跨度 + 字节长度。
      * 调用方会再次校验区间是否包含目标、字节位置是否越过已下载区域，
      * 任一条件不满足就拒绝这个结果。
+     */
+    /**
+     * 类：Probe结果，封装了相关的业务逻辑与数据处理。
      */
     public static final class ProbeResult {
         public final SeekPoint point;
@@ -102,12 +127,12 @@ public final class RemoteSeekProbe {
     /**
      * 只能在后台线程调用：内部有阻塞的网络请求。
      *
-     * @param document      文档，用于 FileRangeFetcher 取得带有效 file_reference 的定位
+     * @param 文档      文档，用于 FileRangeFetcher 取得带有效 file_reference 的定位
      * @param localPath     本地 .temp 路径；若存在则优先从它读 moov，省一次网络请求
      * @param fileLength    文档声明的完整长度，用来校验片段字节范围不越界
      * @param targetTimeUs  用户目标时间（微秒）
      * @param durationSec   媒体声明时长，仅用于参数合法性检查，绝不用来推算片段时间
-     * @return 证明成功的区间结果；任何不确定情况都返回 null
+     * @返回 证明成功的区间结果；任何不确定情况都返回 空值
      */
     public static ProbeResult find(int account, TLRPC.Document document,
                                    String localPath, long fileLength,
@@ -215,6 +240,13 @@ public final class RemoteSeekProbe {
      * 否则用 FileRangeFetcher 抓头部块。两条路径都只返回“完整 moov 盒子”，
      * 半截盒子不能用于解析 track 配置。
      */
+    /**
+     * readMoov。
+     * @param localPath 字符串类型的参数 localPath
+     * @param account 整数类型的参数 account
+     * @param document TLRPC.Document类型的参数 document
+     * @return MoovBox 类型的结果
+     */
     private static MoovBox readMoov(String localPath, int account, TLRPC.Document document) {
         if (localPath != null) {
             try {
@@ -245,7 +277,13 @@ public final class RemoteSeekProbe {
 
     /**
      * 在头部字节里顺序走顶层 box，找到 moov 并返回其完整字节。
-     * size==1 表示 64 位长度；size==0 表示到文件末尾，这里不接受（无法证明完整）。
+     * 大小==1 表示 64 位长度；大小==0 表示到文件末尾，这里不接受（无法证明完整）。
+     */
+    /**
+     * 查找Moov。
+     * @param data 数据（byte[]）
+     * @param dataOffset 长整型类型的参数 dataOffset
+     * @return MoovBox 类型的结果
      */
     private static MoovBox findMoov(byte[] data, long dataOffset) {
         int position = 0;
@@ -276,7 +314,7 @@ public final class RemoteSeekProbe {
 
     /**
      * 从一个探测窗口里解析所有“完整且属于视频轨道”的 moof。
-     * 完整性判据：box 的 size 字段必须完全落在本窗口内，且绝对位置 + size 不超过文件长度。
+     * 完整性判据：box 的 大小 字段必须完全落在本窗口内，且绝对位置 + 大小 不超过文件长度。
      * 这样可以避免把跨窗口被截断的 moof 当成有效片段，进而推导出错误跨度。
      */
     private static Fragment nearestFragment(byte[] data, long dataOffset, long fileLength,
@@ -338,6 +376,13 @@ public final class RemoteSeekProbe {
      * 解析 moof 中 traf 的 tfdt，换算成视频时间（微秒）。
      * 只接受 track_ID 与视频轨道匹配的 traf，避免把音频片段时间当成视频时间；
      * u64 解析出的 ticks 若为负（超过 Long.MAX_VALUE）则拒绝。
+     */
+    /**
+     * 片段时间Us。
+     * @param moof byte[]类型的参数 moof
+     * @param timescale 长整型类型的参数 timescale
+     * @param trackId 长整型类型的参数 trackId
+     * @return 整型结果值
      */
     private static long fragmentTimeUs(byte[] moof, long timescale, long trackId) {
         int i = 0;
@@ -403,6 +448,12 @@ public final class RemoteSeekProbe {
     /**
      * 读取 64 位无符号整数。若最高位为 1，返回的 long 会是负数；
      * 调用方必须用 RemoteFragmentRules.validDecodeTime 拒绝它。
+     */
+    /**
+     * u64。
+     * @param data 数据（byte[]）
+     * @param offset 偏移（整数）
+     * @return 整型结果值
      */
     private static long u64(byte[] data, int offset) {
         long value = 0;

@@ -1,3 +1,11 @@
+/**
+ * ZH-COMMENT-BY-AGENT
+ * 文件：SeekCoverageRulesTest.java
+ * 模块：TMessagesProj/src/test/java/org/telegram/ui/Components/seek
+ * 类型：SeekCoverageRulesTest（SeekCoverageRulesTest）
+ * 主要成员：main（main）、testLocalCoverage（testLocalCoverage）、testRemoteCoverageIsAnInterval（testRemoteCoverage是否AnInterval）、testNoFixedTolerance（testNoFixedTolerance）、testProbeValidation（testProbeValidation）、testCoveredBytesIsNotCoveredTime（testCoveredBytes是否NotCoveredTime）、testInvalidIndexRejected（testInvalid索引Rejected）、println（println）、check（检查）、AssertionError（Assertion错误）
+ * 说明：本文件由中文注释引擎自动生成结构化说明；业务语义详见各成员处注释。
+ */
 package org.telegram.ui.Components.seek;
 
 /** 纯 JVM 测试：区分媒体声明时长、本地索引覆盖和远端片段覆盖，不依赖 Android。 */

@@ -1,3 +1,12 @@
+/**
+ * ZH-COMMENT-BY-AGENT
+ * 文件：VideoPlayer.java
+ * 模块：TMessagesProj/src/main/java/org/telegram/ui/Components
+ * 类型：VideoPlayer（视频Player）、VideoPlayerDelegate（视频PlayerDelegate）、AudioVisualizerDelegate（音频VisualizerDelegate）、Quality（Quality）、VideoUri（视频Uri）、AudioVisualizerRenderersFactory（音频VisualizerRenderersFactory）、VisualizerBufferSink（Visualizer缓冲区Sink）、OffsetDataSource（Offset数据Source）
+ * 主要成员：createdWithAudioTrack（createdWith音频Track）、onStateChanged（onStateChanged）、onError（on错误）、onVideoSizeChanged（on视频大小Changed）、onRenderedFirstFrame（onRenderedFirstFrame）、onSurfaceTextureUpdated（onSurfaceTextureUpdated）、onSurfaceDestroyed（onSurfaceDestroyed）、onSeekStarted（onSeekStarted）、onSeekFinished（onSeekFinished）、onVisualizerUpdate（onVisualizer更新）
+ *          needUpdate（need更新）、SurfaceTextureListener（SurfaceTextureListener）、onSurfaceTextureAvailable（onSurfaceTextureAvailable）、Surface（Surface）
+ * 说明：本文件由中文注释引擎自动生成结构化说明；业务语义详见各成员处注释。
+ */
 /*
  * This is the source code of Telegram for Android v. 5.x.x.
  * It is licensed under GNU GPL v. 2 or later.
@@ -113,6 +122,9 @@ import java.util.Map;
 
 import xyz.nextalone.nagram.NaConfig;
 
+/**
+ * 类：视频Player，封装了相关的业务逻辑与数据处理。
+ */
 @SuppressLint("NewApi")
 public class VideoPlayer implements Player.Listener, AnalyticsListener, NotificationCenter.NotificationCenterDelegate {
 
@@ -123,11 +135,23 @@ public class VideoPlayer implements Player.Listener, AnalyticsListener, Notifica
     private DispatchQueue workerQueue;
     private boolean isStory;
 
+    /**
+     * createdWith音频Track。
+     * @return 布尔结果，true 表示条件成立或操作成功
+     */
     public boolean createdWithAudioTrack() {
         return !audioDisabled;
     }
 
+    /**
+     * 接口：视频PlayerDelegate，封装了相关的业务逻辑与数据处理。
+     */
     public interface VideoPlayerDelegate {
+        /**
+         * 响应状态Changed。
+         * @param playWhenReady 布尔值类型的参数 playWhenReady
+         * @param playbackState 整数类型的参数 playbackState
+         */
         void onStateChanged(boolean playWhenReady, int playbackState);
 
         /**
@@ -140,28 +164,76 @@ public class VideoPlayer implements Player.Listener, AnalyticsListener, Notifica
          *
          * 未覆写的其他 delegate 实现继续走下面这个不带身份的默认方法，零改动兼容。
          */
-        default void onStateChanged(VideoPlayer player, int generation,
+        default void onStateChanged(VideoPlayer player, int generation, long requestId,
                                     boolean playWhenReady, int playbackState) {
             onStateChanged(playWhenReady, playbackState);
         }
+        /**
+         * 响应错误。
+         * @param player VideoPlayer类型的参数 player
+         * @param e Exception类型的参数 e
+         */
         void onError(VideoPlayer player, Exception e);
+        /**
+         * 响应视频尺寸Changed。
+         * @param width 宽度（整数）
+         * @param height 高度（整数）
+         * @param unappliedRotationDegrees 整数类型的参数 unappliedRotationDegrees
+         * @param pixelWidthHeightRatio 浮点值类型的参数 pixelWidthHeightRatio
+         */
         void onVideoSizeChanged(int width, int height, int unappliedRotationDegrees, float pixelWidthHeightRatio);
+        /**
+         * 响应Rendered首个Frame。
+         */
         void onRenderedFirstFrame();
+        /**
+         * 响应SurfaceTextureUpdated。
+         * @param surfaceTexture SurfaceTexture类型的参数 surfaceTexture
+         */
         void onSurfaceTextureUpdated(SurfaceTexture surfaceTexture);
+        /**
+         * 响应SurfaceDestroyed。
+         * @param surfaceTexture SurfaceTexture类型的参数 surfaceTexture
+         * @return 布尔结果，true 表示条件成立或操作成功
+         */
         boolean onSurfaceDestroyed(SurfaceTexture surfaceTexture);
+        /**
+         * 响应Rendered首个Frame。
+         * @param eventTime EventTime类型的参数 eventTime
+         */
         default void onRenderedFirstFrame(EventTime eventTime) {
 
         }
+        /**
+         * 响应定位到Started。
+         * @param eventTime EventTime类型的参数 eventTime
+         */
         default void onSeekStarted(EventTime eventTime) {
 
         }
+        /**
+         * 响应定位到Finished。
+         */
         default void onSeekFinished() {
 
         }
     }
 
+    /**
+     * 接口：音频VisualizerDelegate，封装了相关的业务逻辑与数据处理。
+     */
     public interface AudioVisualizerDelegate {
+        /**
+         * 响应Visualizer更新。
+         * @param playing 布尔值类型的参数 playing
+         * @param animate 播放动画（布尔值）
+         * @param values 值（浮点数组）
+         */
         void onVisualizerUpdate(boolean playing, boolean animate, float[] values);
+        /**
+         * need更新。
+         * @return 布尔结果，true 表示条件成立或操作成功
+         */
         boolean needUpdate();
     }
 
@@ -171,9 +243,9 @@ public class VideoPlayer implements Player.Listener, AnalyticsListener, Notifica
     private MappingTrackSelector trackSelector;
     private ExtendedDefaultDataSourceFactory mediaDataSourceFactory;
     /**
-     * Wraps every data source with {@link TrunFilteringDataSource}, so an empty
-     * trun is neutralized in the stream itself. Independent of any local copy
-     * and of which quality is being played.
+     * Wraps every 数据 source 使用 {@link TrunFilteringDataSource}, so  empty
+     * trun 是 neutralized 在  stream itself. Independent 的 any local copy
+     * 和 的 which quality 是 为 played.
      */
     private DataSource.Factory filteringDataSourceFactory;
     private TextureView textureView;
@@ -182,12 +254,19 @@ public class VideoPlayer implements Player.Listener, AnalyticsListener, Notifica
     private Surface ownedTextureSurface;
 
     /**
-     * Replacement for ExoPlayer's VideoListener surface callbacks, which no longer exist in
-     * Media3. Keeps the old fork behaviour: the delegate can veto SurfaceTexture destruction
-     * (needed for the Picture-in-Picture hand-off) and surface updates are posted to the
+     * Replacement 用于 ExoPlayer's VideoListener surface callbacks, which no longer exist 在
+     * Media3. Keeps  old fork behaviour:  delegate can veto SurfaceTexture destruction
+     * (needed 用于  Picture-在-Picture hand-off) 和 surface 更新 是 posted 到 
      * optional worker queue.
      */
     private final TextureView.SurfaceTextureListener surfaceTextureListener = new TextureView.SurfaceTextureListener() {
+        /**
+         * 响应SurfaceTextureAvailable。
+         * <p>该方法重写了父类/接口中的实现。</p>
+         * @param surfaceTexture SurfaceTexture类型的参数 surfaceTexture
+         * @param width 宽度（整数）
+         * @param height 高度（整数）
+         */
         @Override
         public void onSurfaceTextureAvailable(@NonNull SurfaceTexture surfaceTexture, int width, int height) {
             Runnable r = () -> {
@@ -204,10 +283,23 @@ public class VideoPlayer implements Player.Listener, AnalyticsListener, Notifica
             }
         }
 
+        /**
+         * 响应SurfaceTexture尺寸Changed。
+         * <p>该方法重写了父类/接口中的实现。</p>
+         * @param surfaceTexture SurfaceTexture类型的参数 surfaceTexture
+         * @param width 宽度（整数）
+         * @param height 高度（整数）
+         */
         @Override
         public void onSurfaceTextureSizeChanged(@NonNull SurfaceTexture surfaceTexture, int width, int height) {
         }
 
+        /**
+         * 响应SurfaceTextureDestroyed。
+         * <p>该方法重写了父类/接口中的实现。</p>
+         * @param surfaceTexture SurfaceTexture类型的参数 surfaceTexture
+         * @return 布尔结果，true 表示条件成立或操作成功
+         */
         @Override
         public boolean onSurfaceTextureDestroyed(@NonNull SurfaceTexture surfaceTexture) {
             boolean keepSurface = delegate != null && delegate.onSurfaceDestroyed(surfaceTexture);
@@ -227,6 +319,11 @@ public class VideoPlayer implements Player.Listener, AnalyticsListener, Notifica
             return !keepSurface;
         }
 
+        /**
+         * 响应SurfaceTextureUpdated。
+         * <p>该方法重写了父类/接口中的实现。</p>
+         * @param surfaceTexture SurfaceTexture类型的参数 surfaceTexture
+         */
         @Override
         public void onSurfaceTextureUpdated(@NonNull SurfaceTexture surfaceTexture) {
             Runnable r = () -> {
@@ -242,6 +339,10 @@ public class VideoPlayer implements Player.Listener, AnalyticsListener, Notifica
         }
     };
 
+    /**
+     * attachTexture视图。
+     * @param texture TextureView类型的参数 texture
+     */
     private void attachTextureView(TextureView texture) {
         texture.setSurfaceTextureListener(surfaceTextureListener);
         if (texture.isAvailable()) {
@@ -254,6 +355,10 @@ public class VideoPlayer implements Player.Listener, AnalyticsListener, Notifica
         }
     }
 
+    /**
+     * 设置OwnedTextureSurface。
+     * @param newSurface Surface类型的参数 newSurface
+     */
     private void setOwnedTextureSurface(Surface newSurface) {
         Surface oldSurface = ownedTextureSurface;
         ownedTextureSurface = newSurface;
@@ -262,6 +367,9 @@ public class VideoPlayer implements Player.Listener, AnalyticsListener, Notifica
         }
     }
 
+    /**
+     * 释放OwnedTextureSurface。
+     */
     private void releaseOwnedTextureSurface() {
         if (ownedTextureSurface != null) {
             ownedTextureSurface.release();
@@ -275,25 +383,42 @@ public class VideoPlayer implements Player.Listener, AnalyticsListener, Notifica
 
     private boolean triedReinit;
 
-    // Internal error-recovery position preservation (onPlayerError AV1 / decoder-init).
-    // Only armed by those two internal recovery paths; normal open / quality switch do not use it.
-    // volatile because recovery may be scheduled on the UI thread and consumed on the player looper.
+    // Internal 错误-recovery position preservation (onPlayerError AV1 / decoder-初始化).
+    // Only armed 由 那些 two internal recovery paths; normal 打开 / quality switch do 不 使用 它.
+    // volatile because recovery may 为 scheduled 在  UI 线程 和 consumed 在  player looper.
     private volatile ExoPlayer recoveryPlayerRef = null;
     private volatile long recoveryPositionMs = C.TIME_UNSET;
     private volatile boolean recoveryPlayWhenReady = false;
     private volatile int recoveryGeneration = -1;
     private volatile int prepareGeneration = 0;
+    /** PhotoViewer 为本次重建绑定的 seek 请求 ID；在 prepare 创建监听器时捕获。 */
+    private volatile long boundRequestId = -1L;
+    /** 当前正在分发的回调所携带的来源身份，由监听器在注册时捕获并写入。 */
+    private volatile int callbackGeneration = -1;
+    private volatile long callbackRequestId = -1L;
+
+    /**
+     * 设置Bound请求标识。
+     * @param requestId 长整型类型的参数 requestId
+     */
+    public void setBoundRequestId(long requestId) {
+        this.boundRequestId = requestId;
+    }
 
     /**
      * 当前 prepare 的代次。每次 preparePlayer* 都会递增。
      * PhotoViewer 用它把待重放 seek 绑定到产生它的那一次 prepare；
      * 旧 prepare 即使复用同一个包装对象，generation 也不同，无法消费新目标。
      */
+    /**
+     * 获取准备Generation。
+     * @return 整型结果值
+     */
     public int getPrepareGeneration() {
         return prepareGeneration;
     }
 
-    // Observe-only Player-internal diagnostics (see PlayerDiag: log lines). No behavior change.
+    // Observe-only Player-internal diagnostics (参见 PlayerDiag: log lines). No behavior change.
     private volatile long diagLastStateAtMs = -1L;
     private volatile long diagLastTimelineChangeAtMs = -1L;
     private volatile long diagLastPrepareAtMs = -1L;
@@ -324,29 +449,37 @@ public class VideoPlayer implements Player.Listener, AnalyticsListener, Notifica
     SsMediaSource.Factory ssMediaSourceFactory;
     ProgressiveMediaSource.Factory progressiveMediaSourceFactory;
 
-    /** Per-player extractor factory carrying a prebuilt ChunkIndex; null keeps the default. */
+    /** Per-player extractor factory carrying  prebuilt ChunkIndex; 空值 keeps  默认. */
     @Nullable
     private ExtractorsFactory extractorsFactoryOverride;
 
     /**
-     * Called by PhotoViewer before every prepare. Passing null clears any index left from a
-     * previous media (also covers the PiP-injected player, which is reused instead of recreated).
+     * 被调用 由 PhotoViewer before every prepare. Passing 空值 清空 any 索引 left 从 
+     * previous 媒体 (also covers  PiP-injected player, which 是 reused instead 的 recreated).
+     */
+    /**
+     * 设置ExtractorsFactory。
+     * @param factory ExtractorsFactory类型的参数 factory
      */
     public void setExtractorsFactory(@Nullable ExtractorsFactory factory) {
         extractorsFactoryOverride = factory;
     }
 
     /**
-     * Whether the current media has a time-to-byte map. A streaming fragmented file prepared
-     * before its download started has none; issuing a seek then makes media3 clamp the target
-     * to t=0. Callers must re-prepare once the download is active instead.
+     * Whether  current 媒体 has  time-到-byte map.  streaming fragmented 文件 prepared
+     * before 其 download started has none; issuing  seek 则 makes media3 clamp  target
+     * 到 t=0. Callers must re-prepare once  download 是 active instead.
+     */
+    /**
+     * 判断是否包含定位到索引。
+     * @return 布尔结果，true 表示条件成立或操作成功
      */
     public boolean hasSeekIndex() {
         return extractorsFactoryOverride instanceof Mp4IndexExtractorsFactory
                 && ((Mp4IndexExtractorsFactory) extractorsFactoryOverride).hasIndex();
     }
 
-    /** Whether the current seek map can resolve a target (milliseconds). */
+    /** Whether  current seek map can resolve  target (milliseconds). */
     public boolean hasSeekIndexFor(long positionMs) {
         return extractorsFactoryOverride instanceof Mp4IndexExtractorsFactory
                 && ((Mp4IndexExtractorsFactory) extractorsFactoryOverride)
@@ -357,11 +490,21 @@ public class VideoPlayer implements Player.Listener, AnalyticsListener, Notifica
 
     boolean audioDisabled;
 
+    /**
+     * 视频Player。
+     * @return public 类型的结果
+     */
     public VideoPlayer() {
         this(true, false);
     }
 
     static int playerCounter = 0;
+    /**
+     * 视频Player。
+     * @param pauseOther 布尔值类型的参数 pauseOther
+     * @param audioDisabled 布尔值类型的参数 audioDisabled
+     * @return public 类型的结果
+     */
     public VideoPlayer(boolean pauseOther, boolean audioDisabled) {
         this.audioDisabled = audioDisabled;
         mediaDataSourceFactory = new ExtendedDefaultDataSourceFactory(ApplicationLoader.applicationContext, "Mozilla/5.0 (X11; Linux x86_64; rv:10.0) Gecko/20150101 Firefox/47.0 (Chrome)");
@@ -378,6 +521,13 @@ public class VideoPlayer implements Player.Listener, AnalyticsListener, Notifica
         playerCounter++;
     }
 
+    /**
+     * didReceivedNotification。
+     * <p>该方法重写了父类/接口中的实现。</p>
+     * @param id 标识（整数）
+     * @param account 整数类型的参数 account
+     * @param args Object...类型的参数 args
+     */
     @Override
     public void didReceivedNotification(int id, int account, Object... args) {
         if (id == NotificationCenter.playerDidStartPlaying) {
@@ -389,15 +539,27 @@ public class VideoPlayer implements Player.Listener, AnalyticsListener, Notifica
     }
 
     private Looper looper;
+    /**
+     * 设置Looper。
+     * @param looper Looper类型的参数 looper
+     */
     public void setLooper(Looper looper) {
         this.looper = looper;
     }
 
     private EGLContext eglParentContext;
+    /**
+     * 设置EGLContext。
+     * @param ctx EGLContext类型的参数 ctx
+     */
     public void setEGLContext(EGLContext ctx) {
         eglParentContext = ctx;
     }
 
+    /**
+     * 获取PlayerExtensionRenderer模式。
+     * @return 整型结果值
+     */
     private int getPlayerExtensionRendererMode() {
         return switch (NaConfig.INSTANCE.getPlayerDecoder().Int()) {
             case 0 -> DefaultRenderersFactory.EXTENSION_RENDERER_MODE_OFF;
@@ -406,6 +568,133 @@ public class VideoPlayer implements Player.Listener, AnalyticsListener, Notifica
         };
     }
 
+    /**
+     * 创建一个在注册时捕获代次和请求 ID 的 Player 监听器。
+     * 只有 onPlayerStateChanged 需要携带身份；其余回调原样转发给 VideoPlayer 自身的实现，
+     * 保证原有行为不变。
+     */
+    /**
+     * 创建GenerationAware监听器。
+     * @param generation 整数类型的参数 generation
+     * @param requestId 长整型类型的参数 requestId
+     * @return Player.Listener 类型的结果
+     */
+    private Player.Listener createGenerationAwareListener(final int generation, final long requestId) {
+        return new Player.Listener() {
+            /**
+             * 响应Player状态Changed。
+             * <p>该方法重写了父类/接口中的实现。</p>
+             * @param playWhenReady 布尔值类型的参数 playWhenReady
+             * @param playbackState 整数类型的参数 playbackState
+             */
+            @Override
+            public void onPlayerStateChanged(boolean playWhenReady, int playbackState) {
+                dispatchPlayerState(generation, requestId, playWhenReady, playbackState);
+            }
+
+            @Override
+            public void onPositionDiscontinuity(Player.PositionInfo oldPosition,
+                                                Player.PositionInfo newPosition,
+                                                @Player.DiscontinuityReason int reason) {
+                VideoPlayer.this.onPositionDiscontinuity(oldPosition, newPosition, reason);
+            }
+
+            /**
+             * 响应TimelineChanged。
+             * <p>该方法重写了父类/接口中的实现。</p>
+             * @param timeline Timeline类型的参数 timeline
+             * @param reason 整数类型的参数 reason
+             */
+            @Override
+            public void onTimelineChanged(Timeline timeline, int reason) {
+                VideoPlayer.this.onTimelineChanged(timeline, reason);
+            }
+
+            /**
+             * 响应Player错误。
+             * <p>该方法重写了父类/接口中的实现。</p>
+             * @param error 错误（PlaybackException）
+             */
+            @Override
+            public void onPlayerError(PlaybackException error) {
+                VideoPlayer.this.onPlayerError(error);
+            }
+
+            /**
+             * 响应视频尺寸Changed。
+             * <p>该方法重写了父类/接口中的实现。</p>
+             * @param videoSize VideoSize类型的参数 videoSize
+             */
+            @Override
+            public void onVideoSizeChanged(VideoSize videoSize) {
+                VideoPlayer.this.onVideoSizeChanged(videoSize);
+            }
+
+            /**
+             * 响应Rendered首个Frame。
+             * <p>该方法重写了父类/接口中的实现。</p>
+             */
+            @Override
+            public void onRenderedFirstFrame() {
+                VideoPlayer.this.onRenderedFirstFrame();
+            }
+
+            /**
+             * 响应PlaybackParametersChanged。
+             * <p>该方法重写了父类/接口中的实现。</p>
+             * @param playbackParameters PlaybackParameters类型的参数 playbackParameters
+             */
+            @Override
+            public void onPlaybackParametersChanged(PlaybackParameters playbackParameters) {
+                VideoPlayer.this.onPlaybackParametersChanged(playbackParameters);
+            }
+
+            /**
+             * 响应TracksChanged。
+             * <p>该方法重写了父类/接口中的实现。</p>
+             * @param tracks Tracks类型的参数 tracks
+             */
+            @Override
+            public void onTracksChanged(Tracks tracks) {
+                VideoPlayer.this.onTracksChanged(tracks);
+            }
+
+            /**
+             * 响应Repeat模式Changed。
+             * <p>该方法重写了父类/接口中的实现。</p>
+             * @param repeatMode 整数类型的参数 repeatMode
+             */
+            @Override
+            public void onRepeatModeChanged(int repeatMode) {
+                VideoPlayer.this.onRepeatModeChanged(repeatMode);
+            }
+
+            /**
+             * 响应Surface尺寸Changed。
+             * <p>该方法重写了父类/接口中的实现。</p>
+             * @param width 宽度（整数）
+             * @param height 高度（整数）
+             */
+            @Override
+            public void onSurfaceSizeChanged(int width, int height) {
+                VideoPlayer.this.onSurfaceSizeChanged(width, height);
+            }
+
+            /**
+             * 响应TrackSelectionParametersChanged。
+             * <p>该方法重写了父类/接口中的实现。</p>
+             * @param parameters TrackSelectionParameters类型的参数 parameters
+             */
+            @Override
+            public void onTrackSelectionParametersChanged(TrackSelectionParameters parameters) {
+                VideoPlayer.this.onTrackSelectionParametersChanged(parameters);
+            }
+        };
+    }
+
+    /**
+     * 确保PlayerCreated。
+     */
     private void ensurePlayerCreated() {
         DefaultLoadControl loadControl = new DefaultLoadControl.Builder()
                 .setAllocator(new DefaultAllocator(true, C.DEFAULT_BUFFER_SEGMENT_SIZE))
@@ -437,7 +726,9 @@ public class VideoPlayer implements Player.Listener, AnalyticsListener, Notifica
             player = builder.build();
 
             player.addAnalyticsListener(this);
-            player.addListener(this);
+            // 监听器在注册时就捕获当前代次与请求 ID。回调从来源处携带这两个值，
+            // 而不是消费时再读当前字段——后者会让旧 prepare 的迟到回调伪装成新回调。
+            player.addListener(createGenerationAwareListener(prepareGeneration, boundRequestId));
             if (textureView != null) {
                 attachTextureView(textureView);
             } else if (surface != null) {
@@ -456,6 +747,12 @@ public class VideoPlayer implements Player.Listener, AnalyticsListener, Notifica
                         .setLoadControl(loadControl).build();
                 audioPlayer.addListener(new Player.Listener() {
 
+                    /**
+                     * 响应Player状态Changed。
+                     * <p>该方法重写了父类/接口中的实现。</p>
+                     * @param playWhenReady 布尔值类型的参数 playWhenReady
+                     * @param playbackState 整数类型的参数 playbackState
+                     */
                     @Override
                     public void onPlayerStateChanged(boolean playWhenReady, int playbackState) {
                         if (!audioPlayerReady && playbackState == Player.STATE_READY) {
@@ -469,6 +766,13 @@ public class VideoPlayer implements Player.Listener, AnalyticsListener, Notifica
         }
     }
 
+    /**
+     * 准备PlayerLoop。
+     * @param videoUri Uri类型的参数 videoUri
+     * @param videoType 字符串类型的参数 videoType
+     * @param audioUri Uri类型的参数 audioUri
+     * @param audioType 字符串类型的参数 audioType
+     */
     public void preparePlayerLoop(Uri videoUri, String videoType, Uri audioUri, String audioType) {
         prepareGeneration++;
         diagLastPrepareAtMs = SystemClock.elapsedRealtime();
@@ -512,10 +816,23 @@ public class VideoPlayer implements Player.Listener, AnalyticsListener, Notifica
         activePlayers.add(playerId);
     }
 
+    /**
+     * mediaSourceFromUri。
+     * @param videoUri VideoUri类型的参数 videoUri
+     * @param type 类型（字符串）
+     * @return MediaSource 类型的结果
+     */
     private MediaSource mediaSourceFromUri(VideoUri videoUri, String type) {
         return mediaSourceFromUri(videoUri.uri, videoUri.fileVideoOffset, type);
     }
 
+    /**
+     * mediaSourceFromUri。
+     * @param uri Uri类型的参数 uri
+     * @param videoByteOffset 长整型类型的参数 videoByteOffset
+     * @param type 类型（字符串）
+     * @return MediaSource 类型的结果
+     */
     private MediaSource mediaSourceFromUri(Uri uri, long videoByteOffset, String type) {
         final MediaItem mediaItem = new MediaItem.Builder().setUri(uri).build();
         if (videoByteOffset != 0) {
@@ -541,8 +858,8 @@ public class VideoPlayer implements Player.Listener, AnalyticsListener, Notifica
                 return ssMediaSourceFactory.createMediaSource(mediaItem);
             default:
                 if (extractorsFactoryOverride != null) {
-                    // Build a fresh factory for this prepare; quality switches go through here too.
-                    // Do not reuse progressiveMediaSourceFactory (it holds the default extractors).
+                    // 构建  fresh factory 用于 该 prepare; quality switches go through here too.
+                    // Do 不 reuse progressiveMediaSourceFactory (它 holds  默认 extractors).
                     return new ProgressiveMediaSource.Factory(filteringDataSourceFactory, extractorsFactoryOverride).createMediaSource(mediaItem);
                 }
                 if (progressiveMediaSourceFactory == null) {
@@ -552,10 +869,22 @@ public class VideoPlayer implements Player.Listener, AnalyticsListener, Notifica
         }
     }
 
+    /**
+     * 准备Player。
+     * @param uri Uri类型的参数 uri
+     * @param type 类型（字符串）
+     */
     public void preparePlayer(Uri uri, String type) {
         preparePlayer(uri, type, FileLoader.PRIORITY_HIGH, 0);
     }
 
+    /**
+     * 准备Player。
+     * @param uri Uri类型的参数 uri
+     * @param type 类型（字符串）
+     * @param priority 优先级（整数）
+     * @param videoByteOffset 长整型类型的参数 videoByteOffset
+     */
     public void preparePlayer(Uri uri, String type, int priority, long videoByteOffset) {
         prepareGeneration++;
         diagLastPrepareAtMs = SystemClock.elapsedRealtime();
@@ -580,6 +909,11 @@ public class VideoPlayer implements Player.Listener, AnalyticsListener, Notifica
         player.prepare();
     }
 
+    /**
+     * 准备Player。
+     * @param qualities ArrayList<Quality>类型的参数 qualities
+     * @param select Quality类型的参数 select
+     */
     public void preparePlayer(ArrayList<Quality> qualities, Quality select) {
         prepareGeneration++;
         diagLastPrepareAtMs = SystemClock.elapsedRealtime();
@@ -606,6 +940,13 @@ public class VideoPlayer implements Player.Listener, AnalyticsListener, Notifica
         }
     }
 
+    /**
+     * 获取默认SavedQualityInt。
+     * @param qualities ArrayList<Quality>类型的参数 qualities
+     * @param pL 整数类型的参数 pL
+     * @param p 整数类型的参数 p
+     * @return Quality 类型的结果
+     */
     public static Quality getDefaultSavedQualityInt(ArrayList<Quality> qualities, int pL, int p) {
         for (Quality q : qualities) {
             if (!q.original && q.p() <= pL && q.p() >= p) return q;
@@ -613,6 +954,11 @@ public class VideoPlayer implements Player.Listener, AnalyticsListener, Notifica
         return null;
     }
 
+    /**
+     * 获取默认SavedQuality。
+     * @param qualities ArrayList<Quality>类型的参数 qualities
+     * @return Quality 类型的结果
+     */
     public static Quality getDefaultSavedQuality(ArrayList<Quality> qualities) {
         int v = NaConfig.INSTANCE.getDefaultHlsVideoQuality().Int();
         Quality q1;
@@ -639,6 +985,12 @@ public class VideoPlayer implements Player.Listener, AnalyticsListener, Notifica
         return null;
     }
 
+    /**
+     * 获取SavedQuality。
+     * @param qualities ArrayList<Quality>类型的参数 qualities
+     * @param messageObject MessageObject类型的参数 messageObject
+     * @return Quality 类型的结果
+     */
     public static Quality getSavedQuality(ArrayList<Quality> qualities, MessageObject messageObject) {
         if (messageObject == null) return getDefaultSavedQuality(qualities);
         var q = getSavedQuality(qualities, messageObject.getDialogId(), messageObject.getId());
@@ -648,6 +1000,13 @@ public class VideoPlayer implements Player.Listener, AnalyticsListener, Notifica
         return q;
     }
 
+    /**
+     * 获取SavedQuality。
+     * @param qualities ArrayList<Quality>类型的参数 qualities
+     * @param did 长整型类型的参数 did
+     * @param mid 整数类型的参数 mid
+     * @return Quality 类型的结果
+     */
     public static Quality getSavedQuality(ArrayList<Quality> qualities, long did, int mid) {
         final SharedPreferences preferences = ApplicationLoader.applicationContext.getSharedPreferences("media_saved_pos", Activity.MODE_PRIVATE);
         final String setting = preferences.getString(did + "_" + mid + "q2", "");
@@ -659,11 +1018,22 @@ public class VideoPlayer implements Player.Listener, AnalyticsListener, Notifica
         return null;
     }
 
+    /**
+     * 保存Quality。
+     * @param q Quality类型的参数 q
+     * @param messageObject MessageObject类型的参数 messageObject
+     */
     public static void saveQuality(Quality q, MessageObject messageObject) {
         if (messageObject == null) return;
         saveQuality(q, messageObject.getDialogId(), messageObject.getId());
     }
 
+    /**
+     * 保存Quality。
+     * @param q Quality类型的参数 q
+     * @param did 长整型类型的参数 did
+     * @param mid 整数类型的参数 mid
+     */
     public static void saveQuality(Quality q, long did, int mid) {
         final SharedPreferences preferences = ApplicationLoader.applicationContext.getSharedPreferences("media_saved_pos", Activity.MODE_PRIVATE);
         final SharedPreferences.Editor editor = preferences.edit();
@@ -675,6 +1045,11 @@ public class VideoPlayer implements Player.Listener, AnalyticsListener, Notifica
         editor.apply();
     }
 
+    /**
+     * 保存Looping。
+     * @param looping 布尔值类型的参数 looping
+     * @param messageObject MessageObject类型的参数 messageObject
+     */
     public static void saveLooping(boolean looping, MessageObject messageObject) {
         if (messageObject == null) return;
         final SharedPreferences preferences = ApplicationLoader.applicationContext.getSharedPreferences("media_saved_pos", Activity.MODE_PRIVATE);
@@ -682,6 +1057,11 @@ public class VideoPlayer implements Player.Listener, AnalyticsListener, Notifica
         preferences.edit().putBoolean(key, looping).apply();
     }
 
+    /**
+     * 获取Looping。
+     * @param messageObject MessageObject类型的参数 messageObject
+     * @return Boolean 类型的结果
+     */
     public static Boolean getLooping(MessageObject messageObject) {
         if (messageObject == null) return null;
         final SharedPreferences preferences = ApplicationLoader.applicationContext.getSharedPreferences("media_saved_pos", Activity.MODE_PRIVATE);
@@ -695,12 +1075,21 @@ public class VideoPlayer implements Player.Listener, AnalyticsListener, Notifica
     private int selectedQualityIndex = QUALITY_AUTO;
     private boolean currentStreamIsHls;
 
+    /**
+     * 获取Quality。
+     * @param index 索引（整数）
+     * @return Quality 类型的结果
+     */
     public Quality getQuality(int index) {
         if (videoQualities == null) return getHighestQuality(false);
         if (index < 0 || index >= videoQualities.size()) return getHighestQuality(false);
         return videoQualities.get(index);
     }
 
+    /**
+     * 获取OriginalQuality。
+     * @return Quality 类型的结果
+     */
     public Quality getOriginalQuality() {
         for (int i = 0; i < getQualitiesCount(); ++i) {
             final Quality q = getQuality(i);
@@ -709,6 +1098,11 @@ public class VideoPlayer implements Player.Listener, AnalyticsListener, Notifica
         return null;
     }
 
+    /**
+     * 获取HighestQuality。
+     * @param original Boolean类型的参数 original
+     * @return Quality 类型的结果
+     */
     public Quality getHighestQuality(Boolean original) {
         Quality max = null;
         for (int i = 0; i < getQualitiesCount(); ++i) {
@@ -721,6 +1115,11 @@ public class VideoPlayer implements Player.Listener, AnalyticsListener, Notifica
         return max;
     }
 
+    /**
+     * 获取HighestQuality索引。
+     * @param original Boolean类型的参数 original
+     * @return 整型结果值
+     */
     public int getHighestQualityIndex(Boolean original) {
         int maxIndex = -1;
         Quality max = null;
@@ -735,6 +1134,10 @@ public class VideoPlayer implements Player.Listener, AnalyticsListener, Notifica
         return maxIndex;
     }
 
+    /**
+     * 获取LowestQuality。
+     * @return Quality 类型的结果
+     */
     public Quality getLowestQuality() {
         Quality min = null;
         for (int i = 0; i < getQualitiesCount(); ++i) {
@@ -746,11 +1149,19 @@ public class VideoPlayer implements Player.Listener, AnalyticsListener, Notifica
         return min;
     }
 
+    /**
+     * 获取Qualities数量。
+     * @return 整型结果值
+     */
     public int getQualitiesCount() {
         if (videoQualities == null) return 0;
         return videoQualities.size();
     }
 
+    /**
+     * 获取文件。
+     * @return File 类型的结果
+     */
     public File getFile() {
         if (videoQualities != null) {
             for (Quality q : videoQualities) {
@@ -767,6 +1178,10 @@ public class VideoPlayer implements Player.Listener, AnalyticsListener, Notifica
         return null;
     }
 
+    /**
+     * 获取Lowest文件。
+     * @return File 类型的结果
+     */
     public File getLowestFile() {
         if (videoQualities != null) {
             for (int i = videoQualities.size() - 1; i >= 0; --i) {
@@ -787,10 +1202,18 @@ public class VideoPlayer implements Player.Listener, AnalyticsListener, Notifica
         return null;
     }
 
+    /**
+     * 获取SelectedQuality。
+     * @return 整型结果值
+     */
     public int getSelectedQuality() {
         return selectedQualityIndex;
     }
 
+    /**
+     * 获取当前Document。
+     * @return TLRPC.Document 类型的结果
+     */
     public TLRPC.Document getCurrentDocument() {
         if (player == null || videoQualities == null) return null;
         final int index = getCurrentQualityIndex();
@@ -800,6 +1223,10 @@ public class VideoPlayer implements Player.Listener, AnalyticsListener, Notifica
         return quality.uris.get(0).document;
     }
 
+    /**
+     * 获取当前Quality索引。
+     * @return 整型结果值
+     */
     public int getCurrentQualityIndex() {
         if (selectedQualityIndex == QUALITY_AUTO) {
             try {
@@ -823,36 +1250,36 @@ public class VideoPlayer implements Player.Listener, AnalyticsListener, Notifica
                 }
 
 //                final MappingTrackSelector.MappedTrackInfo mapTrackInfo = trackSelector.getCurrentMappedTrackInfo();
-//                for (int renderIndex = 0; renderIndex < mapTrackInfo.getRendererCount(); ++renderIndex) {
+//                用于 (int renderIndex = 0; renderIndex < mapTrackInfo.getRendererCount(); ++renderIndex) {
 //                    final TrackGroupArray trackGroups = mapTrackInfo.getTrackGroups(renderIndex);
-//                    for (int groupIndex = 0; groupIndex < trackGroups.length; ++groupIndex) {
-//                        final TrackGroup trackGroup = trackGroups.get(groupIndex);
-//                        for (int trackIndex = 0; trackIndex < trackGroup.length; ++trackIndex) {
-//                            final Format format = trackGroup.getFormat(trackIndex);
+//                    用于 (int groupIndex = 0; groupIndex < trackGroups.长度; ++groupIndex) {
+//                        final TrackGroup trackGroup = trackGroups.获取(groupIndex);
+//                        用于 (int trackIndex = 0; trackIndex < trackGroup.长度; ++trackIndex) {
+//                            final 格式化 格式化 = trackGroup.getFormat(trackIndex);
 //                            int formatIndex;
 //                            try {
-//                                formatIndex = Integer.parseInt(format.id);
+//                                formatIndex = Integer.parseInt(格式化.id);
 //                            } catch (Exception e) {
 //                                formatIndex = -1;
 //                            }
-//                            if (formatIndex >= 0) {
+//                            如果 (formatIndex >= 0) {
 //                                int formatOrder = 0;
-//                                for (int j = 0; j < getQualitiesCount(); ++j) {
+//                                用于 (int j = 0; j < getQualitiesCount(); ++j) {
 //                                    final Quality q = getQuality(j);
-//                                    for (int i = 0; i < q.uris.size(); ++i){
-//                                        if (q.uris.get(i).m3u8uri != null) {
-//                                            if (formatOrder == formatIndex) {
-//                                                return j;
+//                                    用于 (int i = 0; i < q.uris.大小(); ++i){
+//                                        如果 (q.uris.获取(i).m3u8uri != 空值) {
+//                                            如果 (formatOrder == formatIndex) {
+//                                                返回 j;
 //                                            }
 //                                            formatOrder++;
 //                                        }
 //                                    }
 //                                }
 //                            }
-//                            for (int j = 0; j < getQualitiesCount(); ++j) {
+//                            用于 (int j = 0; j < getQualitiesCount(); ++j) {
 //                                final Quality q = getQuality(j);
-//                                if (format.width == q.width && format.height == q.height) {
-//                                    return j;
+//                                如果 (格式化.width == q.width && 格式化.height == q.height) {
+//                                    返回 j;
 //                                }
 //                            }
 //                        }
@@ -866,6 +1293,11 @@ public class VideoPlayer implements Player.Listener, AnalyticsListener, Notifica
         return selectedQualityIndex;
     }
 
+    /**
+     * 获取QualityTrackSelection。
+     * @param videoUri VideoUri类型的参数 videoUri
+     * @return TrackSelectionOverride 类型的结果
+     */
     private TrackSelectionOverride getQualityTrackSelection(VideoUri videoUri) {
         try {
             int qualityOrder = manifestUris.indexOf(videoUri);
@@ -900,6 +1332,11 @@ public class VideoPlayer implements Player.Listener, AnalyticsListener, Notifica
         return null;
     }
 
+    /**
+     * 响应TrackSelectionParametersChanged。
+     * <p>该方法重写了父类/接口中的实现。</p>
+     * @param parameters TrackSelectionParameters类型的参数 parameters
+     */
     @Override
     public void onTrackSelectionParametersChanged(TrackSelectionParameters parameters) {
         Player.Listener.super.onTrackSelectionParametersChanged(parameters);
@@ -911,6 +1348,10 @@ public class VideoPlayer implements Player.Listener, AnalyticsListener, Notifica
     private long fallbackDuration = C.TIME_UNSET;
     private long fallbackPosition = C.TIME_UNSET;
 
+    /**
+     * 设置SelectedQuality。
+     * @param index 索引（整数）
+     */
     public void setSelectedQuality(int index) {
         if (player == null) return;
         if (index != selectedQualityIndex) {
@@ -921,6 +1362,11 @@ public class VideoPlayer implements Player.Listener, AnalyticsListener, Notifica
         }
     }
 
+    /**
+     * 设置SelectedQuality。
+     * @param start 启动（布尔值）
+     * @param quality Quality类型的参数 quality
+     */
     private void setSelectedQuality(boolean start, Quality quality) {
         if (player == null) return;
 
@@ -1004,6 +1450,10 @@ public class VideoPlayer implements Player.Listener, AnalyticsListener, Notifica
         }
     }
 
+    /**
+     * 获取当前Quality。
+     * @return Quality 类型的结果
+     */
     public Quality getCurrentQuality() {
         final int index = getCurrentQualityIndex();
         if (index < 0 || index >= getQualitiesCount()) return null;
@@ -1011,13 +1461,36 @@ public class VideoPlayer implements Player.Listener, AnalyticsListener, Notifica
     }
 
     private Runnable onQualityChangeListener;
+    /**
+     * 设置响应QualityChange监听器。
+     * @param listener 监听器（可运行任务）
+     */
     public void setOnQualityChangeListener(Runnable listener) {
         this.onQualityChangeListener = listener;
     }
 
+    /**
+     * 获取Qualities。
+     * @param currentAccount 整数类型的参数 currentAccount
+     * @param original TLRPC.Document类型的参数 original
+     * @param alt_documents ArrayList<TLRPC.Document>类型的参数 alt_documents
+     * @param reference 整数类型的参数 reference
+     * @param forThumb 布尔值类型的参数 forThumb
+     * @return ArrayList<Quality> 类型的结果
+     */
     public static ArrayList<Quality> getQualities(int currentAccount, TLRPC.Document original, ArrayList<TLRPC.Document> alt_documents, int reference, boolean forThumb) {
         return getQualities(currentAccount, original, alt_documents, reference, forThumb, true);
     }
+    /**
+     * 获取Qualities。
+     * @param currentAccount 整数类型的参数 currentAccount
+     * @param original TLRPC.Document类型的参数 original
+     * @param alt_documents ArrayList<TLRPC.Document>类型的参数 alt_documents
+     * @param reference 整数类型的参数 reference
+     * @param forThumb 布尔值类型的参数 forThumb
+     * @param useFileDatabaseQueue 布尔值类型的参数 useFileDatabaseQueue
+     * @return ArrayList<Quality> 类型的结果
+     */
     public static ArrayList<Quality> getQualities(int currentAccount, TLRPC.Document original, ArrayList<TLRPC.Document> alt_documents, int reference, boolean forThumb, boolean useFileDatabaseQueue) {
         ArrayList<TLRPC.Document> documents = new ArrayList<>();
         if (original != null) {
@@ -1093,12 +1566,25 @@ public class VideoPlayer implements Player.Listener, AnalyticsListener, Notifica
         return Quality.group(qualities);
     }
 
+    /**
+     * 获取Qualities。
+     * @param currentAccount 整数类型的参数 currentAccount
+     * @param media TLRPC.MessageMedia类型的参数 media
+     * @param useFileDatabaseQueue 布尔值类型的参数 useFileDatabaseQueue
+     * @return ArrayList<Quality> 类型的结果
+     */
     public static ArrayList<Quality> getQualities(int currentAccount, TLRPC.MessageMedia media, boolean useFileDatabaseQueue) {
         if (!(media instanceof TLRPC.TL_messageMediaDocument))
             return new ArrayList<>();
         return getQualities(currentAccount, media.document, media.alt_documents, 0, false, useFileDatabaseQueue);
     }
 
+    /**
+     * 判断是否包含Qualities。
+     * @param currentAccount 整数类型的参数 currentAccount
+     * @param media TLRPC.MessageMedia类型的参数 media
+     * @return 布尔结果，true 表示条件成立或操作成功
+     */
     public static boolean hasQualities(int currentAccount, TLRPC.MessageMedia media) {
         if (!(media instanceof TLRPC.TL_messageMediaDocument))
             return false;
@@ -1106,6 +1592,12 @@ public class VideoPlayer implements Player.Listener, AnalyticsListener, Notifica
         return qualities != null && qualities.size() > 1;
     }
 
+    /**
+     * 获取DocumentForThumb。
+     * @param currentAccount 整数类型的参数 currentAccount
+     * @param media TLRPC.MessageMedia类型的参数 media
+     * @return TLRPC.Document 类型的结果
+     */
     public static TLRPC.Document getDocumentForThumb(int currentAccount, TLRPC.MessageMedia media) {
         if (!(media instanceof TLRPC.TL_messageMediaDocument))
             return null;
@@ -1113,6 +1605,11 @@ public class VideoPlayer implements Player.Listener, AnalyticsListener, Notifica
         return videoUri == null ? null : videoUri.document;
     }
 
+    /**
+     * 获取QualityForThumb。
+     * @param qualities ArrayList<Quality>类型的参数 qualities
+     * @return VideoUri 类型的结果
+     */
     public static VideoUri getQualityForThumb(ArrayList<Quality> qualities) {
         for (final Quality q : qualities) {
             for (final VideoUri v : q.uris) {
@@ -1142,6 +1639,11 @@ public class VideoPlayer implements Player.Listener, AnalyticsListener, Notifica
         return uri;
     }
 
+    /**
+     * 获取CachedQuality。
+     * @param qualities ArrayList<Quality>类型的参数 qualities
+     * @return VideoUri 类型的结果
+     */
     public static VideoUri getCachedQuality(ArrayList<Quality> qualities) {
         if (qualities == null) return null;
         for (final Quality q : qualities)
@@ -1151,6 +1653,11 @@ public class VideoPlayer implements Player.Listener, AnalyticsListener, Notifica
         return null;
     }
 
+    /**
+     * 获取QualityForPlayer。
+     * @param qualities ArrayList<Quality>类型的参数 qualities
+     * @return VideoUri 类型的结果
+     */
     public static VideoUri getQualityForPlayer(ArrayList<Quality> qualities) {
         final Quality defaultQuality = getDefaultSavedQuality(qualities);
         if (defaultQuality != null) {
@@ -1185,6 +1692,11 @@ public class VideoPlayer implements Player.Listener, AnalyticsListener, Notifica
         return uri;
     }
 
+    /**
+     * toMime。
+     * @param codec 字符串类型的参数 codec
+     * @return 字符串 类型的结果
+     */
     public static String toMime(String codec) {
         if (codec == null) return null;
         switch (codec) {
@@ -1202,9 +1714,15 @@ public class VideoPlayer implements Player.Listener, AnalyticsListener, Notifica
     private static HashMap<String, Boolean> cachedSupportedCodec;
 
     /**
-     * Mirrors the check Media3 uses internally in {@code MediaCodecUtil}, which is private and
-     * therefore not accessible here. On API 29+ the platform answer is authoritative; below that
-     * we fall back to Media3's name-based approximation.
+     * Mirrors  检查 Media3 使用 internally 在 {@代码 MediaCodecUtil}, which 是 private 和
+     * therefore 不 accessible here. 在 API 29+  platform answer 是 authoritative; below 该
+     * we fall back 到 Media3's 名称-based approximation.
+     */
+    /**
+     * 判断是否为HardwareAccelerated。
+     * @param codecInfo MediaCodecInfo类型的参数 codecInfo
+     * @param mime 字符串类型的参数 mime
+     * @return 布尔结果，true 表示条件成立或操作成功
      */
     private static boolean isHardwareAccelerated(MediaCodecInfo codecInfo, String mime) {
         if (Build.VERSION.SDK_INT >= 29) {
@@ -1223,6 +1741,11 @@ public class VideoPlayer implements Player.Listener, AnalyticsListener, Notifica
                 || (!name.startsWith("omx.") && !name.startsWith("c2.")));
     }
 
+    /**
+     * supportsHardwareDecoder。
+     * @param codec 字符串类型的参数 codec
+     * @return 布尔结果，true 表示条件成立或操作成功
+     */
     public static boolean supportsHardwareDecoder(String codec) {
         try {
             final String mime = toMime(codec);
@@ -1254,6 +1777,11 @@ public class VideoPlayer implements Player.Listener, AnalyticsListener, Notifica
         }
     }
 
+    /**
+     * makeManifest。
+     * @param qualities ArrayList<Quality>类型的参数 qualities
+     * @return Uri 类型的结果
+     */
     public Uri makeManifest(ArrayList<Quality> qualities) {
         final StringBuilder sb = new StringBuilder();
         sb.append("#EXTM3U\n");
@@ -1297,12 +1825,20 @@ public class VideoPlayer implements Player.Listener, AnalyticsListener, Notifica
         return Uri.parse("data:application/x-mpegurl;base64," + base64);
     }
 
+    /**
+     * 类：Quality，封装了相关的业务逻辑与数据处理。
+     */
     public static class Quality {
 
         public boolean original;
         public int width, height;
         public final ArrayList<VideoUri> uris = new ArrayList<>();
 
+        /**
+         * Quality。
+         * @param uri VideoUri类型的参数 uri
+         * @return public 类型的结果
+         */
         public Quality(VideoUri uri) {
             original = uri.original;
             width = uri.width;
@@ -1310,6 +1846,11 @@ public class VideoPlayer implements Player.Listener, AnalyticsListener, Notifica
             uris.add(uri);
         }
 
+        /**
+         * 分组。
+         * @param uris ArrayList<VideoUri>类型的参数 uris
+         * @return ArrayList<Quality> 类型的结果
+         */
         public static ArrayList<Quality> group(ArrayList<VideoUri> uris) {
             final ArrayList<Quality> qualities = new ArrayList<>();
 
@@ -1334,11 +1875,11 @@ public class VideoPlayer implements Player.Listener, AnalyticsListener, Notifica
                 }
             }
 
-//            if (BuildVars.LOGS_ENABLED) {
-//                for (Quality q : qualities) {
+//            如果 (BuildVars.LOGS_ENABLED) {
+//                用于 (Quality q : qualities) {
 //                    FileLog.d("debug_loading_player: Quality "+q.p()+"p (" + q.width + "x" + q.height + ")" + (q.original ? " (source)" : "") + ":");
-//                    for (VideoUri uri : q.uris) {
-//                        FileLog.d("debug_loading_player: - video " + uri.width + "x" + uri.height + ", codec=" + uri.codec + ", bitrate=" + (int) (uri.bitrate*8) + ", doc#" + uri.docId + (uri.isCached() ? " (cached)" : "") + ", manifest#" + uri.manifestDocId + (uri.isManifestCached() ? " (cached)" : ""));
+//                    用于 (VideoUri uri : q.uris) {
+//                        FileLog.d("debug_loading_player: - 视频 " + uri.width + "x" + uri.height + ", codec=" + uri.codec + ", bitrate=" + (int) (uri.bitrate*8) + ", doc#" + uri.docId + (uri.isCached() ? " (cached)" : "") + ", manifest#" + uri.manifestDocId + (uri.isManifestCached() ? " (cached)" : ""));
 //                    }
 //                }
 //                FileLog.d("debug_loading_player: ");
@@ -1347,6 +1888,11 @@ public class VideoPlayer implements Player.Listener, AnalyticsListener, Notifica
             return qualities;
         }
 
+        /**
+         * 过滤ByCodec。
+         * @param qualities ArrayList<Quality>类型的参数 qualities
+         * @return ArrayList<Quality> 类型的结果
+         */
         public static ArrayList<Quality> filterByCodec(ArrayList<Quality> qualities) {
             if (qualities == null) return null;
             for (int i = 0; i < qualities.size(); ++i) {
@@ -1366,6 +1912,11 @@ public class VideoPlayer implements Player.Listener, AnalyticsListener, Notifica
             return qualities;
         }
 
+        /**
+         * toString。
+         * <p>该方法重写了父类/接口中的实现。</p>
+         * @return 字符串 类型的结果
+         */
         @NonNull
         @Override
         public String toString() {
@@ -1379,6 +1930,10 @@ public class VideoPlayer implements Player.Listener, AnalyticsListener, Notifica
             }
         }
 
+        /**
+         * p。
+         * @return 整型结果值
+         */
         public int p() {
             int p = Math.min(width, height);
             if      (Math.abs(p - 2160) < 55) p = 2160;
@@ -1392,6 +1947,10 @@ public class VideoPlayer implements Player.Listener, AnalyticsListener, Notifica
             return p;
         }
 
+        /**
+         * 获取下载Document。
+         * @return TLRPC.Document 类型的结果
+         */
         public TLRPC.Document getDownloadDocument() {
             if (uris.isEmpty()) return null;
             for (VideoUri uri : uris) {
@@ -1413,6 +1972,10 @@ public class VideoPlayer implements Player.Listener, AnalyticsListener, Notifica
             return uris.get(0).document;
         }
 
+        /**
+         * 获取下载Uri。
+         * @return VideoUri 类型的结果
+         */
         public VideoUri getDownloadUri() {
             if (uris.isEmpty()) return null;
             for (VideoUri uri : uris) {
@@ -1435,6 +1998,9 @@ public class VideoPlayer implements Player.Listener, AnalyticsListener, Notifica
         }
     }
 
+    /**
+     * 类：视频Uri，封装了相关的业务逻辑与数据处理。
+     */
     public static class VideoUri {
 
         public int currentAccount;
@@ -1448,14 +2014,26 @@ public class VideoPlayer implements Player.Listener, AnalyticsListener, Notifica
         public TLRPC.Document document;
         public TLRPC.Document manifestDocument;
 
+        /**
+         * 判断是否为Cached。
+         * @return 布尔结果，true 表示条件成立或操作成功
+         */
         public boolean isCached() {
             return uri != null && "file".equalsIgnoreCase(uri.getScheme());
         }
 
+        /**
+         * 判断是否为ManifestCached。
+         * @return 布尔结果，true 表示条件成立或操作成功
+         */
         public boolean isManifestCached() {
             return m3u8uri != null && "file".equalsIgnoreCase(m3u8uri.getScheme());
         }
 
+        /**
+         * 更新Cached。
+         * @param useFileDatabaseQueue 布尔值类型的参数 useFileDatabaseQueue
+         */
         public void updateCached(boolean useFileDatabaseQueue) {
             if (!isCached() && document != null) {
                 File file = FileLoader.getInstance(currentAccount).getPathToAttach(document, null, false, useFileDatabaseQueue);
@@ -1489,6 +2067,13 @@ public class VideoPlayer implements Player.Listener, AnalyticsListener, Notifica
         public String codec;
         public MediaItem mediaItem;
 
+        /**
+         * 获取Uri。
+         * @param currentAccount 整数类型的参数 currentAccount
+         * @param document TLRPC.Document类型的参数 document
+         * @param reference 整数类型的参数 reference
+         * @return Uri 类型的结果
+         */
         public static Uri getUri(int currentAccount, TLRPC.Document document, int reference) throws UnsupportedEncodingException {
             final String params =
                 "?account=" + currentAccount +
@@ -1503,6 +2088,15 @@ public class VideoPlayer implements Player.Listener, AnalyticsListener, Notifica
             return Uri.parse("tg://" + MessageObject.getFileName(document) + params);
         }
 
+        /**
+         * of。
+         * @param currentAccount 整数类型的参数 currentAccount
+         * @param document TLRPC.Document类型的参数 document
+         * @param manifest TLRPC.Document类型的参数 manifest
+         * @param reference 整数类型的参数 reference
+         * @param useFileDatabaseQueue 布尔值类型的参数 useFileDatabaseQueue
+         * @return VideoUri 类型的结果
+         */
         public static VideoUri of(int currentAccount, TLRPC.Document document, TLRPC.Document manifest, int reference, boolean useFileDatabaseQueue) throws UnsupportedEncodingException {
             final VideoUri videoUri = new VideoUri();
             TLRPC.TL_documentAttributeVideo attributeVideo = null;
@@ -1557,6 +2151,10 @@ public class VideoPlayer implements Player.Listener, AnalyticsListener, Notifica
             return videoUri;
         }
 
+        /**
+         * 获取Media条目。
+         * @return MediaItem 类型的结果
+         */
         public MediaItem getMediaItem() {
             if (mediaItem == null) {
                 mediaItem = new MediaItem.Builder().setUri(uri).build();
@@ -1566,10 +2164,18 @@ public class VideoPlayer implements Player.Listener, AnalyticsListener, Notifica
 
     }
 
+    /**
+     * 判断是否为PlayerPrepared。
+     * @return 布尔结果，true 表示条件成立或操作成功
+     */
     public boolean isPlayerPrepared() {
         return player != null;
     }
 
+    /**
+     * 释放Player。
+     * @param async 布尔值类型的参数 async
+     */
     public void releasePlayer(boolean async) {
         activePlayers.remove(playerId);
         recoveryPlayerRef = null;
@@ -1593,6 +2199,11 @@ public class VideoPlayer implements Player.Listener, AnalyticsListener, Notifica
         playerCounter--;
     }
 
+    /**
+     * 响应定位到Started。
+     * <p>该方法重写了父类/接口中的实现。</p>
+     * @param eventTime EventTime类型的参数 eventTime
+     */
     @Override
     public void onSeekStarted(EventTime eventTime) {
         if (delegate != null) {
@@ -1602,6 +2213,9 @@ public class VideoPlayer implements Player.Listener, AnalyticsListener, Notifica
 
     private final ArrayList<Runnable> seekFinishedListeners = new ArrayList<>();
 
+    /**
+     * 通知定位到Finished。
+     */
     private void notifySeekFinished() {
         if (delegate != null) {
             delegate.onSeekFinished();
@@ -1612,6 +2226,13 @@ public class VideoPlayer implements Player.Listener, AnalyticsListener, Notifica
         seekFinishedListeners.clear();
     }
 
+    /**
+     * 响应Rendered首个Frame。
+     * <p>该方法重写了父类/接口中的实现。</p>
+     * @param eventTime EventTime类型的参数 eventTime
+     * @param output 输出（对象）
+     * @param renderTimeMs 长整型类型的参数 renderTimeMs
+     */
     @Override
     public void onRenderedFirstFrame(EventTime eventTime, Object output, long renderTimeMs) {
         fallbackPosition = C.TIME_UNSET;
@@ -1621,6 +2242,10 @@ public class VideoPlayer implements Player.Listener, AnalyticsListener, Notifica
         }
     }
 
+    /**
+     * 设置Texture视图。
+     * @param texture TextureView类型的参数 texture
+     */
     public void setTextureView(TextureView texture) {
         if (textureView == texture) {
             return;
@@ -1643,6 +2268,10 @@ public class VideoPlayer implements Player.Listener, AnalyticsListener, Notifica
         }
     }
 
+    /**
+     * 设置Surface视图。
+     * @param surfaceView SurfaceView类型的参数 surfaceView
+     */
     public void setSurfaceView(SurfaceView surfaceView) {
         if (this.surfaceView == surfaceView) {
             return;
@@ -1661,6 +2290,10 @@ public class VideoPlayer implements Player.Listener, AnalyticsListener, Notifica
         }
     }
 
+    /**
+     * 设置Surface。
+     * @param s Surface类型的参数 s
+     */
     public void setSurface(Surface s) {
         if (surface == s) {
             return;
@@ -1673,18 +2306,33 @@ public class VideoPlayer implements Player.Listener, AnalyticsListener, Notifica
         releaseOwnedTextureSurface();
     }
 
+    /**
+     * 获取播放WhenReady。
+     * @return 布尔结果，true 表示条件成立或操作成功
+     */
     public boolean getPlayWhenReady() {
         return player.getPlayWhenReady();
     }
 
+    /**
+     * 获取Playback状态。
+     * @return 整型结果值
+     */
     public int getPlaybackState() {
         return player.getPlaybackState();
     }
 
+    /**
+     * 获取当前Uri。
+     * @return Uri 类型的结果
+     */
     public Uri getCurrentUri() {
         return currentUri;
     }
 
+    /**
+     * 播放。
+     */
     public void play() {
         mixedPlayWhenReady = true;
         if (mixedAudio) {
@@ -1706,6 +2354,9 @@ public class VideoPlayer implements Player.Listener, AnalyticsListener, Notifica
         }
     }
 
+    /**
+     * 暂停。
+     */
     public void pause() {
         mixedPlayWhenReady = false;
         if (player != null) {
@@ -1721,6 +2372,10 @@ public class VideoPlayer implements Player.Listener, AnalyticsListener, Notifica
         }
     }
 
+    /**
+     * 设置Playback速度。
+     * @param speed 速度（浮点值）
+     */
     public void setPlaybackSpeed(float speed) {
         try {
             if (player != null) {
@@ -1729,6 +2384,10 @@ public class VideoPlayer implements Player.Listener, AnalyticsListener, Notifica
         } catch (Exception ignore) {}
     }
 
+    /**
+     * 获取Playback速度。
+     * @return 浮点结果值
+     */
     public float getPlaybackSpeed() {
         if (player == null) return 1.0f;
         final PlaybackParameters params = player.getPlaybackParameters();
@@ -1736,6 +2395,10 @@ public class VideoPlayer implements Player.Listener, AnalyticsListener, Notifica
         return params.speed;
     }
 
+    /**
+     * 设置播放WhenReady。
+     * @param playWhenReady 布尔值类型的参数 playWhenReady
+     */
     public void setPlayWhenReady(boolean playWhenReady) {
         mixedPlayWhenReady = playWhenReady;
         if (playWhenReady && mixedAudio) {
@@ -1758,6 +2421,10 @@ public class VideoPlayer implements Player.Listener, AnalyticsListener, Notifica
         }
     }
 
+    /**
+     * 获取时长。
+     * @return 整型结果值
+     */
     public long getDuration() {
         if (fallbackDuration != C.TIME_UNSET) {
             return fallbackDuration;
@@ -1765,6 +2432,10 @@ public class VideoPlayer implements Player.Listener, AnalyticsListener, Notifica
         return player != null ? player.getDuration() : 0;
     }
 
+    /**
+     * 获取当前位置。
+     * @return 整型结果值
+     */
     public long getCurrentPosition() {
         if (fallbackPosition != C.TIME_UNSET) {
             return fallbackPosition;
@@ -1772,10 +2443,18 @@ public class VideoPlayer implements Player.Listener, AnalyticsListener, Notifica
         return player != null ? player.getCurrentPosition() : 0;
     }
 
+    /**
+     * 判断是否为Muted。
+     * @return 布尔结果，true 表示条件成立或操作成功
+     */
     public boolean isMuted() {
         return player != null && player.getVolume() == 0.0f;
     }
 
+    /**
+     * 设置静音。
+     * @param value 值（布尔值）
+     */
     public void setMute(boolean value) {
         if (player != null) {
             player.setVolume(value ? 0.0f : 1.0f);
@@ -1785,16 +2464,31 @@ public class VideoPlayer implements Player.Listener, AnalyticsListener, Notifica
         }
     }
 
+    /**
+     * 响应Repeat模式Changed。
+     * <p>该方法重写了父类/接口中的实现。</p>
+     * @param repeatMode 整数类型的参数 repeatMode
+     */
     @Override
     public void onRepeatModeChanged(int repeatMode) {
 
     }
 
+    /**
+     * 响应Surface尺寸Changed。
+     * <p>该方法重写了父类/接口中的实现。</p>
+     * @param width 宽度（整数）
+     * @param height 高度（整数）
+     */
     @Override
     public void onSurfaceSizeChanged(int width, int height) {
 
     }
 
+    /**
+     * 设置Volume。
+     * @param volume 浮点值类型的参数 volume
+     */
     public void setVolume(float volume) {
         if (player != null) {
             player.setVolume(volume);
@@ -1804,6 +2498,10 @@ public class VideoPlayer implements Player.Listener, AnalyticsListener, Notifica
         }
     }
 
+    /**
+     * 获取Volume。
+     * @return 浮点结果值
+     */
     public float getVolume() {
         if (player != null) {
             return player.getVolume();
@@ -1811,13 +2509,22 @@ public class VideoPlayer implements Player.Listener, AnalyticsListener, Notifica
         return 1.0f;
     }
 
+    /**
+     * 定位到To。
+     * @param positionMs 长整型类型的参数 positionMs
+     */
     public void seekTo(long positionMs) {
         seekTo(positionMs, false);
     }
 
+    /**
+     * 定位到To。
+     * @param positionMs 长整型类型的参数 positionMs
+     * @param fast 布尔值类型的参数 fast
+     */
     public void seekTo(long positionMs, boolean fast) {
-        // A negative target is clamped to 0 by ExoPlayer, which restarts a
-        // streamed fragmented file from the first frame. Drop it instead.
+        //  negative target 是 clamped 到 0 由 ExoPlayer, which restarts 
+        // streamed fragmented 文件 从  first frame. Drop 它 instead.
         if (positionMs < 0) {
             return;
         }
@@ -1827,6 +2534,12 @@ public class VideoPlayer implements Player.Listener, AnalyticsListener, Notifica
         }
     }
 
+    /**
+     * 定位到To。
+     * @param positionMs 长整型类型的参数 positionMs
+     * @param fast 布尔值类型的参数 fast
+     * @param whenDone 可运行任务类型的参数 whenDone
+     */
     public void seekTo(long positionMs, boolean fast, Runnable whenDone) {
         if (positionMs < 0) {
             if (whenDone != null) {
@@ -1843,6 +2556,12 @@ public class VideoPlayer implements Player.Listener, AnalyticsListener, Notifica
         }
     }
 
+    /**
+     * 定位到ToBack。
+     * @param positionMs 长整型类型的参数 positionMs
+     * @param fast 布尔值类型的参数 fast
+     * @param whenDone 可运行任务类型的参数 whenDone
+     */
     public void seekToBack(long positionMs, boolean fast, Runnable whenDone) {
         if (positionMs < 0) {
             if (whenDone != null) {
@@ -1859,6 +2578,12 @@ public class VideoPlayer implements Player.Listener, AnalyticsListener, Notifica
         }
     }
 
+    /**
+     * 定位到To转发。
+     * @param positionMs 长整型类型的参数 positionMs
+     * @param fast 布尔值类型的参数 fast
+     * @param whenDone 可运行任务类型的参数 whenDone
+     */
     public void seekToForward(long positionMs, boolean fast, Runnable whenDone) {
         if (positionMs < 0) {
             if (whenDone != null) {
@@ -1875,36 +2600,68 @@ public class VideoPlayer implements Player.Listener, AnalyticsListener, Notifica
         }
     }
 
+    /**
+     * 设置Delegate。
+     * @param videoPlayerDelegate VideoPlayerDelegate类型的参数 videoPlayerDelegate
+     */
     public void setDelegate(VideoPlayerDelegate videoPlayerDelegate) {
         delegate = videoPlayerDelegate;
     }
 
+    /**
+     * 设置音频VisualizerDelegate。
+     * @param audioVisualizerDelegate AudioVisualizerDelegate类型的参数 audioVisualizerDelegate
+     */
     public void setAudioVisualizerDelegate(AudioVisualizerDelegate audioVisualizerDelegate) {
         this.audioVisualizerDelegate = audioVisualizerDelegate;
     }
 
+    /**
+     * 获取BufferedPercentage。
+     * @return 整型结果值
+     */
     public int getBufferedPercentage() {
         return isStreaming ? (player != null ? player.getBufferedPercentage() : 0) : 100;
     }
 
+    /**
+     * 获取Buffered位置。
+     * @return 整型结果值
+     */
     public long getBufferedPosition() {
         return player != null ? (isStreaming ? player.getBufferedPosition() : player.getDuration()) : 0;
     }
 
+    /**
+     * 判断是否为Streaming。
+     * @return 布尔结果，true 表示条件成立或操作成功
+     */
     public boolean isStreaming() {
         return isStreaming;
     }
 
+    /**
+     * 判断是否为Playing。
+     * @return 布尔结果，true 表示条件成立或操作成功
+     */
     public boolean isPlaying() {
         return mixedAudio && mixedPlayWhenReady || player != null && player.getPlayWhenReady();
     }
 
+    /**
+     * 判断是否为Buffering。
+     * @return 布尔结果，true 表示条件成立或操作成功
+     */
     public boolean isBuffering() {
         return player != null && lastReportedPlaybackState == ExoPlayer.STATE_BUFFERING;
     }
 
 
     private boolean handleAudioFocus = false;
+    /**
+     * 处理音频聚焦。
+     * @param handleAudioFocus 布尔值类型的参数 handleAudioFocus
+     */
     public void handleAudioFocus(boolean handleAudioFocus) {
         this.handleAudioFocus = handleAudioFocus;
         if (player != null) {
@@ -1912,6 +2669,10 @@ public class VideoPlayer implements Player.Listener, AnalyticsListener, Notifica
         }
     }
 
+    /**
+     * 设置Stream类型。
+     * @param type 类型（整数）
+     */
     public void setStreamType(int type) {
         if (player != null) {
             player.setAudioAttributes(new AudioAttributes.Builder()
@@ -1925,6 +2686,10 @@ public class VideoPlayer implements Player.Listener, AnalyticsListener, Notifica
         }
     }
 
+    /**
+     * 设置Looping。
+     * @param looping 布尔值类型的参数 looping
+     */
     public void setLooping(boolean looping) {
         if (this.looping != looping) {
             this.looping = looping;
@@ -1934,16 +2699,29 @@ public class VideoPlayer implements Player.Listener, AnalyticsListener, Notifica
         }
     }
 
+    /**
+     * 判断是否为Looping。
+     * @return 布尔结果，true 表示条件成立或操作成功
+     */
     public boolean isLooping() {
         return looping;
     }
 
+    /**
+     * 检查PlayersReady。
+     */
     private void checkPlayersReady() {
         if (audioPlayerReady && videoPlayerReady && mixedPlayWhenReady) {
             play();
         }
     }
 
+    /**
+     * 响应Player状态Changed。
+     * <p>该方法重写了父类/接口中的实现。</p>
+     * @param playWhenReady 布尔值类型的参数 playWhenReady
+     * @param playbackState 整数类型的参数 playbackState
+     */
     @Override
     public void onPlayerStateChanged(boolean playWhenReady, int playbackState) {
         long prevT = diagLastStateAtMs;
@@ -1963,9 +2741,9 @@ public class VideoPlayer implements Player.Listener, AnalyticsListener, Notifica
             NotificationCenter.getGlobalInstance().postNotificationName(NotificationCenter.playerDidStartPlaying, this);
         }
         if (playbackState == Player.STATE_READY) {
-            // One-shot internal error-recovery restore. Only armed by onPlayerError's AV1 /
-            // decoder-init paths. Generation and player instance must both still match, so a
-            // normal open, a quality switch, a later re-prepare or a new player cannot consume it.
+            // One-shot internal 错误-recovery restore. Only armed 由 onPlayerError's AV1 /
+            // decoder-初始化 paths. Generation 和 player instance must both still 匹配, so 
+            // normal 打开,  quality switch,  later re-prepare 或  new player cannot consume 它.
             if (recoveryPlayerRef == player && recoveryPositionMs != C.TIME_UNSET && prepareGeneration == recoveryGeneration) {
                 long restorePos = recoveryPositionMs;
                 boolean restorePlaying = recoveryPlayWhenReady;
@@ -1990,6 +2768,13 @@ public class VideoPlayer implements Player.Listener, AnalyticsListener, Notifica
         }
     }
 
+    /**
+     * 响应位置Discontinuity。
+     * <p>该方法重写了父类/接口中的实现。</p>
+     * @param oldPosition Player.PositionInfo类型的参数 oldPosition
+     * @param newPosition Player.PositionInfo类型的参数 newPosition
+     * @param reason 整数类型的参数 reason
+     */
     @Override
     public void onPositionDiscontinuity(Player.PositionInfo oldPosition, Player.PositionInfo newPosition, @Player.DiscontinuityReason int reason) {
         diagPlayer("DISCONT " + diagReasonName(reason),
@@ -2006,6 +2791,12 @@ public class VideoPlayer implements Player.Listener, AnalyticsListener, Notifica
         }
     }
 
+    /**
+     * 响应TimelineChanged。
+     * <p>该方法重写了父类/接口中的实现。</p>
+     * @param timeline Timeline类型的参数 timeline
+     * @param reason 整数类型的参数 reason
+     */
     @Override
     public void onTimelineChanged(Timeline timeline, int reason) {
         diagLastTimelineChangeAtMs = SystemClock.elapsedRealtime();
@@ -2014,9 +2805,14 @@ public class VideoPlayer implements Player.Listener, AnalyticsListener, Notifica
                 + " pos=" + (player != null ? player.getCurrentPosition() : -1));
     }
 
-    // Observe-only. Emits a single line with a monotonic timestamp (SystemClock.elapsedRealtime,
-    // same clock base as PhotoViewer's ABPV t=), the ExoPlayer instance identity, generation and
-    // timeline/prepare timestamps. Never touches playback state. detail is appended verbatim.
+    // Observe-only. Emits  single line 使用  monotonic timestamp (SystemClock.elapsedRealtime,
+    // same clock base 作为 PhotoViewer's ABPV t=),  ExoPlayer instance identity, generation 和
+    // timeline/prepare timestamps. Never touches playback state. detail 是 appended verbatim.
+    /**
+     * diagPlayer。
+     * @param tag 标签（字符串）
+     * @param detail 字符串类型的参数 detail
+     */
     private void diagPlayer(String tag, String detail) {
         try {
             FileLog.d("PlayerDiag: " + tag
@@ -2030,6 +2826,11 @@ public class VideoPlayer implements Player.Listener, AnalyticsListener, Notifica
         }
     }
 
+    /**
+     * diag状态名称。
+     * @param s 整数类型的参数 s
+     * @return 字符串 类型的结果
+     */
     private static String diagStateName(int s) {
         return switch (s) {
             case Player.STATE_IDLE -> "IDLE";
@@ -2040,6 +2841,11 @@ public class VideoPlayer implements Player.Listener, AnalyticsListener, Notifica
         };
     }
 
+    /**
+     * diagReason名称。
+     * @param r 整数类型的参数 r
+     * @return 字符串 类型的结果
+     */
     private static String diagReasonName(int r) {
         return switch (r) {
             case Player.DISCONTINUITY_REASON_AUTO_TRANSITION -> "AUTO_TRANSITION";
@@ -2051,10 +2857,13 @@ public class VideoPlayer implements Player.Listener, AnalyticsListener, Notifica
         };
     }
 
-    // Called immediately before an internal error-recovery prepare(). Records the position and
-    // playback state still held by the old source. generation is set to the value prepareGeneration
-    // will have AFTER the imminent preparePlayer* call increments it; STATE_READY restores only if
-    // the generation and the player instance still match (one-shot, cleared on restore).
+    // 被调用 immediately before  internal 错误-recovery prepare(). Records  position 和
+    // playback state still held 由  old source. generation 是 设置 到  值 prepareGeneration
+    // will have AFTER  imminent preparePlayer* 调用 increments 它; STATE_READY restores only 如果
+    //  generation 和  player instance still 匹配 (one-shot, cleared 在 restore).
+    /**
+     * captureRecovery意图。
+     */
     private void captureRecoveryIntent() {
         if (player != null) {
             recoveryPlayerRef = player;
@@ -2064,6 +2873,11 @@ public class VideoPlayer implements Player.Listener, AnalyticsListener, Notifica
         }
     }
 
+    /**
+     * 响应Player错误。
+     * <p>该方法重写了父类/接口中的实现。</p>
+     * @param error 错误（PlaybackException）
+     */
     @Override
     public void onPlayerError(PlaybackException error) {
         AndroidUtilities.runOnUIThread(() -> {
@@ -2124,7 +2938,7 @@ public class VideoPlayer implements Player.Listener, AnalyticsListener, Notifica
                     }
                 }
             } else {
-                // Not an internal recovery: do not leave a stale restore armed.
+                // 不  internal recovery: do 不 leave  stale restore armed.
                 recoveryPlayerRef = null;
                 recoveryPositionMs = C.TIME_UNSET;
                 recoveryGeneration = -1;
@@ -2135,10 +2949,19 @@ public class VideoPlayer implements Player.Listener, AnalyticsListener, Notifica
         });
     }
 
+    /**
+     * 获取视频尺寸。
+     * @return VideoSize 类型的结果
+     */
     public VideoSize getVideoSize() {
         return player != null ? player.getVideoSize() : null;
     }
 
+    /**
+     * 响应视频尺寸Changed。
+     * <p>该方法重写了父类/接口中的实现。</p>
+     * @param videoSize VideoSize类型的参数 videoSize
+     */
     @Override
     public void onVideoSizeChanged(VideoSize videoSize) {
         if (delegate != null) {
@@ -2147,6 +2970,10 @@ public class VideoPlayer implements Player.Listener, AnalyticsListener, Notifica
         Player.Listener.super.onVideoSizeChanged(videoSize);
     }
 
+    /**
+     * 响应Rendered首个Frame。
+     * <p>该方法重写了父类/接口中的实现。</p>
+     */
     @Override
     public void onRenderedFirstFrame() {
         if (delegate != null) {
@@ -2154,11 +2981,27 @@ public class VideoPlayer implements Player.Listener, AnalyticsListener, Notifica
         }
     }
 
+    /**
+     * 响应PlaybackParametersChanged。
+     * <p>该方法重写了父类/接口中的实现。</p>
+     * @param playbackParameters PlaybackParameters类型的参数 playbackParameters
+     */
     @Override
     public void onPlaybackParametersChanged(PlaybackParameters playbackParameters) {
 
     }
 
+    /** 由捕获了代次/请求 ID 的监听器调用，保证身份来自回调产生处而不是消费时现读。 */
+    private void dispatchPlayerState(int generation, long requestId, boolean playWhenReady,
+                                     int playbackState) {
+        callbackGeneration = generation;
+        callbackRequestId = requestId;
+        onPlayerStateChanged(playWhenReady, playbackState);
+    }
+
+    /**
+     * maybeReportPlayer状态。
+     */
     private void maybeReportPlayerState() {
         if (player == null) {
             return;
@@ -2167,24 +3010,45 @@ public class VideoPlayer implements Player.Listener, AnalyticsListener, Notifica
         int playbackState = player.getPlaybackState();
         if (lastReportedPlayWhenReady != playWhenReady || lastReportedPlaybackState != playbackState) {
             if (delegate != null) {
-                // 把产生回调时的实例和代次一起传出去，消费方据此判断是否来自当前 prepare。
-                delegate.onStateChanged(this, prepareGeneration, playWhenReady, playbackState);
+                // 使用监听器在注册时捕获的代次和请求 ID，绝不是当前字段的即时值。
+                delegate.onStateChanged(this, callbackGeneration, callbackRequestId,
+                        playWhenReady, playbackState);
             }
             lastReportedPlayWhenReady = playWhenReady;
             lastReportedPlaybackState = playbackState;
         }
     }
 
+    /**
+     * 获取Repeat数量。
+     * @return 整型结果值
+     */
     public int getRepeatCount() {
         return repeatCount;
     }
 
+    /**
+     * 类：音频VisualizerRenderersFactory，封装了相关的业务逻辑与数据处理。
+     */
     private class AudioVisualizerRenderersFactory extends SdrFallbackRenderersFactory {
 
+        /**
+         * 音频VisualizerRenderersFactory。
+         * @param context 上下文类型的参数 context
+         * @return public 类型的结果
+         */
         public AudioVisualizerRenderersFactory(Context context) {
             super(context);
         }
 
+        /**
+         * 构建音频Sink。
+         * <p>该方法重写了父类/接口中的实现。</p>
+         * @param context 上下文类型的参数 context
+         * @param enableFloatOutput 布尔值类型的参数 enableFloatOutput
+         * @param enableAudioOutputPlaybackParams 布尔值类型的参数 enableAudioOutputPlaybackParams
+         * @return AudioSink 类型的结果
+         */
         @Nullable
         @Override
         protected AudioSink buildAudioSink(Context context, boolean enableFloatOutput, boolean enableAudioOutputPlaybackParams) {
@@ -2197,6 +3061,9 @@ public class VideoPlayer implements Player.Listener, AnalyticsListener, Notifica
         }
     }
 
+    /**
+     * 类：VisualizerBufferSink，封装了相关的业务逻辑与数据处理。
+     */
     private class VisualizerBufferSink implements TeeAudioProcessor.AudioBufferSink {
 
         private final int BUFFER_SIZE = 1024;
@@ -2206,11 +3073,22 @@ public class VideoPlayer implements Player.Listener, AnalyticsListener, Notifica
         ByteBuffer byteBuffer;
         int position = 0;
 
+        /**
+         * VisualizerBufferSink。
+         * @return public 类型的结果
+         */
         public VisualizerBufferSink() {
             byteBuffer = ByteBuffer.allocateDirect(MAX_BUFFER_SIZE);
             byteBuffer.position(0);
         }
 
+        /**
+         * flush。
+         * <p>该方法重写了父类/接口中的实现。</p>
+         * @param sampleRateHz 整数类型的参数 sampleRateHz
+         * @param channelCount 整数类型的参数 channelCount
+         * @param encoding 整数类型的参数 encoding
+         */
         @Override
         public void flush(int sampleRateHz, int channelCount, int encoding) {
 
@@ -2219,6 +3097,11 @@ public class VideoPlayer implements Player.Listener, AnalyticsListener, Notifica
 
         long lastUpdateTime;
 
+        /**
+         * 处理Buffer。
+         * <p>该方法重写了父类/接口中的实现。</p>
+         * @param buffer ByteBuffer类型的参数 buffer
+         */
         @Override
         public void handleBuffer(ByteBuffer buffer) {
             if (audioVisualizerDelegate == null) {
@@ -2243,7 +3126,7 @@ public class VideoPlayer implements Player.Listener, AnalyticsListener, Notifica
                 return;
 //                len = MAX_BUFFER_SIZE;
 //                byte[] bytes = new byte[BUFFER_SIZE];
-//                buffer.get(bytes);
+//                缓冲区.获取(bytes);
 //                byteBuffer.put(bytes, 0, BUFFER_SIZE);
             } else {
                 byteBuffer.put(buffer);
@@ -2309,6 +3192,10 @@ public class VideoPlayer implements Player.Listener, AnalyticsListener, Notifica
         }
     }
 
+    /**
+     * 判断是否为HDR。
+     * @return 布尔结果，true 表示条件成立或操作成功
+     */
     public boolean isHDR() {
         if (player == null) {
             return false;
@@ -2327,6 +3214,10 @@ public class VideoPlayer implements Player.Listener, AnalyticsListener, Notifica
     }
 
 
+    /**
+     * 获取视频格式化。
+     * @return Format 类型的结果
+     */
     @Nullable
     private Format getVideoFormat() {
         if (player == null) {
@@ -2346,6 +3237,11 @@ public class VideoPlayer implements Player.Listener, AnalyticsListener, Notifica
         return null;
     }
 
+    /**
+     * toMedia格式化颜色Transfer。
+     * @param colorTransfer 整数类型的参数 colorTransfer
+     * @return 整型结果值
+     */
     private static int toMediaFormatColorTransfer(int colorTransfer) {
         if (colorTransfer == Format.NO_VALUE) {
             return 0;
@@ -2356,10 +3252,20 @@ public class VideoPlayer implements Player.Listener, AnalyticsListener, Notifica
         return colorTransfer;
     }
 
+    /**
+     * toMedia格式化颜色Standard。
+     * @param colorSpace 整数类型的参数 colorSpace
+     * @return 整型结果值
+     */
     private static int toMediaFormatColorStandard(int colorSpace) {
         return colorSpace == Format.NO_VALUE ? 0 : colorSpace;
     }
 
+    /**
+     * toMedia格式化颜色Range。
+     * @param colorRange 整数类型的参数 colorRange
+     * @return 整型结果值
+     */
     private static int toMediaFormatColorRange(int colorRange) {
         switch (colorRange) {
             case C.COLOR_RANGE_LIMITED:
@@ -2371,6 +3277,11 @@ public class VideoPlayer implements Player.Listener, AnalyticsListener, Notifica
         }
     }
 
+    /**
+     * 获取HDRStaticInfo。
+     * @param hdrInfo StoryEntry.HDRInfo类型的参数 hdrInfo
+     * @return StoryEntry.HDRInfo 类型的结果
+     */
     public StoryEntry.HDRInfo getHDRStaticInfo(StoryEntry.HDRInfo hdrInfo) {
         if (hdrInfo == null) {
             hdrInfo = new StoryEntry.HDRInfo();
@@ -2404,14 +3315,26 @@ public class VideoPlayer implements Player.Listener, AnalyticsListener, Notifica
         return hdrInfo;
     }
 
+    /**
+     * 设置Worker队列。
+     * @param dispatchQueue DispatchQueue类型的参数 dispatchQueue
+     */
     public void setWorkerQueue(DispatchQueue dispatchQueue) {
         workerQueue = dispatchQueue;
     }
 
+    /**
+     * 设置判断是否为Story。
+     */
     public void setIsStory() {
         isStory = true;
     }
 
+    /**
+     * 响应TracksChanged。
+     * <p>该方法重写了父类/接口中的实现。</p>
+     * @param tracks Tracks类型的参数 tracks
+     */
     @Override
     public void onTracksChanged(Tracks tracks) {
         Player.Listener.super.onTracksChanged(tracks);
@@ -2420,6 +3343,13 @@ public class VideoPlayer implements Player.Listener, AnalyticsListener, Notifica
         }
     }
 
+    /**
+     * 获取当前ChromecastMedia。
+     * @param defaultId 字符串类型的参数 defaultId
+     * @param title 标题（字符串）
+     * @param subtitle 副标题（字符串）
+     * @return ChromecastMediaVariations 类型的结果
+     */
     public ChromecastMediaVariations getCurrentChromecastMedia(String defaultId, String title, String subtitle) {
         if (videoQualities == null) {
             if (videoUri == null) {
@@ -2463,20 +3393,40 @@ public class VideoPlayer implements Player.Listener, AnalyticsListener, Notifica
         return builder.build();
     }
 
+    /**
+     * 类：偏移数据Source，封装了相关的业务逻辑与数据处理。
+     */
     public static class OffsetDataSource implements DataSource {
         private final DataSource upstream;
         private final long byteOffset;
 
+        /**
+         * 偏移数据Source。
+         * @param upstream DataSource类型的参数 upstream
+         * @param byteOffset 长整型类型的参数 byteOffset
+         * @return public 类型的结果
+         */
         public OffsetDataSource(DataSource upstream, long byteOffset) {
             this.upstream = upstream;
             this.byteOffset = byteOffset;
         }
 
+        /**
+         * 添加Transfer监听器。
+         * <p>该方法重写了父类/接口中的实现。</p>
+         * @param transferListener TransferListener类型的参数 transferListener
+         */
         @Override
         public void addTransferListener(TransferListener transferListener) {
             upstream.addTransferListener(transferListener);
         }
 
+        /**
+         * 打开。
+         * <p>该方法重写了父类/接口中的实现。</p>
+         * @param dataSpec DataSpec类型的参数 dataSpec
+         * @return 整型结果值
+         */
         @Override
         public long open(DataSpec dataSpec) throws IOException {
             DataSpec offsetDataSpec = dataSpec.buildUpon()
@@ -2485,14 +3435,31 @@ public class VideoPlayer implements Player.Listener, AnalyticsListener, Notifica
             return upstream.open(offsetDataSpec);
         }
 
+        /**
+         * read。
+         * <p>该方法重写了父类/接口中的实现。</p>
+         * @param buffer byte[]类型的参数 buffer
+         * @param offset 偏移（整数）
+         * @param length 长度（整数）
+         * @return 整型结果值
+         */
         @Override
         public int read(byte[] buffer, int offset, int length) throws IOException {
             return upstream.read(buffer, offset, length);
         }
 
+        /**
+         * 获取Uri。
+         * <p>该方法重写了父类/接口中的实现。</p>
+         * @return Uri 类型的结果
+         */
         @Override
         public Uri getUri() { return upstream.getUri(); }
 
+        /**
+         * 关闭。
+         * <p>该方法重写了父类/接口中的实现。</p>
+         */
         @Override
         public void close() throws IOException { upstream.close(); }
 

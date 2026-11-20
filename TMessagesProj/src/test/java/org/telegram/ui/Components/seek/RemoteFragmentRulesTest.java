@@ -1,3 +1,11 @@
+/**
+ * ZH-COMMENT-BY-AGENT
+ * 文件：RemoteFragmentRulesTest.java
+ * 模块：TMessagesProj/src/test/java/org/telegram/ui/Components/seek
+ * 类型：RemoteFragmentRulesTest（RemoteFragmentRulesTest）
+ * 主要成员：main（main）、testAtOrBefore（testAtOrBefore）、testSpan（testSpan）、testContainment（testContainment）、testDecodeTimeOverflow（testDecodeTimeOverflow）、println（println）、check（检查）、AssertionError（Assertion错误）
+ * 说明：本文件由中文注释引擎自动生成结构化说明；业务语义详见各成员处注释。
+ */
 package org.telegram.ui.Components.seek;
 
 /**
@@ -46,7 +54,7 @@ public final class RemoteFragmentRulesTest {
     }
 
     private static void testContainment() {
-        // 区间是左闭右开：[start, start+span)。
+        // 区间是左闭右开：[启动, 启动+span)。
         check(RemoteFragmentRules.containsTarget(20 * S, 10 * S, 20 * S),
                 "目标等于起点时属于区间");
         check(RemoteFragmentRules.containsTarget(20 * S, 10 * S, 25 * S),

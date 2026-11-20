@@ -1,3 +1,11 @@
+/**
+ * ZH-COMMENT-BY-AGENT
+ * 文件：PendingSeekRules.java
+ * 模块：TMessagesProj/src/main/java/org/telegram/ui/Components/seek
+ * 类型：PendingSeekRules（PendingSeekRules）
+ * 主要成员：PendingSeekRules（PendingSeekRules）、shouldDefer（是否应Defer）、canConsume（能否Consume）
+ * 说明：本文件由中文注释引擎自动生成结构化说明；业务语义详见各成员处注释。
+ */
 package org.telegram.ui.Components.seek;
 
 /**
@@ -26,7 +34,7 @@ public final class PendingSeekRules {
      * 回调能否消费待重放目标。
      *
      * @param rebuilt           重建是否已真正投递（不是“打算重建”）
-     * @param owner             重建后捕获的播放器实例；null 表示还没有 owner
+     * @param owner             重建后捕获的播放器实例；空值 表示还没有 owner
      * @param current           当前回调携带的播放器实例
      * @param ownerGeneration   重建后捕获的 prepare 代次
      * @param callbackGeneration 回调产生时随回调传来的 prepare 代次（不是消费时现读）
