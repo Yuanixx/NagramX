@@ -481,7 +481,7 @@ public final class FileRangeFetcher {
                 // is legal; asking for it again used to reject block 2 with
                 // "probe in flight" and throw away the bytes block 1 paid for.
                 final FetchResult next = awaitRateSlot(downloadActive, handle, null,
-                        probeHeldByThisFetch);
+                        probeHeldByThisFetch, deadlineMs);
                 if (next != null) {
                     FileLog.d("ABPV: range multi-block stopped at block "
                             + (b + 1) + "/" + blocks);
