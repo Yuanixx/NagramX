@@ -3001,6 +3001,12 @@ public class VideoPlayer implements Player.Listener, AnalyticsListener, Notifica
     /** 由捕获了代次/请求 ID 的监听器调用，保证身份来自回调产生处而不是消费时现读。 */
     private void dispatchPlayerState(int generation, long requestId, boolean playWhenReady,
                                      int playbackState) {
+        // 移除监听器不能撤回已经排入播放器线程队列的旧回调。
+        // 必须在进入 onPlayerStateChanged 前校验来源身份；否则旧回调会读取新播放器状态，
+        // 并更新共享的 lastReported 状态，进而吞掉新 prepare 真正的 READY 回调。
+        if (generation != prepareGeneration || requestId != boundRequestId) {
+            return;
+        }
         callbackGeneration = generation;
         callbackRequestId = requestId;
         onPlayerStateChanged(playWhenReady, playbackState);
