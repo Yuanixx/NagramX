@@ -19,6 +19,7 @@ import androidx.media3.extractor.mp4.FragmentedMp4Extractor;
 
 import org.telegram.messenger.FragmentIndexBuilder;
 import org.telegram.tgnet.TLRPC;
+import org.telegram.ui.Components.seek.SeekCoverageRules;
 
 import java.io.IOException;
 import java.util.List;
@@ -61,6 +62,7 @@ public final class Mp4IndexExtractorsFactory implements ExtractorsFactory {
     private double seekDurationSec;
     @Nullable
     private volatile SeekPoint remotePoint;
+    private volatile long remoteSpanUs;
 
     /**
      * Enables remote fragment probing for a target time that the local (partial) index does
@@ -123,11 +125,13 @@ public final class Mp4IndexExtractorsFactory implements ExtractorsFactory {
             return false;
         }
         ChunkIndex local = resolvedIndex;
-        if (local != null && timeUs <= local.getDurationUs()) {
+        if (SeekCoverageRules.coversLocal(local != null ? local.timesUs : null,
+                local != null ? local.length : 0, timeUs)) {
             return true;
         }
         SeekPoint remote = remotePoint;
-        return remote != null && Math.abs(remote.timeUs - timeUs) <= 20L * 1000L * 1000L;
+        return remote != null && SeekCoverageRules.coversRemote(
+                remote.timeUs, remote.timeUs + remoteSpanUs, timeUs);
     }
 
     @Nullable
@@ -156,10 +160,29 @@ public final class Mp4IndexExtractorsFactory implements ExtractorsFactory {
                         Log.w(TAG, "index missing doc=" + docId + " size=" + docSize
                                 + " (no persisted copy, no local file)");
                     }
+                    final long coveredEndUs = SeekCoverageRules.coveredUs(
+                            idx != null ? idx.timesUs : null, idx != null ? idx.length : 0);
                     if (seekTargetTimeUs > 0 && seekDocument != null
-                            && (idx == null || seekTargetTimeUs > idx.getDurationUs())) {
-                        remotePoint = RemoteSeekProbe.find(seekAccount, seekDocument, path,
-                                docSize, seekTargetTimeUs, seekDurationSec);
+                            && (idx == null || seekTargetTimeUs > coveredEndUs)) {
+                        RemoteSeekProbe.ProbeResult probed = RemoteSeekProbe.find(
+                                seekAccount, seekDocument, path, docSize,
+                                seekTargetTimeUs, seekDurationSec);
+                        if (probed != null && probed.point != null) {
+                            long start = probed.point.timeUs;
+                            long end = start + probed.spanUs;
+                            if (SeekCoverageRules.coversRemote(start, end, seekTargetTimeUs)
+                                    && SeekCoverageRules.validProbe(start, end,
+                                            probed.point.position, probed.size,
+                                            docSize, Math.max(0L, coveredEndUs))) {
+                                remotePoint = probed.point;
+                                remoteSpanUs = probed.spanUs;
+                                Log.w(TAG, "remote probe accepted start=" + start
+                                        + " span=" + probed.spanUs + " pos=" + probed.point.position);
+                            } else {
+                                Log.w(TAG, "remote probe rejected (no reliable coverage) target="
+                                        + seekTargetTimeUs + " start=" + start + " span=" + probed.spanUs);
+                            }
+                        }
                     }
                     resolvedIndex = idx;
                     attempted = true;
@@ -176,7 +199,7 @@ public final class Mp4IndexExtractorsFactory implements ExtractorsFactory {
             if (extractors[i] instanceof FragmentedMp4Extractor) {
                 // Always wrap, even with a null index: keeps the path identical for both cases.
                 extractors[i] = new ChunkIndexInjectingExtractor(extractors[i], idx, remotePoint,
-                        expectedDurationSec);
+                        remoteSpanUs, expectedDurationSec);
                 n++;
             }
         }
@@ -192,13 +215,16 @@ public final class Mp4IndexExtractorsFactory implements ExtractorsFactory {
         private final ChunkIndex chunkIndex;
         @Nullable
         private final SeekPoint remotePoint;
+        private final long remoteSpanUs;
         private final double durationSec;
 
         ChunkIndexInjectingExtractor(Extractor delegate, @Nullable ChunkIndex chunkIndex,
-                                     @Nullable SeekPoint remotePoint, double durationSec) {
+                                     @Nullable SeekPoint remotePoint, long remoteSpanUs,
+                                     double durationSec) {
             this.delegate = delegate;
             this.chunkIndex = chunkIndex;
             this.remotePoint = remotePoint;
+            this.remoteSpanUs = remoteSpanUs;
             this.durationSec = durationSec;
         }
 
@@ -228,7 +254,7 @@ public final class Mp4IndexExtractorsFactory implements ExtractorsFactory {
                         output.seekMap(seekMap);
                     } else if (remotePoint != null) {
                         output.seekMap(new RemoteExtendedSeekMap(chunkIndex, remotePoint,
-                                (long) (durationSec * 1000000.0)));
+                                remoteSpanUs, (long) (durationSec * 1000000.0)));
                     } else {
                         output.seekMap(chunkIndex);
                     }
@@ -263,11 +289,14 @@ public final class Mp4IndexExtractorsFactory implements ExtractorsFactory {
         @Nullable
         private final ChunkIndex local;
         private final SeekPoint remote;
+        private final long remoteSpanUs;
         private final long durationUs;
 
-        RemoteExtendedSeekMap(@Nullable ChunkIndex local, SeekPoint remote, long durationUs) {
+        RemoteExtendedSeekMap(@Nullable ChunkIndex local, SeekPoint remote, long remoteSpanUs,
+                              long durationUs) {
             this.local = local;
             this.remote = remote;
+            this.remoteSpanUs = remoteSpanUs;
             this.durationUs = durationUs;
         }
 
@@ -283,10 +312,17 @@ public final class Mp4IndexExtractorsFactory implements ExtractorsFactory {
 
         @Override
         public SeekPoints getSeekPoints(long timeUs) {
-            if (local != null && timeUs <= local.getDurationUs()) {
+            if (SeekCoverageRules.coversLocal(local != null ? local.timesUs : null,
+                    local != null ? local.length : 0, timeUs)) {
                 return local.getSeekPoints(timeUs);
             }
-            return new SeekPoints(remote);
+            if (SeekCoverageRules.coversRemote(remote.timeUs,
+                    remote.timeUs + remoteSpanUs, timeUs)) {
+                return new SeekPoints(remote);
+            }
+            // Never present a stale remote point as valid for an unrelated time. The local
+            // clamp is only a safe fallback; the defer gate prevents issuing that seek.
+            return local != null ? local.getSeekPoints(timeUs) : new SeekPoints(remote);
         }
     }
 }

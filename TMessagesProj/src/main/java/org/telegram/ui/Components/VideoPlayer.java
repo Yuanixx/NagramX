@@ -129,6 +129,11 @@ public class VideoPlayer implements Player.Listener, AnalyticsListener, Notifica
 
     public interface VideoPlayerDelegate {
         void onStateChanged(boolean playWhenReady, int playbackState);
+
+        /** Identity-carrying overload: a rebuilt player must not deliver callbacks to an old one. */
+        default void onStateChanged(VideoPlayer player, boolean playWhenReady, int playbackState) {
+            onStateChanged(playWhenReady, playbackState);
+        }
         void onError(VideoPlayer player, Exception e);
         void onVideoSizeChanged(int width, int height, int unappliedRotationDegrees, float pixelWidthHeightRatio);
         void onRenderedFirstFrame();
@@ -268,6 +273,11 @@ public class VideoPlayer implements Player.Listener, AnalyticsListener, Notifica
     private volatile boolean recoveryPlayWhenReady = false;
     private volatile int recoveryGeneration = -1;
     private volatile int prepareGeneration = 0;
+
+    /** Generation of the current prepare; used to bind a deferred seek to its owner player. */
+    public int getPrepareGeneration() {
+        return prepareGeneration;
+    }
 
     // Observe-only Player-internal diagnostics (see PlayerDiag: log lines). No behavior change.
     private volatile long diagLastStateAtMs = -1L;
@@ -2143,7 +2153,7 @@ public class VideoPlayer implements Player.Listener, AnalyticsListener, Notifica
         int playbackState = player.getPlaybackState();
         if (lastReportedPlayWhenReady != playWhenReady || lastReportedPlaybackState != playbackState) {
             if (delegate != null) {
-                delegate.onStateChanged(playWhenReady, playbackState);
+                delegate.onStateChanged(this, playWhenReady, playbackState);
             }
             lastReportedPlayWhenReady = playWhenReady;
             lastReportedPlaybackState = playbackState;

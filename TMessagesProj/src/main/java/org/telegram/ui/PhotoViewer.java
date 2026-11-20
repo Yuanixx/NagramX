@@ -310,6 +310,7 @@ import org.telegram.ui.Components.VideoPlayer;
 import org.telegram.ui.Components.VideoPlayerSeekBar;
 import org.telegram.ui.Components.VideoSeekFramePreview;
 import org.telegram.ui.Components.preview.SeekRules;
+import org.telegram.ui.Components.seek.PendingSeekRules;
 import org.telegram.ui.Components.VideoSeekPreviewImage;
 import org.telegram.ui.Components.VideoTimelinePlayView;
 import org.telegram.ui.Components.ViewHelper;
@@ -1132,6 +1133,9 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
     private long pendingStreamSeekMs = -1L;
     private long pendingStreamSeekDocId = -1L;
     private boolean pendingStreamSeekRebuilt;
+    @Nullable
+    private VideoPlayer pendingStreamSeekOwner;
+    private int pendingStreamSeekGeneration = -1;
     // Last genuine user drag target (ms). Used to restore the real watch position when a
     // near-zero dirty seek is rejected, so the fix never leaves the user stuck at frame 0.
     // Bound to the document id so a target from a previous video can never be replayed on a new one.
@@ -1580,7 +1584,8 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
      */
     private boolean deferStreamSeekIfUnseekable(VideoPlayer player, long targetMs) {
         TLRPC.Document doc = currentMessageObject != null ? currentMessageObject.getDocument() : null;
-        if (!isStreaming || player == null || player.hasSeekIndexFor(targetMs) || targetMs <= 0 || doc == null) {
+        if (doc == null || !PendingSeekRules.shouldDefer(isStreaming, targetMs,
+                player != null && player.hasSeekIndexFor(targetMs))) {
             return false;
         }
         if (pendingStreamSeekRebuilt && pendingStreamSeekMs == targetMs && pendingStreamSeekDocId == doc.id) {
@@ -1589,14 +1594,18 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
         pendingStreamSeekMs = targetMs;
         pendingStreamSeekDocId = doc.id;
         pendingStreamSeekRebuilt = false;
+        pendingStreamSeekOwner = null;
+        pendingStreamSeekGeneration = -1;
         FileLog.d("ABPV: stream seek deferred, re-prepare for index target=" + targetMs);
         AndroidUtilities.runOnUIThread(() -> {
             if (currentMessageObject != null && currentMessageObject.getDocument() != null
                     && currentMessageObject.getDocument().id == pendingStreamSeekDocId) {
-                // Only now can a READY callback belong to the re-prepared player. An older
-                // player's late READY must not consume the replay target before the rebuild.
-                pendingStreamSeekRebuilt = true;
                 onActionClick(false);
+                // Bind the target to the exact player/generation the rebuild created. An
+                // older instance or a later re-prepare can no longer consume this target.
+                pendingStreamSeekOwner = videoPlayer;
+                pendingStreamSeekGeneration = videoPlayer != null ? videoPlayer.getPrepareGeneration() : -1;
+                pendingStreamSeekRebuilt = true;
             }
         });
         return true;
@@ -11117,20 +11126,24 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
             if (pendingStreamSeekRebuilt && pendingStreamSeekMs >= 0 && videoPlayer != null) {
                 final long target = pendingStreamSeekMs;
                 TLRPC.Document doc = currentMessageObject != null ? currentMessageObject.getDocument() : null;
-                final boolean sameDoc = doc != null && doc.id == pendingStreamSeekDocId;
+                final boolean owned = PendingSeekRules.canConsume(
+                        pendingStreamSeekRebuilt, pendingStreamSeekOwner, videoPlayer,
+                        pendingStreamSeekGeneration, videoPlayer.getPrepareGeneration(),
+                        pendingStreamSeekDocId, doc != null ? doc.id : -1L);
                 pendingStreamSeekMs = -1L;
                 pendingStreamSeekDocId = -1L;
-                if (!sameDoc) {
-                    pendingStreamSeekRebuilt = false;
+                pendingStreamSeekRebuilt = false;
+                pendingStreamSeekOwner = null;
+                pendingStreamSeekGeneration = -1;
+                if (!owned) {
+                    FileLog.d("ABPV: stream seek ignored, stale owner target=" + target);
                 } else if (videoPlayer.hasSeekIndexFor(target)) {
-                    pendingStreamSeekRebuilt = false;
                     FileLog.d("ABPV: stream seek replay after re-prepare target=" + target);
                     videoPlayer.seekTo(target);
                 } else {
-                    // The re-prepare still has no index (nothing downloaded yet). Issuing the
-                    // seek now would be clamped to 0, so leave playback where it is.
-                    pendingStreamSeekRebuilt = false;
-                    FileLog.d("ABPV: stream seek dropped, no index after re-prepare target=" + target);
+                    // The re-prepare still has no reliable coverage. Issuing the seek now would
+                    // be clamped to 0 or land at the frontier, so leave playback where it is.
+                    FileLog.d("ABPV: stream seek dropped, no reliable coverage target=" + target);
                 }
             }
             if (logNextReadyPosition && videoPlayer != null) {
@@ -11615,6 +11628,16 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
             videoPlayer.setDelegate(new VideoPlayer.VideoPlayerDelegate() {
 
                 private boolean firstState = true;
+
+                @Override
+                public void onStateChanged(VideoPlayer player, boolean playWhenReady, int playbackState) {
+                    // A late callback from a player that was already released must never reach
+                    // the pending-seek replay block or any other state transition.
+                    if (player != videoPlayer) {
+                        return;
+                    }
+                    onStateChanged(playWhenReady, playbackState);
+                }
 
                 @Override
                 public void onStateChanged(boolean playWhenReady, int playbackState) {
