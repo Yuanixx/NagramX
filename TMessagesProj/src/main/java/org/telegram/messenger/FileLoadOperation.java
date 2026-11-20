@@ -798,13 +798,13 @@ public class FileLoadOperation {
         try {
             final ArrayList<Range> ranges = notLoadedBytesRangesCopy;
             if (ranges == null) {
-                return 0;
+                return -1L;
             }
             if (ranges.isEmpty()) {
                 if (totalBytesCount > 0 && downloadedBytes >= totalBytesCount) {
                     return Math.min(length, Math.max(0L, totalBytesCount - offset));
                 }
-                return 0;
+                return -1L;
             }
             return getDownloadedLengthFromOffsetInternal(ranges, offset, length);
         } catch (Throwable e) {
