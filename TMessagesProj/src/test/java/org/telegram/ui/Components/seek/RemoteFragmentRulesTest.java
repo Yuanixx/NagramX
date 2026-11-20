@@ -47,8 +47,11 @@ public final class RemoteFragmentRulesTest {
         check(RemoteFragmentRules.spanAfter(times, 4, 3) == -1L,
                 "窗口内没有后继片段时跨度未知，必须失败");
         long[] duplicated = {0L, 10 * S, 10 * S, 20 * S};
-        check(RemoteFragmentRules.spanAfter(duplicated, 4, 1) == 10 * S,
-                "重复时间戳不得被当成更近的后继，跳过重复的 10s 取 20s");
+        check(RemoteFragmentRules.spanAfter(duplicated, 4, 1) == -1L,
+                "重复时间戳意味着物理相邻片段区间无法证明");
+        long[] outOfOrder = {0L, 20 * S, 10 * S, 30 * S};
+        check(RemoteFragmentRules.spanAfter(outOfOrder, 4, 0) == -1L,
+                "文件顺序与时间顺序不一致时必须拒绝跨度");
         check(RemoteFragmentRules.spanAfter(times, 4, -1) == -1L,
                 "无效索引没有跨度");
     }
