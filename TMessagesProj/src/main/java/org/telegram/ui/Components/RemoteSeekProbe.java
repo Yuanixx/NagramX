@@ -193,9 +193,18 @@ public final class RemoteSeekProbe {
                         ? Math.max(lo, Math.min(hi, initialGuess))
                         : lo + (hi - lo) / 2L;
                 final long start = Math.max(moovEnd, guess - PROBE_BYTES / 2L);
+                // Use one Telegram 1 MiB part per probe. The range fetcher normally
+                // uses four 256 KiB parts, each separated by the account-wide
+                // playback-yield gate; that made the six-probe / 12 s budget
+                // effectively permit only two or three observations.
+                final long dataOffset = alignDown(start, PROBE_BYTES);
+                final long probeLength = Math.min((long) PROBE_BYTES, fileLength - dataOffset);
+                if (probeLength <= 0L) {
+                    break;
+                }
                 final FileRangeFetcher.FetchResult result = FileRangeFetcher.fetchSyncUntil(
-                        account, document, alignDown(start), PROBE_BYTES,
-                        Math.min(FETCH_TIMEOUT_MS, remaining), deadline, null);
+                        account, document, dataOffset, probeLength,
+                        Math.min(FETCH_TIMEOUT_MS, remaining), deadline, PROBE_BYTES, null);
                 requests++;
                 if (result == null || !result.ok() || result.data == null) {
                     // 限流开关关闭、420、超时等：立即放弃，不做任何近似推断。
@@ -205,7 +214,6 @@ public final class RemoteSeekProbe {
                                     ? " (network fetch off, using local index)" : ""));
                     return null;
                 }
-                final long dataOffset = alignDown(start);
                 Fragment found = nearestFragment(result.data, dataOffset, fileLength,
                         timescale, trackId, targetTimeUs);
                 if (found == null) {
@@ -249,7 +257,11 @@ public final class RemoteSeekProbe {
 
     /** upload.getFile 要求偏移按 4096 对齐。 */
     private static long alignDown(long value) {
-        return value - (value % 4096L);
+        return alignDown(value, 4096L);
+    }
+
+    private static long alignDown(long value, long alignment) {
+        return value - (value % alignment);
     }
 
     /**
