@@ -34,7 +34,7 @@ public final class FragmentIndexBuilder {
             MDAT = cc("mdat"), SIDX = cc("sidx"), MFRA = cc("mfra"), TFRA = cc("tfra"),
             MVHD = cc("mvhd"), MEHD = cc("mehd"), TRAK = cc("trak"), TKHD = cc("tkhd"),
             MDIA = cc("mdia"), MDHD = cc("mdhd"), HDLR = cc("hdlr"), MVEX = cc("mvex"),
-            TREX = cc("trex"), VIDE = cc("vide");
+            TREX = cc("trex"), VIDE = cc("vide"), SOUN = cc("soun");
 
     private static final LinkedHashMap<String, ChunkIndex> CACHE =
             new LinkedHashMap<String, ChunkIndex>(4, 0.75f, true);
@@ -522,7 +522,7 @@ public final class FragmentIndexBuilder {
         // turns out to be a pre-allocated sparse temp with a large zero tail. In that case the
         // partial rules apply so the fragments that did arrive still produce a seekable index.
         boolean strict = complete;
-        Map<Integer, FragmentMoofParser.Track> tracks = new HashMap<>();
+        Map<Integer, FragmentMoofParser.Track> tracks = new LinkedHashMap<>();
         List<FragmentMoofParser.Fragment> frags = new ArrayList<>();
         byte[] hdr = new byte[16];
         long pos = 0;
@@ -651,29 +651,31 @@ public final class FragmentIndexBuilder {
         }
         FragmentMoofParser.Track video = null, audio = null;
         for (FragmentMoofParser.Track t : tracks.values()) {
-            if (t.video) {
+            if (t.video && video == null) {
                 video = t;
-            } else {
+            } else if (t.audio && audio == null) {
                 audio = t;
             }
         }
-        if (video == null || audio == null || video.timescale <= 0 || audio.timescale <= 0) {
+        if (video == null || video.timescale <= 0 || (audio != null && audio.timescale <= 0)) {
             reject("tracks video=" + video + " audio=" + audio);
             return null;
         }
         long videoUs = us(video.duration, video.timescale);
-        long audioUs = us(audio.duration, audio.timescale);
+        long audioUs = audio != null ? us(audio.duration, audio.timescale) : -1;
         long mvhdUs = mvhdTimescale > 0 ? us(mvhdDuration, mvhdTimescale) : -1;
         long mehdUs = mehdDuration >= 0 && mvhdTimescale > 0 ? us(mehdDuration, mvhdTimescale) : -1;
         long expectedUs = expectedDurationSec > 0 ? (long) (expectedDurationSec * 1000000L) : -1;
         Log.w(TAG, "tracks video=" + video.id + " ts=" + video.timescale + " durUs=" + videoUs
-                + " audio=" + audio.id + " ts=" + audio.timescale + " durUs=" + audioUs
+                + " audio=" + (audio != null ? audio.id : "none") + " ts="
+                + (audio != null ? audio.timescale : 0) + " durUs=" + audioUs
                 + " mvhdUs=" + mvhdUs + " mehdUs=" + mehdUs + " expectUs=" + expectedUs);
-        if (strict && (videoUs <= 0 || audioUs <= 0)) {
+        if (strict && (videoUs <= 0 || (audio != null && audioUs <= 0))) {
             reject("zero track duration videoUs=" + videoUs + " audioUs=" + audioUs);
             return null;
         }
-        if (strict && Math.abs(videoUs - audioUs) * 100L >= Math.max(videoUs, audioUs)) {
+        if (strict && audio != null
+                && Math.abs(videoUs - audioUs) * 100L >= Math.max(videoUs, audioUs)) {
             reject("av mismatch videoUs=" + videoUs + " audioUs=" + audioUs);
             return null;
         }
@@ -705,7 +707,11 @@ public final class FragmentIndexBuilder {
                 reject("fragment unknown track=" + f.trackId);
                 return null;
             }
-            (t.video ? videoFrags : audioFrags).add(f);
+            if (t.id == video.id) {
+                videoFrags.add(f);
+            } else if (audio != null && t.id == audio.id) {
+                audioFrags.add(f);
+            }
         }
         if (videoFrags.size() < 2) {
             reject("videoFrags=" + videoFrags.size());
@@ -890,7 +896,13 @@ public final class FragmentIndexBuilder {
             t.timescale = i32(d, mdhd[0] + ((d[mdhd[0]] & 0xFF) == 1 ? 20 : 12));
             t.duration = (d[mdhd[0]] & 0xFF) == 1
                     ? i64(d, mdhd[0] + 24) : u32(d, mdhd[0] + 16);
-            t.video = i32(d, hdlr[0] + 8) == VIDE;
+            int handler = i32(d, hdlr[0] + 8);
+            if (handler != VIDE && handler != SOUN) {
+                // Text, subtitle, metadata and hint tracks are not audio tracks.
+                continue;
+            }
+            t.video = handler == VIDE;
+            t.audio = handler == SOUN;
             int[] tx = trex.get(t.id);
             if (tx != null) {
                 t.defaultDuration = tx[0];
