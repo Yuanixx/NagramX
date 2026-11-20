@@ -27,7 +27,6 @@ public final class FragmentIndexBuilder {
     private static final String TAG = "FMPIDX";
     private static final int MAX_BOX_BODY = 16 * 1024 * 1024;
     private static final long MAX_TAIL_BYTES = FragmentIndexRules.MAX_TAIL_BYTES;
-    private static final int SAMPLE_FLAG_NON_SYNC = 0x00010000;
     /** Size of a plain ISO-BMFF box header: 4 bytes size + 4 bytes type. */
     private static final int Atom_HEADER_SIZE = 8;
 
@@ -35,8 +34,7 @@ public final class FragmentIndexBuilder {
             MDAT = cc("mdat"), SIDX = cc("sidx"), MFRA = cc("mfra"), TFRA = cc("tfra"),
             MVHD = cc("mvhd"), MEHD = cc("mehd"), TRAK = cc("trak"), TKHD = cc("tkhd"),
             MDIA = cc("mdia"), MDHD = cc("mdhd"), HDLR = cc("hdlr"), MVEX = cc("mvex"),
-            TREX = cc("trex"), TRAF = cc("traf"), TFHD = cc("tfhd"), TFDT = cc("tfdt"),
-            TRUN = cc("trun"), VIDE = cc("vide");
+            TREX = cc("trex"), VIDE = cc("vide");
 
     private static final LinkedHashMap<String, ChunkIndex> CACHE =
             new LinkedHashMap<String, ChunkIndex>(4, 0.75f, true);
