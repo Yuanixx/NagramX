@@ -24,6 +24,13 @@ jobs:
         with:
           distribution: 'temurin'
           java-version: '21'
+      - name: Check fragmented MP4 parser
+        run: |
+          mkdir -p /tmp/fragment-moof
+          javac -d /tmp/fragment-moof \
+            TMessagesProj/src/main/java/org/telegram/messenger/FragmentMoofParser.java \
+            TMessagesProj/src/test/java/org/telegram/messenger/FragmentMoofParserTest.java
+          java -cp /tmp/fragment-moof org.telegram.messenger.FragmentMoofParserTest
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v6
       - name: Set up Android SDK Tools
