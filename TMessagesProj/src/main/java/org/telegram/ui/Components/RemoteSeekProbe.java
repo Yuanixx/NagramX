@@ -55,6 +55,8 @@ public final class RemoteSeekProbe {
     private static final int LOCAL_MOOV_LIMIT = 256 * 1024;
     /** 每次探测抓取的远端窗口大小；1MB 足以覆盖常见片段的 moof + mdat 头部。 */
     private static final int PROBE_BYTES = 1024 * 1024;
+    /** Maximum contiguous bytes retained when a probe needs its next keyframe. */
+    private static final int MAX_PROBE_WINDOW_BYTES = 4 * PROBE_BYTES;
     /**
      * 探测次数上限。它只是资源护栏，不是“成功条件”：
      * 次数用完仍未证明区间就必须失败，不能把最后一次最佳猜测返回出去。
@@ -178,6 +180,8 @@ public final class RemoteSeekProbe {
             final long estimatedDelta = Math.min(byteSpan,
                     Math.max(0L, (long) (byteSpan * targetFraction)));
             final long initialGuess = lo + estimatedDelta;
+            boolean scanBeforeEmptyWindow = false;
+            long emptyWindowOffset = -1L;
 
             for (int probe = 0; probe < MAX_PROBES && lo < hi; probe++) {
                 // 每次请求前重新计算剩余预算；rate limit 的等待也可能吃掉时间。
@@ -188,9 +192,19 @@ public final class RemoteSeekProbe {
                 // Start near the requested timeline fraction to avoid spending
                 // half the probe budget walking from the file midpoint for early
                 // or late seeks. All subsequent decisions use observed tfdt values.
-                final long guess = probe == 0
-                        ? Math.max(lo, Math.min(hi, initialGuess))
-                        : lo + (hi - lo) / 2L;
+                final long guess;
+                if (probe == 0) {
+                    guess = Math.max(lo, Math.min(hi, initialGuess));
+                } else if (scanBeforeEmptyWindow && emptyWindowOffset > lo) {
+                    // An empty byte window does not establish a time bound. Search
+                    // the preceding aligned part instead of discarding everything
+                    // before this window as the old lo=end shortcut did.
+                    guess = emptyWindowOffset - 1L;
+                    scanBeforeEmptyWindow = false;
+                } else {
+                    guess = lo + (hi - lo) / 2L;
+                    scanBeforeEmptyWindow = false;
+                }
                 // Use the 1 MiB part containing the current byte-space guess.
                 // The range fetcher normally uses four 256 KiB parts, each
                 // separated by the account-wide playback-yield gate; a single
@@ -212,14 +226,67 @@ public final class RemoteSeekProbe {
                                     ? " (network fetch off, using local index)" : ""));
                     return null;
                 }
-                Fragment found = nearestFragment(result.data, dataOffset, fileLength,
+                byte[] probeData = result.data;
+                Fragment found = nearestFragment(probeData, dataOffset, fileLength,
                         timescale, trackId, targetTimeUs, trexDefaultSampleFlags);
                 if (found == null) {
-                    // 窗口落在 mdat 中间或没有完整 moof：向前挪一个窗口继续找。
-                    lo = Math.min(hi, dataOffset + result.data.length);
+                    // A window containing no complete video moof gives no time
+                    // information. Do not move the lower byte bound past it:
+                    // the target fragment may have started in the preceding mdat.
+                    scanBeforeEmptyWindow = dataOffset > lo;
+                    emptyWindowOffset = dataOffset;
                     continue;
                 }
-                // 只有目标落在已证明区间 [timeUs, timeUs+spanUs) 内才算收敛。
+                if (found.timeUs <= targetTimeUs && found.spanUs <= 0L) {
+                    // The target's preceding keyframe was found, but its following
+                    // video keyframe lies beyond this part. Extend contiguously,
+                    // one legal Telegram 1 MiB part at a time, so spanAfter can
+                    // prove the real interval without inventing a duration.
+                    while (probeData.length < MAX_PROBE_WINDOW_BYTES
+                            && requests < MAX_PROBES
+                            && dataOffset + probeData.length < fileLength) {
+                        final long extensionOffset = dataOffset + probeData.length;
+                        if (extensionOffset % PROBE_BYTES != 0L) {
+                            break;
+                        }
+                        final long extensionLength = Math.min((long) PROBE_BYTES,
+                                fileLength - extensionOffset);
+                        final long remainingForExtension = deadline - System.currentTimeMillis();
+                        if (extensionLength <= 0L || remainingForExtension <= 0L) {
+                            break;
+                        }
+                        final FileRangeFetcher.FetchResult extension =
+                                FileRangeFetcher.fetchSyncUntil(
+                                        account, document, extensionOffset, extensionLength,
+                                        Math.min(FETCH_TIMEOUT_MS, remainingForExtension),
+                                        deadline, PROBE_BYTES, null);
+                        requests++;
+                        if (extension == null || !extension.ok() || extension.data == null) {
+                            FileLog.d("FMPIDX: remote probe extension stopped status="
+                                    + (extension != null ? extension.status : "null"));
+                            return null;
+                        }
+                        if (extension.data.length == 0) {
+                            break;
+                        }
+                        final byte[] combined = new byte[probeData.length + extension.data.length];
+                        System.arraycopy(probeData, 0, combined, 0, probeData.length);
+                        System.arraycopy(extension.data, 0, combined, probeData.length,
+                                extension.data.length);
+                        probeData = combined;
+                        found = nearestFragment(probeData, dataOffset, fileLength,
+                                timescale, trackId, targetTimeUs, trexDefaultSampleFlags);
+                        if (found == null || found.timeUs > targetTimeUs || found.spanUs > 0L) {
+                            break;
+                        }
+                    }
+                }
+                if (found.timeUs <= targetTimeUs && found.spanUs <= 0L) {
+                    FileLog.d("FMPIDX: remote target fragment has no proven successor target="
+                            + targetTimeUs + " windowBytes=" + probeData.length);
+                    return null;
+                }
+                // Only a keyframe interval bounded by the next physical video keyframe is accepted.
                 if (RemoteFragmentRules.containsTarget(found.timeUs, found.spanUs, targetTimeUs)) {
                     converged = found;
                     break;
