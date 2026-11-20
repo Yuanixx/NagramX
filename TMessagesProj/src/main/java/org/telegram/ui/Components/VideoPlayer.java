@@ -312,6 +312,16 @@ public class VideoPlayer implements Player.Listener, AnalyticsListener, Notifica
         extractorsFactoryOverride = factory;
     }
 
+    /**
+     * Whether the current media has a time-to-byte map. A streaming fragmented file prepared
+     * before its download started has none; issuing a seek then makes media3 clamp the target
+     * to t=0. Callers must re-prepare once the download is active instead.
+     */
+    public boolean hasSeekIndex() {
+        return extractorsFactoryOverride instanceof Mp4IndexExtractorsFactory
+                && ((Mp4IndexExtractorsFactory) extractorsFactoryOverride).hasIndex();
+    }
+
     Handler audioUpdateHandler = new Handler(Looper.getMainLooper());
 
     boolean audioDisabled;

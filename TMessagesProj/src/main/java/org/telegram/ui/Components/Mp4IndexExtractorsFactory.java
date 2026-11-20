@@ -85,6 +85,11 @@ public final class Mp4IndexExtractorsFactory implements ExtractorsFactory {
         return stamp(delegate.createExtractors(uri, responseHeaders));
     }
 
+    /** True once a seek map has been resolved for this player (persisted or scanned). */
+    public boolean hasIndex() {
+        return index() != null;
+    }
+
     @Nullable
     private ChunkIndex index() {
         if (prebuiltIndex != null) {

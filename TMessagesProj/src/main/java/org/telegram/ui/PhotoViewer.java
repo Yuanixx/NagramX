@@ -1126,6 +1126,12 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
     private float seekToProgressPending;
     private long seekToProgressSinceMs;
     private boolean logNextReadyPosition;
+    // A streaming fMP4 prepared before its download started has no time-to-byte map. Seeking it
+    // makes media3 clamp the target to t=0 ("jump back to the start"). Remember the real target
+    // and re-prepare once the live .temp exists, so the index factory can build a seek map.
+    private long pendingStreamSeekMs = -1L;
+    private long pendingStreamSeekDocId = -1L;
+    private boolean pendingStreamSeekRebuilt;
     // Last genuine user drag target (ms). Used to restore the real watch position when a
     // near-zero dirty seek is rejected, so the fix never leaves the user stuck at frame 0.
     // Bound to the document id so a target from a previous video can never be replayed on a new one.
@@ -1566,8 +1572,38 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
         }
     }
 
+    /**
+     * A streamed fragmented file prepared before its download began carries no time-to-byte
+     * index. media3 turns every seek on such media into t=0, which is the "jump back to the
+     * start" the user sees. The factory can only see the live .temp after the download has
+     * started, so re-prepare once and replay the target when the new player is ready.
+     */
+    private boolean deferStreamSeekIfUnseekable(VideoPlayer player, long targetMs) {
+        TLRPC.Document doc = currentMessageObject != null ? currentMessageObject.getDocument() : null;
+        if (!isStreaming || player == null || player.hasSeekIndex() || targetMs <= 0 || doc == null) {
+            return false;
+        }
+        if (pendingStreamSeekRebuilt && pendingStreamSeekMs == targetMs && pendingStreamSeekDocId == doc.id) {
+            return true;
+        }
+        pendingStreamSeekMs = targetMs;
+        pendingStreamSeekDocId = doc.id;
+        pendingStreamSeekRebuilt = true;
+        FileLog.d("ABPV: stream seek deferred, re-prepare for index target=" + targetMs);
+        AndroidUtilities.runOnUIThread(() -> {
+            if (currentMessageObject != null && currentMessageObject.getDocument() != null
+                    && currentMessageObject.getDocument().id == pendingStreamSeekDocId) {
+                onActionClick(false);
+            }
+        });
+        return true;
+    }
+
     private void seekVideoOrWebTo(long position) {
         diagRingPush("SEEKTO-MS", "posMs=" + position + " streaming=" + isStreaming + " doc=" + diagDocIdHash());
+        if (deferStreamSeekIfUnseekable(videoPlayer, position)) {
+            return;
+        }
         // A negative position used to be clamped to 0 by ExoPlayer, restarting a
         // streamed fragmented video from the first frame. Never issue one.
         if (position < 0) {
@@ -11075,6 +11111,25 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
             }
         }
         if (playbackState == ExoPlayer.STATE_READY) {
+            if (pendingStreamSeekMs >= 0 && videoPlayer != null) {
+                final long target = pendingStreamSeekMs;
+                TLRPC.Document doc = currentMessageObject != null ? currentMessageObject.getDocument() : null;
+                final boolean sameDoc = doc != null && doc.id == pendingStreamSeekDocId;
+                pendingStreamSeekMs = -1L;
+                pendingStreamSeekDocId = -1L;
+                if (!sameDoc) {
+                    pendingStreamSeekRebuilt = false;
+                } else if (videoPlayer.hasSeekIndex()) {
+                    pendingStreamSeekRebuilt = false;
+                    FileLog.d("ABPV: stream seek replay after re-prepare target=" + target);
+                    videoPlayer.seekTo(target);
+                } else {
+                    // The re-prepare still has no index (nothing downloaded yet). Issuing the
+                    // seek now would be clamped to 0, so leave playback where it is.
+                    pendingStreamSeekRebuilt = false;
+                    FileLog.d("ABPV: stream seek dropped, no index after re-prepare target=" + target);
+                }
+            }
             if (logNextReadyPosition && videoPlayer != null) {
                 logNextReadyPosition = false;
                 FileLog.d("ABPV: player ready pos=" + videoPlayer.getCurrentPosition()
@@ -11227,6 +11282,9 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
                     + " durMs=" + duration + " intentZero=" + intentionalZero + " doc=" + diagLastFunnelDoc);
             FileLog.d("ABPV: player seek p=" + progress + " dur=" + duration + " target=" + targetMs);
             android.util.Log.w("FMPIDX", "seek target=" + targetMs + " dur=" + duration + " p=" + progress);
+            if (deferStreamSeekIfUnseekable(p, targetMs)) {
+                return;
+            }
             logNextReadyPosition = true;
             p.seekTo(targetMs);
         } else if (photoViewerWebView != null) {
