@@ -10,7 +10,7 @@ public final class DownloadedRangeSnapshotTest {
         testMultipleHoles();
         testCompleteAndUnknownSnapshots();
         testConstructorCopiesInputArrays();
-        testRejectsOverlappingRanges();
+        testUnsortedLegacyRanges();
         System.out.println("DOWNLOADED RANGE SNAPSHOT: " + passed + " checks passed");
     }
 
@@ -51,14 +51,13 @@ public final class DownloadedRangeSnapshotTest {
         check(snapshot.availableLength(10, 1) == 0, "snapshot retains original missing interval");
     }
 
-    private static void testRejectsOverlappingRanges() {
-        boolean rejected = false;
-        try {
-            new DownloadedRangeSnapshot(new long[]{10, 15}, new long[]{20, 25}, 100, false);
-        } catch (IllegalArgumentException expected) {
-            rejected = true;
-        }
-        check(rejected, "overlapping missing intervals are rejected");
+    private static void testUnsortedLegacyRanges() {
+        DownloadedRangeSnapshot snapshot = new DownloadedRangeSnapshot(
+                new long[]{40, 10}, new long[]{50, 20}, 100, false);
+        check(snapshot.availableLength(0, 100) == 10,
+                "legacy unsorted range snapshots still stop at the nearest hole");
+        check(snapshot.availableLength(20, 30) == 20,
+                "legacy unsorted ranges preserve availability after the first hole");
     }
 
     private static void check(boolean condition, String message) {
