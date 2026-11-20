@@ -620,7 +620,7 @@ public final class FragmentIndexBuilder {
             pos += size;
         }
         if (pending != null && complete) {
-            reject("trailing moof without mdat pos=" + pending.pos);
+            reject("trailing moof without mdat pos=" + pending.get(0).pos);
             return null;
         }
         long tail = len - validEnd;
