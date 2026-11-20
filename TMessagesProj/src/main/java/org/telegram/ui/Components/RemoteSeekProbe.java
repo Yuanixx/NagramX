@@ -101,6 +101,8 @@ public final class RemoteSeekProbe {
         long end;
         long timeUs;
         long spanUs;
+        long nextPosition = -1L;
+        long nextTimeUs = -1L;
         int size;
     }
 
@@ -114,11 +116,14 @@ public final class RemoteSeekProbe {
      */
     public static final class ProbeResult {
         public final SeekPoint point;
+        /** The next sync point, needed by Media3 to choose the nearer decode start. */
+        public final SeekPoint nextPoint;
         public final long spanUs;
         public final int size;
 
-        ProbeResult(SeekPoint point, long spanUs, int size) {
+        ProbeResult(SeekPoint point, SeekPoint nextPoint, long spanUs, int size) {
             this.point = point;
+            this.nextPoint = nextPoint;
             this.spanUs = spanUs;
             this.size = size;
         }
@@ -313,9 +318,12 @@ public final class RemoteSeekProbe {
                     + " t=" + converged.timeUs + " span=" + converged.spanUs
                     + " target=" + targetTimeUs + " probes=" + requests
                     + " ms=" + (System.currentTimeMillis() - started));
+            final SeekPoint nextPoint = converged.nextPosition >= 0L
+                    && converged.nextTimeUs > converged.timeUs
+                    ? new SeekPoint(converged.nextTimeUs, converged.nextPosition) : null;
             return new ProbeResult(
                     new SeekPoint(converged.timeUs, converged.position),
-                    converged.spanUs, converged.size);
+                    nextPoint, converged.spanUs, converged.size);
         } catch (Throwable e) {
             // 任何解析异常都按“不可靠”处理，不能让异常路径返回半截结果。
             FileLog.e("FMPIDX: remote probe failed", e);
@@ -475,6 +483,11 @@ public final class RemoteSeekProbe {
         Fragment chosen = fragments.get(best);
         // 跨度必须来自同一轨道的后继片段；没有后继或时间乱序时返回 -1，区间无法证明。
         chosen.spanUs = RemoteFragmentRules.spanAfter(times, times.length, best);
+        if (chosen.spanUs > 0L && best + 1 < fragments.size()) {
+            final Fragment next = fragments.get(best + 1);
+            chosen.nextPosition = next.position;
+            chosen.nextTimeUs = next.timeUs;
+        }
         return chosen;
     }
 
