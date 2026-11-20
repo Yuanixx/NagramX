@@ -1,4 +1,4 @@
-# Nagram X
+# StreamX
 
 A personal fork of the archived [NagramX](https://github.com/risin42/NagramX), continuing its development.
 Based on [Nagram](https://github.com/NextAlone/Nagram).
