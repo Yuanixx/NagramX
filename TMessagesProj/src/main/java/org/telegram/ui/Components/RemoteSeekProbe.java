@@ -31,9 +31,11 @@ public final class RemoteSeekProbe {
 
     private static final int LOCAL_MOOV_LIMIT = 256 * 1024;
     private static final int PROBE_BYTES = 1024 * 1024;
-    private static final int MAX_PROBES = 10;
-    private static final long FETCH_TIMEOUT_MS = 2500L;
-    private static final long FETCH_BUDGET_MS = 6000L;
+    private static final int MAX_PROBES = 6;
+    /** Single deadline for the whole probe, including the moov fetch and rate waits. */
+    private static final long TOTAL_BUDGET_MS = 12000L;
+    private static final long FETCH_TIMEOUT_MS = 2000L;
+    private static final long FETCH_BUDGET_MS = 3000L;
 
     private RemoteSeekProbe() {
     }
@@ -62,9 +64,11 @@ public final class RemoteSeekProbe {
         if (document == null || fileLength <= 0 || targetTimeUs <= 0 || durationSec <= 0) {
             return null;
         }
+        final long started = System.currentTimeMillis();
+        final long deadline = started + TOTAL_BUDGET_MS;
         try {
             MoovBox moov = readMoov(localPath, account, document);
-            if (moov == null) {
+            if (moov == null || System.currentTimeMillis() >= deadline) {
                 return null;
             }
             MoovKeyframeParser.TrackInfo track = MoovKeyframeParser.parseTrackConfig(moov.data);
@@ -80,15 +84,23 @@ public final class RemoteSeekProbe {
             long bestPosition = -1L;
             long bestTimeUs = -1L;
 
+            int requests = 0;
             for (int probe = 0; probe < MAX_PROBES && lo < hi; probe++) {
+                final long remaining = deadline - System.currentTimeMillis();
+                if (remaining <= 0) {
+                    break;
+                }
                 final long guess = lo + (hi - lo) / 2L;
                 final long start = Math.max(moovEnd, guess - PROBE_BYTES / 2L);
                 final FileRangeFetcher.FetchResult result = FileRangeFetcher.fetchSync(
                         account, document, alignDown(start), PROBE_BYTES,
-                        FETCH_TIMEOUT_MS, FETCH_BUDGET_MS, null);
+                        FETCH_TIMEOUT_MS, Math.min(FETCH_BUDGET_MS, remaining), null);
+                requests++;
                 if (result == null || !result.ok() || result.data == null) {
                     FileLog.d("FMPIDX: remote probe stopped status="
-                            + (result != null ? result.status : "null"));
+                            + (result != null ? result.status : "null")
+                            + (result != null && result.status == FileRangeFetcher.FetchResult.Status.DISABLED
+                                    ? " (network fetch off, using local index)" : ""));
                     return null;
                 }
                 final long dataOffset = alignDown(start);
@@ -116,7 +128,8 @@ public final class RemoteSeekProbe {
                 return null;
             }
             FileLog.d("FMPIDX: remote probe pos=" + bestPosition + " t=" + bestTimeUs
-                    + " target=" + targetTimeUs);
+                    + " target=" + targetTimeUs + " probes=" + requests
+                    + " ms=" + (System.currentTimeMillis() - started));
             return new SeekPoint(bestTimeUs, bestPosition);
         } catch (Throwable e) {
             FileLog.e("FMPIDX: remote probe failed", e);
@@ -185,7 +198,8 @@ public final class RemoteSeekProbe {
 
     private static Fragment nearestFragment(byte[] data, long dataOffset, long fileLength,
                                              long timescale, long trackId, long targetTimeUs) {
-        Fragment best = null;
+        Fragment bestBefore = null;
+        Fragment bestAfter = null;
         int position = 0;
         while (position + 8 <= data.length) {
             if (!isType(data, position + 4, "moof")) {
@@ -211,17 +225,19 @@ public final class RemoteSeekProbe {
                 f.end = absolute + size;
                 f.size = (int) size;
                 f.timeUs = timeUs;
-                if (best == null || distance(timeUs, targetTimeUs) < distance(best.timeUs, targetTimeUs)) {
-                    best = f;
+                if (timeUs <= targetTimeUs) {
+                    if (bestBefore == null || timeUs > bestBefore.timeUs) {
+                        bestBefore = f;
+                    }
+                } else if (bestAfter == null || timeUs < bestAfter.timeUs) {
+                    bestAfter = f;
                 }
             }
             position += (int) size;
         }
-        return best;
-    }
-
-    private static long distance(long a, long b) {
-        return a >= b ? a - b : b - a;
+        // A fragment starting at/before the target lets the extractor discard samples up to
+        // the exact target; a later fragment is only a search bound, never a seek position.
+        return bestBefore != null ? bestBefore : bestAfter;
     }
 
     /** tfdt baseMediaDecodeTime of the traf whose tfhd matches the video track. */

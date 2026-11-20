@@ -322,6 +322,13 @@ public class VideoPlayer implements Player.Listener, AnalyticsListener, Notifica
                 && ((Mp4IndexExtractorsFactory) extractorsFactoryOverride).hasIndex();
     }
 
+    /** Whether the current seek map can resolve a target (milliseconds). */
+    public boolean hasSeekIndexFor(long positionMs) {
+        return extractorsFactoryOverride instanceof Mp4IndexExtractorsFactory
+                && ((Mp4IndexExtractorsFactory) extractorsFactoryOverride)
+                        .canSeekTo(positionMs * 1000L);
+    }
+
     Handler audioUpdateHandler = new Handler(Looper.getMainLooper());
 
     boolean audioDisabled;

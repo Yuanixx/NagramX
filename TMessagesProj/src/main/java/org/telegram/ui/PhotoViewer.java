@@ -1580,7 +1580,7 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
      */
     private boolean deferStreamSeekIfUnseekable(VideoPlayer player, long targetMs) {
         TLRPC.Document doc = currentMessageObject != null ? currentMessageObject.getDocument() : null;
-        if (!isStreaming || player == null || player.hasSeekIndex() || targetMs <= 0 || doc == null) {
+        if (!isStreaming || player == null || player.hasSeekIndexFor(targetMs) || targetMs <= 0 || doc == null) {
             return false;
         }
         if (pendingStreamSeekRebuilt && pendingStreamSeekMs == targetMs && pendingStreamSeekDocId == doc.id) {
@@ -11122,7 +11122,7 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
                 pendingStreamSeekDocId = -1L;
                 if (!sameDoc) {
                     pendingStreamSeekRebuilt = false;
-                } else if (videoPlayer.hasSeekIndex()) {
+                } else if (videoPlayer.hasSeekIndexFor(target)) {
                     pendingStreamSeekRebuilt = false;
                     FileLog.d("ABPV: stream seek replay after re-prepare target=" + target);
                     videoPlayer.seekTo(target);

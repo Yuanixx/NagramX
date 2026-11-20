@@ -113,6 +113,23 @@ public final class Mp4IndexExtractorsFactory implements ExtractorsFactory {
         return attempted && (resolvedIndex != null || remotePoint != null);
     }
 
+    /**
+     * True when the current map can resolve this time to a real byte position. A probed
+     * remote point is only valid near the time it was probed for; asking for a different
+     * remote time must trigger a fresh probe (and therefore a fresh prepare).
+     */
+    public boolean canSeekTo(long timeUs) {
+        if (!attempted) {
+            return false;
+        }
+        ChunkIndex local = resolvedIndex;
+        if (local != null && timeUs <= local.getDurationUs()) {
+            return true;
+        }
+        SeekPoint remote = remotePoint;
+        return remote != null && Math.abs(remote.timeUs - timeUs) <= 20L * 1000L * 1000L;
+    }
+
     @Nullable
     private ChunkIndex index() {
         if (prebuiltIndex != null) {
