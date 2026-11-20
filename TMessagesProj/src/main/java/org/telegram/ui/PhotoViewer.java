@@ -11433,7 +11433,13 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
         android.util.Log.w("FMPIDX", "prepare candidate token=" + token + " doc=" + id
                 + " size=" + size + " path=" + path + " notLoading=" + notLoading
                 + " expectSec=" + expectedSec);
-        return new Mp4IndexExtractorsFactory(path, id, size, expectedSec, notLoading);
+        Mp4IndexExtractorsFactory factory = new Mp4IndexExtractorsFactory(path, id, size, expectedSec, notLoading);
+        if (doc != null && pendingStreamSeekMs > 0) {
+            // Probe the fragment that contains the deferred target, so seeking to a
+            // range that is still remote does not fall back to the downloaded prefix.
+            factory.setSeekTarget(doc, currentAccount, pendingStreamSeekMs * 1000L, expectedSec);
+        }
+        return factory;
     }
 
     private void preparePlayer(ArrayList<VideoPlayer.Quality> videoUrises, Uri uri, boolean playWhenReady, boolean preview, boolean livePhoto) {

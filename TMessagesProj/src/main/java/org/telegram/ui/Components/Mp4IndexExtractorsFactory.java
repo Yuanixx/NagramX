@@ -17,6 +17,7 @@ import androidx.media3.extractor.TrackOutput;
 import androidx.media3.extractor.mp4.FragmentedMp4Extractor;
 
 import org.telegram.messenger.FragmentIndexBuilder;
+import org.telegram.tgnet.TLRPC;
 
 import java.io.IOException;
 import java.util.List;
@@ -52,6 +53,27 @@ public final class Mp4IndexExtractorsFactory implements ExtractorsFactory {
     private volatile ChunkIndex resolvedIndex;
     private volatile boolean attempted;
 
+    @Nullable
+    private TLRPC.Document seekDocument;
+    private int seekAccount;
+    private long seekTargetTimeUs;
+    private double seekDurationSec;
+    @Nullable
+    private volatile SeekMap.SeekPoint remotePoint;
+
+    /**
+     * Enables remote fragment probing for a target time that the local (partial) index does
+     * not cover yet. Must be set before the first createExtractors call. All network work
+     * stays on ExoPlayer's loader thread inside index().
+     */
+    public void setSeekTarget(@Nullable TLRPC.Document document, int account,
+                              long targetTimeUs, double durationSec) {
+        this.seekDocument = document;
+        this.seekAccount = account;
+        this.seekTargetTimeUs = targetTimeUs;
+        this.seekDurationSec = durationSec;
+    }
+
     /** Eager mode, for callers that already built the index. */
     public Mp4IndexExtractorsFactory(@Nullable ChunkIndex prebuiltIndex) {
         this.prebuiltIndex = prebuiltIndex;
@@ -85,9 +107,9 @@ public final class Mp4IndexExtractorsFactory implements ExtractorsFactory {
         return stamp(delegate.createExtractors(uri, responseHeaders));
     }
 
-    /** True once a seek map has been resolved for this player (persisted or scanned). */
+    /** Side-effect-free: true once this player has a resolved seek map. */
     public boolean hasIndex() {
-        return index() != null;
+        return attempted && (resolvedIndex != null || remotePoint != null);
     }
 
     @Nullable
@@ -116,6 +138,11 @@ public final class Mp4IndexExtractorsFactory implements ExtractorsFactory {
                         Log.w(TAG, "index missing doc=" + docId + " size=" + docSize
                                 + " (no persisted copy, no local file)");
                     }
+                    if (seekTargetTimeUs > 0 && seekDocument != null
+                            && (idx == null || seekTargetTimeUs > idx.getDurationUs())) {
+                        remotePoint = RemoteSeekProbe.find(seekAccount, seekDocument, path,
+                                docSize, seekTargetTimeUs, seekDurationSec);
+                    }
                     resolvedIndex = idx;
                     attempted = true;
                 }
@@ -130,7 +157,8 @@ public final class Mp4IndexExtractorsFactory implements ExtractorsFactory {
         for (int i = 0; i < extractors.length; i++) {
             if (extractors[i] instanceof FragmentedMp4Extractor) {
                 // Always wrap, even with a null index: keeps the path identical for both cases.
-                extractors[i] = new ChunkIndexInjectingExtractor(extractors[i], idx);
+                extractors[i] = new ChunkIndexInjectingExtractor(extractors[i], idx, remotePoint,
+                        expectedDurationSec);
                 n++;
             }
         }
@@ -144,15 +172,21 @@ public final class Mp4IndexExtractorsFactory implements ExtractorsFactory {
         private final Extractor delegate;
         @Nullable
         private final ChunkIndex chunkIndex;
+        @Nullable
+        private final SeekMap.SeekPoint remotePoint;
+        private final double durationSec;
 
-        ChunkIndexInjectingExtractor(Extractor delegate, @Nullable ChunkIndex chunkIndex) {
+        ChunkIndexInjectingExtractor(Extractor delegate, @Nullable ChunkIndex chunkIndex,
+                                     @Nullable SeekMap.SeekPoint remotePoint, double durationSec) {
             this.delegate = delegate;
             this.chunkIndex = chunkIndex;
+            this.remotePoint = remotePoint;
+            this.durationSec = durationSec;
         }
 
         @Override
         public void init(ExtractorOutput output) {
-            if (chunkIndex == null) {
+            if (chunkIndex == null && remotePoint == null) {
                 delegate.init(output);
                 return;
             }
@@ -172,7 +206,14 @@ public final class Mp4IndexExtractorsFactory implements ExtractorsFactory {
                     // A ChunkIndex emitted by the extractor comes from a real Sidx and is more
                     // authoritative than the scanned index. Anything else is the fallback
                     // (restartable/unseekable) that the old fork replaced with the injected one.
-                    output.seekMap(seekMap instanceof ChunkIndex ? seekMap : chunkIndex);
+                    if (seekMap instanceof ChunkIndex) {
+                        output.seekMap(seekMap);
+                    } else if (remotePoint != null) {
+                        output.seekMap(new RemoteExtendedSeekMap(chunkIndex, remotePoint,
+                                (long) (durationSec * 1000000.0)));
+                    } else {
+                        output.seekMap(chunkIndex);
+                    }
                 }
             });
         }
@@ -195,6 +236,39 @@ public final class Mp4IndexExtractorsFactory implements ExtractorsFactory {
         @Override
         public boolean sniff(ExtractorInput input) throws IOException {
             return delegate.sniff(input);
+        }
+    }
+
+    /** Local index for already-downloaded bytes plus one probed point further ahead. */
+    private static final class RemoteExtendedSeekMap implements SeekMap {
+
+        @Nullable
+        private final ChunkIndex local;
+        private final SeekPoint remote;
+        private final long durationUs;
+
+        RemoteExtendedSeekMap(@Nullable ChunkIndex local, SeekPoint remote, long durationUs) {
+            this.local = local;
+            this.remote = remote;
+            this.durationUs = durationUs;
+        }
+
+        @Override
+        public boolean isSeekable() {
+            return true;
+        }
+
+        @Override
+        public long getDurationUs() {
+            return durationUs;
+        }
+
+        @Override
+        public SeekPoints getSeekPoints(long timeUs) {
+            if (local != null && timeUs <= local.getDurationUs()) {
+                return local.getSeekPoints(timeUs);
+            }
+            return new SeekPoints(remote);
         }
     }
 }
