@@ -130,8 +130,13 @@ public class VideoPlayer implements Player.Listener, AnalyticsListener, Notifica
     public interface VideoPlayerDelegate {
         void onStateChanged(boolean playWhenReady, int playbackState);
 
-        /** Identity-carrying overload: a rebuilt player must not deliver callbacks to an old one. */
-        default void onStateChanged(VideoPlayer player, boolean playWhenReady, int playbackState) {
+        /**
+         * Identity-carrying overload. The generation is captured when the callback is produced,
+         * not read later by the consumer, so a late callback from an older prepare of a reused
+         * player cannot pass an identity check.
+         */
+        default void onStateChanged(VideoPlayer player, int generation,
+                                    boolean playWhenReady, int playbackState) {
             onStateChanged(playWhenReady, playbackState);
         }
         void onError(VideoPlayer player, Exception e);
@@ -2153,7 +2158,7 @@ public class VideoPlayer implements Player.Listener, AnalyticsListener, Notifica
         int playbackState = player.getPlaybackState();
         if (lastReportedPlayWhenReady != playWhenReady || lastReportedPlaybackState != playbackState) {
             if (delegate != null) {
-                delegate.onStateChanged(this, playWhenReady, playbackState);
+                delegate.onStateChanged(this, prepareGeneration, playWhenReady, playbackState);
             }
             lastReportedPlayWhenReady = playWhenReady;
             lastReportedPlaybackState = playbackState;

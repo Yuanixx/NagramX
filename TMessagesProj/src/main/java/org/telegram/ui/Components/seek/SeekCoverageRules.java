@@ -11,12 +11,21 @@ public final class SeekCoverageRules {
     private SeekCoverageRules() {
     }
 
-    /** Last indexed fragment start; -1 when no index exists. */
+    /** Last indexed fragment start, in microseconds; -1 when no index exists. */
     public static long coveredUs(long[] timesUs, int length) {
         if (timesUs == null || length <= 0 || length > timesUs.length) {
             return -1L;
         }
         return timesUs[length - 1];
+    }
+
+    /** End of the covered bytes: last chunk offset plus its size; -1 when no index exists. */
+    public static long coveredBytes(int[] sizes, long[] offsets, int length) {
+        if (sizes == null || offsets == null || length <= 0
+                || length > sizes.length || length > offsets.length) {
+            return -1L;
+        }
+        return offsets[length - 1] + sizes[length - 1];
     }
 
     /** Local index can resolve a time only inside its own covered range. */
@@ -30,13 +39,16 @@ public final class SeekCoverageRules {
         return endUs > startUs && startUs >= 0L && timeUs >= startUs && timeUs <= endUs;
     }
 
-    /** A probed fragment is usable only if it is inside the file and ahead of local coverage. */
+    /**
+     * A probed fragment is usable only if it is inside the file and ahead of the locally
+     * covered BYTE range. Never pass a microsecond value as the last argument.
+     */
     public static boolean validProbe(long startUs, long endUs, long position, long size,
-                                     long fileLength, long coveredEndUs) {
+                                     long fileLength, long coveredEndBytes) {
         return endUs > startUs
                 && startUs >= 0L
                 && size > 0L
-                && position >= coveredEndUs
+                && position >= coveredEndBytes
                 && position + size <= fileLength;
     }
 }

@@ -170,10 +170,14 @@ public final class Mp4IndexExtractorsFactory implements ExtractorsFactory {
                         if (probed != null && probed.point != null) {
                             long start = probed.point.timeUs;
                             long end = start + probed.spanUs;
+                            final long coveredEndBytes = SeekCoverageRules.coveredBytes(
+                                    idx != null ? idx.sizes : null,
+                                    idx != null ? idx.offsets : null,
+                                    idx != null ? idx.length : 0);
                             if (SeekCoverageRules.coversRemote(start, end, seekTargetTimeUs)
                                     && SeekCoverageRules.validProbe(start, end,
                                             probed.point.position, probed.size,
-                                            docSize, Math.max(0L, coveredEndUs))) {
+                                            docSize, Math.max(0L, coveredEndBytes))) {
                                 remotePoint = probed.point;
                                 remoteSpanUs = probed.spanUs;
                                 Log.w(TAG, "remote probe accepted start=" + start
@@ -320,9 +324,10 @@ public final class Mp4IndexExtractorsFactory implements ExtractorsFactory {
                     remote.timeUs + remoteSpanUs, timeUs)) {
                 return new SeekPoints(remote);
             }
-            // Never present a stale remote point as valid for an unrelated time. The local
-            // clamp is only a safe fallback; the defer gate prevents issuing that seek.
-            return local != null ? local.getSeekPoints(timeUs) : new SeekPoints(remote);
+            // Never present a stale remote point as valid for an unrelated time. When there is
+            // no local index either, there is no valid mapping at all; return START only as a
+            // non-answer. canSeekTo() is false for this target, so callers must not seek here.
+            return local != null ? local.getSeekPoints(timeUs) : new SeekPoints(SeekPoint.START);
         }
     }
 }

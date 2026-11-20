@@ -10,6 +10,7 @@ public final class SeekCoverageRulesTest {
         testRemoteCoverageIsAnInterval();
         testNoFixedTolerance();
         testProbeValidation();
+        testCoveredBytesIsNotCoveredTime();
         System.out.println("SEEK COVERAGE: " + passed + " checks passed");
     }
 
@@ -51,6 +52,21 @@ public final class SeekCoverageRulesTest {
                 "fragment past end of file is invalid");
         check(!SeekCoverageRules.validProbe(30L, 20L, 100L, 50L, 1000L, 80L),
                 "reversed interval is invalid");
+    }
+
+    private static void testCoveredBytesIsNotCoveredTime() {
+        int[] sizes = {100, 200};
+        long[] offsets = {1000L, 1300L};
+        check(SeekCoverageRules.coveredBytes(sizes, offsets, 2) == 1500L,
+                "covered bytes is last offset plus size");
+        check(SeekCoverageRules.coveredBytes(sizes, offsets, 0) == -1L,
+                "no index means no covered bytes");
+        check(SeekCoverageRules.coveredUs(new long[]{0L, 20_000_000L}, 2) == 20_000_000L,
+                "covered time stays in microseconds, a different unit from bytes");
+        check(!SeekCoverageRules.validProbe(20_000_000L, 30_000_000L, 1400L, 50L, 100_000_000L, 1500L),
+                "a fragment before the covered byte boundary is rejected");
+        check(SeekCoverageRules.validProbe(20_000_000L, 30_000_000L, 1600L, 50L, 100_000_000L, 1500L),
+                "a fragment after the covered byte boundary is accepted");
     }
 
     private static void check(boolean ok, String msg) {

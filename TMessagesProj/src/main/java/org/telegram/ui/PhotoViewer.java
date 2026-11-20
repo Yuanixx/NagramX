@@ -11630,10 +11630,11 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
                 private boolean firstState = true;
 
                 @Override
-                public void onStateChanged(VideoPlayer player, boolean playWhenReady, int playbackState) {
-                    // A late callback from a player that was already released must never reach
-                    // the pending-seek replay block or any other state transition.
-                    if (player != videoPlayer) {
+                public void onStateChanged(VideoPlayer player, int generation,
+                                           boolean playWhenReady, int playbackState) {
+                    // Both the instance and the generation are captured at callback time. A
+                    // late callback from an older prepare of a reused player must be ignored.
+                    if (player != videoPlayer || generation != videoPlayer.getPrepareGeneration()) {
                         return;
                     }
                     onStateChanged(playWhenReady, playbackState);
