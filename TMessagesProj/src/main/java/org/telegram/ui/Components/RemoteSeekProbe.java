@@ -149,7 +149,7 @@ public final class RemoteSeekProbe {
         try {
             // 第一步：拿到 moov，解析视频轨道的 timescale 与 trackId。
             // 没有这两个值就无法把 tfdt ticks 换算成时间，也无法区分视频/音频片段。
-            MoovBox moov = readMoov(localPath, account, document);
+            MoovBox moov = readMoov(localPath, account, document, deadline);
             if (moov == null || System.currentTimeMillis() >= deadline) {
                 return null;
             }
@@ -176,9 +176,9 @@ public final class RemoteSeekProbe {
                 }
                 final long guess = lo + (hi - lo) / 2L;
                 final long start = Math.max(moovEnd, guess - PROBE_BYTES / 2L);
-                final FileRangeFetcher.FetchResult result = FileRangeFetcher.fetchSync(
+                final FileRangeFetcher.FetchResult result = FileRangeFetcher.fetchSyncUntil(
                         account, document, alignDown(start), PROBE_BYTES,
-                        FETCH_TIMEOUT_MS, Math.min(FETCH_BUDGET_MS, remaining), null);
+                        Math.min(FETCH_TIMEOUT_MS, remaining), deadline, null);
                 requests++;
                 if (result == null || !result.ok() || result.data == null) {
                     // 限流开关关闭、420、超时等：立即放弃，不做任何近似推断。
@@ -247,7 +247,8 @@ public final class RemoteSeekProbe {
      * @param document TLRPC.Document类型的参数 document
      * @return MoovBox 类型的结果
      */
-    private static MoovBox readMoov(String localPath, int account, TLRPC.Document document) {
+    private static MoovBox readMoov(String localPath, int account, TLRPC.Document document,
+                                    long deadlineMs) {
         if (localPath != null) {
             try {
                 RandomAccessFile raf = new RandomAccessFile(new File(localPath), "r");
@@ -266,9 +267,13 @@ public final class RemoteSeekProbe {
                 // 本地不可读不是错误：继续走远端分支。
             }
         }
-        FileRangeFetcher.FetchResult result = FileRangeFetcher.fetchSync(
-                account, document, 0, LOCAL_MOOV_LIMIT, FETCH_TIMEOUT_MS,
-                FETCH_BUDGET_MS, null);
+        long remaining = deadlineMs - System.currentTimeMillis();
+        if (remaining <= 0L) {
+            return null;
+        }
+        FileRangeFetcher.FetchResult result = FileRangeFetcher.fetchSyncUntil(
+                account, document, 0, LOCAL_MOOV_LIMIT,
+                Math.min(FETCH_TIMEOUT_MS, remaining), deadlineMs, null);
         if (result == null || !result.ok() || result.data == null) {
             return null;
         }
