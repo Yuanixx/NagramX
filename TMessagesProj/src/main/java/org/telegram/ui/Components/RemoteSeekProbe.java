@@ -183,7 +183,7 @@ public final class RemoteSeekProbe {
             boolean scanBeforeEmptyWindow = false;
             long emptyWindowOffset = -1L;
 
-            for (int probe = 0; probe < MAX_PROBES && lo < hi; probe++) {
+            for (int probe = 0; requests < MAX_PROBES && lo < hi; probe++) {
                 // 每次请求前重新计算剩余预算；rate limit 的等待也可能吃掉时间。
                 final long remaining = deadline - System.currentTimeMillis();
                 if (remaining <= 0) {
