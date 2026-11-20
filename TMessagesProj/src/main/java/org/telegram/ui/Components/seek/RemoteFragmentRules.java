@@ -33,27 +33,26 @@ public final class RemoteFragmentRules {
      * 窗口内没有后继、时间重复或乱序时返回 -1：跨度无法证明，探测必须明确失败。
      */
     public static long spanAfter(long[] timesUs, int count, int index) {
-        if (index < 0 || index >= count || count <= 0) {
+        if (timesUs == null || count < 2 || count > timesUs.length
+                || index < 0 || index >= count - 1) {
             return -1L;
         }
-        long next = Long.MAX_VALUE;
-        for (int i = 0; i < count; i++) {
-            if (timesUs[i] <= timesUs[index]) {
-                continue;
-            }
-            if (next == Long.MAX_VALUE || timesUs[i] < next) {
-                next = timesUs[i];
+        // timesUs 的顺序就是 moof 在文件中的顺序。只取物理上的紧邻后继，
+        // 不能跳过重复/乱序时间戳去找一个“看起来更大”的时间，否则会把
+        // 不连续的两个片段拼成虚假的覆盖区间。
+        for (int i = 1; i < count; i++) {
+            if (timesUs[i] <= timesUs[i - 1]) {
+                return -1L;
             }
         }
-        if (next == Long.MAX_VALUE || next <= timesUs[index]) {
-            return -1L;
-        }
-        return next - timesUs[index];
+        return timesUs[index + 1] - timesUs[index];
     }
 
     /** 目标必须落在已证明的左闭右开区间内，不能只靠“离起点不太远”。 */
     public static boolean containsTarget(long startUs, long spanUs, long targetUs) {
-        return spanUs > 0L && targetUs >= startUs && targetUs < startUs + spanUs;
+        return startUs >= 0L && spanUs > 0L
+                && startUs <= Long.MAX_VALUE - spanUs
+                && targetUs >= startUs && targetUs < startUs + spanUs;
     }
 
     /** u64 解析出的 tfdt 若溢出成负数，必须拒绝而不是当成有效解码时间。 */
