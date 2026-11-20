@@ -23,7 +23,7 @@ Builds from this fork are signed with a different certificate than the archived 
 1. Clone the repository with its submodules:
 
     ```bash
-    git clone --recursive --shallow-submodules https://github.com/Yuanixx/NagramX.git NagramX
+    git clone --recursive --shallow-submodules https://github.com/Yuanixx/NagramX.git StreamX
     ```
 
     If you already cloned the repository without submodules, run:
