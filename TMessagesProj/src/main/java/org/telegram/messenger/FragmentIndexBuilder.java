@@ -524,8 +524,8 @@ public final class FragmentIndexBuilder {
         // turns out to be a pre-allocated sparse temp with a large zero tail. In that case the
         // partial rules apply so the fragments that did arrive still produce a seekable index.
         boolean strict = complete;
-        Map<Integer, Track> tracks = new HashMap<>();
-        List<Frag> frags = new ArrayList<>();
+        Map<Integer, FragmentMoofParser.Track> tracks = new HashMap<>();
+        List<FragmentMoofParser.Fragment> frags = new ArrayList<>();
         byte[] hdr = new byte[16];
         long pos = 0;
         long validEnd = 0;
@@ -533,7 +533,7 @@ public final class FragmentIndexBuilder {
         long mvhdTimescale = 0, mvhdDuration = 0, mehdDuration = -1;
         long firstMoofPos = -1;
         boolean hasSidx = false, hasMfra = false;
-        Frag pending = null;
+        List<FragmentMoofParser.Fragment> pending = null;
 
         while (pos + 8 <= len) {
             raf.seek(pos);
@@ -578,13 +578,13 @@ public final class FragmentIndexBuilder {
                 } else {
                     if (pending != null) {
                         if (complete) {
-                            reject("moof without following mdat pos=" + pending.pos);
+                            reject("moof without following mdat pos=" + pending.get(0).pos);
                             return null;
                         }
                         break;
                     }
-                    Frag f = parseMoof(body, tracks);
-                    if (f == null) {
+                    List<FragmentMoofParser.Fragment> parsed = FragmentMoofParser.parse(body, tracks);
+                    if (parsed == null || parsed.isEmpty()) {
                         // A half-written mdat/moof in a growing *.temp parses as garbage:
                         // keep everything up to here instead of discarding the whole prefix.
                         if (complete) {
@@ -593,11 +593,14 @@ public final class FragmentIndexBuilder {
                         }
                         break;
                     }
-                    f.pos = pos;
+                    for (FragmentMoofParser.Fragment fragment : parsed) {
+                        // All traf boxes in this moof share the same containing byte position.
+                        fragment.pos = pos;
+                    }
                     if (firstMoofPos < 0) {
                         firstMoofPos = pos;
                     }
-                    pending = f;
+                    pending = parsed;
                     moofCount++;
                 }
             } else if (type == MDAT) {
@@ -608,8 +611,10 @@ public final class FragmentIndexBuilder {
                     }
                     break;
                 }
-                pending.end = pos + size;
-                frags.add(pending);
+                for (FragmentMoofParser.Fragment fragment : pending) {
+                    fragment.end = pos + size;
+                    frags.add(fragment);
+                }
                 pending = null;
                 mdatCount++;
             }
@@ -646,8 +651,8 @@ public final class FragmentIndexBuilder {
             reject("partial moof=" + moofCount + " mdat=" + mdatCount);
             return null;
         }
-        Track video = null, audio = null;
-        for (Track t : tracks.values()) {
+        FragmentMoofParser.Track video = null, audio = null;
+        for (FragmentMoofParser.Track t : tracks.values()) {
             if (t.video) {
                 video = t;
             } else {
@@ -691,13 +696,13 @@ public final class FragmentIndexBuilder {
         // the last known fragment instead of jumping back to byte 0.
         final long totalUs = Math.max(videoUs, expectedUs);
 
-        List<Frag> videoFrags = new ArrayList<>();
-        List<Frag> audioFrags = new ArrayList<>();
-        for (Frag f : frags) {
+        List<FragmentMoofParser.Fragment> videoFrags = new ArrayList<>();
+        List<FragmentMoofParser.Fragment> audioFrags = new ArrayList<>();
+        for (FragmentMoofParser.Fragment f : frags) {
             if (f.samples <= 0) {
                 continue; // the empty first fragment (audio track)
             }
-            Track t = tracks.get(f.trackId);
+            FragmentMoofParser.Track t = tracks.get(f.trackId);
             if (t == null) {
                 reject("fragment unknown track=" + f.trackId);
                 return null;
@@ -714,7 +719,7 @@ public final class FragmentIndexBuilder {
         int droppedNonSync = 0, droppedDupTime = 0, audioLeadAdj = 0;
         long prevOffset = -1;
         long lastTime = -1;
-        for (Frag v : videoFrags) {
+        for (FragmentMoofParser.Fragment v : videoFrags) {
             if (!v.sync) {
                 droppedNonSync++;
                 continue;
@@ -725,7 +730,7 @@ public final class FragmentIndexBuilder {
                 continue;
             }
             long start = v.pos;
-            for (Frag a : audioFrags) {
+            for (FragmentMoofParser.Fragment a : audioFrags) {
                 if (a.pos > prevOffset && a.pos < start) {
                     start = a.pos; // include leading audio moof so audio is not missing after a seek
                     audioLeadAdj++;
@@ -846,7 +851,7 @@ public final class FragmentIndexBuilder {
     }
 
     /** @return {mvhdTimescale, mvhdDuration, mehdDuration(-1 if absent)} */
-    private static long[] parseMoov(byte[] d, Map<Integer, Track> tracks) {
+    private static long[] parseMoov(byte[] d, Map<Integer, FragmentMoofParser.Track> tracks) {
         long[] result = new long[]{0, 0, -1};
         Map<Integer, int[]> trex = new HashMap<>();
         int[] mvex = child(d, 0, d.length, MVEX);
@@ -882,7 +887,7 @@ public final class FragmentIndexBuilder {
             if (mdhd == null || hdlr == null) {
                 continue;
             }
-            Track t = new Track();
+            FragmentMoofParser.Track t = new FragmentMoofParser.Track();
             t.id = i32(d, tkhd[0] + ((d[tkhd[0]] & 0xFF) == 1 ? 20 : 12));
             t.timescale = i32(d, mdhd[0] + ((d[mdhd[0]] & 0xFF) == 1 ? 20 : 12));
             t.duration = (d[mdhd[0]] & 0xFF) == 1
@@ -898,97 +903,6 @@ public final class FragmentIndexBuilder {
             }
         }
         return result;
-    }
-
-    @Nullable
-    private static Frag parseMoof(byte[] d, Map<Integer, Track> tracks) {
-        List<int[]> trafs = children(d, 0, d.length, TRAF);
-        if (trafs.isEmpty()) {
-            return null;
-        }
-        int[] traf = trafs.get(0); // this file has exactly one traf per moof
-        int[] tfhd = child(d, traf[0], traf[1], TFHD);
-        int[] tfdt = child(d, traf[0], traf[1], TFDT);
-        if (tfhd == null || tfdt == null) {
-            return null;
-        }
-        int b = tfhd[0];
-        int tfFlags = i32(d, b) & 0xFFFFFF;
-        Track t = tracks.get(i32(d, b + 4));
-        if (t == null) {
-            return null;
-        }
-        int p = b + 8;
-        if ((tfFlags & 0x1) != 0) {
-            p += 8;  // base_data_offset
-        }
-        if ((tfFlags & 0x2) != 0) {
-            p += 4;  // sample_description_index
-        }
-        int defaultDuration = t.defaultDuration;
-        int defaultFlags = t.defaultFlags;
-        if ((tfFlags & 0x8) != 0) {
-            defaultDuration = i32(d, p);
-            p += 4;
-        }
-        if ((tfFlags & 0x10) != 0) {
-            p += 4;  // default_sample_size
-        }
-        if ((tfFlags & 0x20) != 0) {
-            defaultFlags = i32(d, p);
-            p += 4;
-        }
-
-        Frag f = new Frag();
-        f.trackId = t.id;
-        f.tfdt = (d[tfdt[0]] & 0xFF) == 1 ? i64(d, tfdt[0] + 4) : u32(d, tfdt[0] + 4);
-        f.sync = true;
-
-        boolean firstSample = true;
-        for (int[] tr : children(d, traf[0], traf[1], TRUN)) {
-            int q = tr[0];
-            int trFlags = i32(d, q) & 0xFFFFFF;
-            int count = i32(d, q + 4);
-            if (count < 0 || count > 100000) {
-                return null;
-            }
-            q += 8;
-            if ((trFlags & 0x1) != 0) {
-                q += 4; // data_offset
-            }
-            int firstSampleFlags = 0;
-            boolean hasFirstSampleFlags = false;
-            if ((trFlags & 0x4) != 0) {
-                firstSampleFlags = i32(d, q);
-                hasFirstSampleFlags = true;
-                q += 4;
-            }
-            for (int i = 0; i < count; i++) {
-                int dur = defaultDuration;
-                int flags = (i == 0 && hasFirstSampleFlags) ? firstSampleFlags : defaultFlags;
-                if ((trFlags & 0x100) != 0) {
-                    dur = i32(d, q);
-                    q += 4;
-                }
-                if ((trFlags & 0x200) != 0) {
-                    q += 4; // sample_size
-                }
-                if ((trFlags & 0x400) != 0) {
-                    flags = i32(d, q); // per-sample flags override tfhd/trex defaults
-                    q += 4;
-                }
-                if ((trFlags & 0x800) != 0) {
-                    q += 4; // composition_time_offset
-                }
-                if (firstSample) {
-                    f.sync = (flags & SAMPLE_FLAG_NON_SYNC) == 0;
-                    firstSample = false;
-                }
-                f.durTicks += dur & 0xFFFFFFFFL;
-                f.samples++;
-            }
-        }
-        return f;
     }
 
     // ---------------------------------------------------------------------------------------
@@ -1053,27 +967,4 @@ public final class FragmentIndexBuilder {
         return (u32(d, o) << 32) | u32(d, o + 4);
     }
 
-    private static final class Track {
-        int id;
-        int timescale = 1;
-        long duration;
-        boolean video;
-        int defaultDuration;
-        int defaultFlags;
-
-        @Override
-        public String toString() {
-            return "Track{" + id + " ts=" + timescale + " video=" + video + "}";
-        }
-    }
-
-    private static final class Frag {
-        int trackId;
-        int samples;
-        long pos;
-        long end;
-        long tfdt;
-        long durTicks;
-        boolean sync;
-    }
 }
