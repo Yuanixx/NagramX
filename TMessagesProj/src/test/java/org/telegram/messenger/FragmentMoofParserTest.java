@@ -24,11 +24,13 @@ public final class FragmentMoofParserTest {
     private static void testAudioAndVideoTrafsInOneMoof() throws Exception {
         Map<Integer, FragmentMoofParser.Track> tracks = tracks();
         byte[] audio = traf(2, 1, 0x1_0000_0000L, 0x20, 0, 0, 0);
+        // A subtitle traf is present in the same moof but must not be used as audio.
+        byte[] subtitle = traf(3, 0, 1_000L, 0x20, 0, 0, 0);
         // The tfhd default marks the sample non-sync; trun's first_sample_flags
         // explicitly overrides it to sync. Audio is intentionally first in the moof.
         byte[] video = traf(1, 0, 90_000L, 0x20, 0x4, 0, NON_SYNC);
         List<FragmentMoofParser.Fragment> fragments =
-                FragmentMoofParser.parse(concat(box("mfhd", ints(0, 1)), audio, video), tracks);
+                FragmentMoofParser.parse(concat(box("mfhd", ints(0, 1)), audio, subtitle, video), tracks);
 
         check(fragments != null && fragments.size() == 2,
                 "one moof returns both known traf tracks");
@@ -44,6 +46,8 @@ public final class FragmentMoofParserTest {
                 "first_sample_flags can override a non-sync tfhd default");
         check(videoFragment.durTicks == 3_000L,
                 "track default sample duration is accumulated");
+        check(fragments.stream().noneMatch(fragment -> fragment.trackId == 3),
+                "subtitle traf is ignored rather than classified as audio");
     }
 
     private static void testPerSampleFlagsOverrideFirstSampleFlags() throws Exception {
@@ -84,6 +88,12 @@ public final class FragmentMoofParserTest {
         audio.video = false;
         audio.defaultDuration = 1_024;
 
+        FragmentMoofParser.Track subtitle = new FragmentMoofParser.Track();
+        subtitle.id = 3;
+        subtitle.timescale = 1_000;
+        subtitle.video = false;
+        subtitle.audio = false;
+
         FragmentMoofParser.Track video = new FragmentMoofParser.Track();
         video.id = 1;
         video.timescale = 90_000;
@@ -93,6 +103,7 @@ public final class FragmentMoofParserTest {
 
         Map<Integer, FragmentMoofParser.Track> result = new HashMap<>();
         result.put(audio.id, audio);
+        result.put(subtitle.id, subtitle);
         result.put(video.id, video);
         return result;
     }
