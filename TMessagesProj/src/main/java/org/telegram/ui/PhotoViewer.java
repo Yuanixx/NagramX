@@ -1588,11 +1588,14 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
         }
         pendingStreamSeekMs = targetMs;
         pendingStreamSeekDocId = doc.id;
-        pendingStreamSeekRebuilt = true;
+        pendingStreamSeekRebuilt = false;
         FileLog.d("ABPV: stream seek deferred, re-prepare for index target=" + targetMs);
         AndroidUtilities.runOnUIThread(() -> {
             if (currentMessageObject != null && currentMessageObject.getDocument() != null
                     && currentMessageObject.getDocument().id == pendingStreamSeekDocId) {
+                // Only now can a READY callback belong to the re-prepared player. An older
+                // player's late READY must not consume the replay target before the rebuild.
+                pendingStreamSeekRebuilt = true;
                 onActionClick(false);
             }
         });
@@ -11111,7 +11114,7 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
             }
         }
         if (playbackState == ExoPlayer.STATE_READY) {
-            if (pendingStreamSeekMs >= 0 && videoPlayer != null) {
+            if (pendingStreamSeekRebuilt && pendingStreamSeekMs >= 0 && videoPlayer != null) {
                 final long target = pendingStreamSeekMs;
                 TLRPC.Document doc = currentMessageObject != null ? currentMessageObject.getDocument() : null;
                 final boolean sameDoc = doc != null && doc.id == pendingStreamSeekDocId;
