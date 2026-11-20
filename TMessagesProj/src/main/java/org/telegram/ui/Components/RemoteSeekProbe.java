@@ -210,7 +210,9 @@ public final class RemoteSeekProbe {
                 // separated by the account-wide playback-yield gate; a single
                 // legal 1 MiB part makes the existing probe budget useful.
                 final long dataOffset = alignDown(guess, PROBE_BYTES);
-                final long probeLength = Math.min((long) PROBE_BYTES, fileLength - dataOffset);
+                final long rawProbeLength = Math.min((long) PROBE_BYTES, fileLength - dataOffset);
+                // Telegram's precise upload.getFile limit is in 1 KiB units.
+                final long probeLength = rawProbeLength - rawProbeLength % 1024L;
                 if (probeLength <= 0L) {
                     break;
                 }
@@ -249,8 +251,9 @@ public final class RemoteSeekProbe {
                         if (extensionOffset % PROBE_BYTES != 0L) {
                             break;
                         }
-                        final long extensionLength = Math.min((long) PROBE_BYTES,
+                        final long rawExtensionLength = Math.min((long) PROBE_BYTES,
                                 fileLength - extensionOffset);
+                        final long extensionLength = rawExtensionLength - rawExtensionLength % 1024L;
                         final long remainingForExtension = deadline - System.currentTimeMillis();
                         if (extensionLength <= 0L || remainingForExtension <= 0L) {
                             break;
