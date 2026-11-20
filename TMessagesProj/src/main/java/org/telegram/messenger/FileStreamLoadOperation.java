@@ -78,8 +78,26 @@ public class FileStreamLoadOperation extends BaseDataSource implements FileLoadO
 
     @Override
     public long open(DataSpec dataSpec) throws IOException {
+        // A DataSource instance may be reopened after close(). Drop every piece of
+        // state belonging to the previous request before publishing the new one.
+        synchronized (dataLock) {
+            opened = false;
+            dataRevision++;
+            dataLock.notifyAll();
+        }
+        FileLoadOperation previous = loadOperation;
+        loadOperation = null;
+        if (previous != null) {
+            previous.removeStreamListener(this);
+        }
+        closeFileHandle();
+        currentFile = null;
+        if (transferStarted) {
+            transferStarted = false;
+            transferEnded();
+        }
+
         uri = dataSpec.uri;
-        transferStarted = false;
         transferInitializing(dataSpec);
         currentAccount = Utilities.parseInt(uri.getQueryParameter("account"));
         parentObject = FileLoader.getInstance(currentAccount).getParentObject(Utilities.parseInt(uri.getQueryParameter("rid")));
@@ -93,42 +111,45 @@ public class FileStreamLoadOperation extends BaseDataSource implements FileLoadO
         TLRPC.TL_documentAttributeFilename filename = new TLRPC.TL_documentAttributeFilename();
         filename.file_name = uri.getQueryParameter("name");
         document.attributes.add(filename);
-        if (document.mime_type.startsWith("video")) {
+        if (document.mime_type != null && document.mime_type.startsWith("video")) {
             document.attributes.add(new TLRPC.TL_documentAttributeVideo());
-        } else if (document.mime_type.startsWith("audio")) {
+        } else if (document.mime_type != null && document.mime_type.startsWith("audio")) {
             document.attributes.add(new TLRPC.TL_documentAttributeAudio());
         }
-        allStreams.put(document.id, this);
+
         currentOffset = dataSpec.position;
         requestedLength = dataSpec.length;
-        loadOperation = FileLoader.getInstance(currentAccount).loadStreamFile(this, document, null, parentObject, currentOffset, false, getCurrentPriority());
         bytesTransferred = 0;
-        bytesRemaining = Math.max(0L, document.size - dataSpec.position);
+        bytesRemaining = Math.max(0L, document.size - currentOffset);
         if (requestedLength != C.LENGTH_UNSET) {
-            bytesRemaining = Math.min(bytesRemaining, Math.max(0L, requestedLength - bytesTransferred));
+            bytesRemaining = Math.min(bytesRemaining, Math.max(0L, requestedLength));
         }
-        opened = true;
-        android.util.Log.w("STREAMDBG", "open id=" + document.id + " mime=" + document.mime_type + " size=" + document.size + " pos=" + dataSpec.position + " len=" + dataSpec.length);
+        synchronized (dataLock) {
+            dataRevision++;
+            opened = true;
+        }
+        allStreams.put(document.id, this);
+        loadOperation = FileLoader.getInstance(currentAccount).loadStreamFile(
+                this, document, null, parentObject, currentOffset, false, getCurrentPriority());
+
         transferStarted(dataSpec);
         transferStarted = true;
         if (loadOperation != null) {
-            currentFile = loadOperation.getCurrentFile();
-            if (currentFile != null) {
-                try {
-                    file = new RandomAccessFile(currentFile, "r");
-                    file.seek(currentOffset);
-                    if (loadOperation.isFinished()) {
-                        bytesRemaining = Math.max(0L, currentFile.length() - currentOffset);
-                        if (requestedLength != C.LENGTH_UNSET) {
-                            bytesRemaining = Math.min(bytesRemaining, Math.max(0L, requestedLength - bytesTransferred));
-                        }
-                    }
-                } catch (Throwable e) {
-                }
+            refreshFileHandle(loadOperation);
+            if (loadOperation.isFinished() && currentFile != null) {
+                long actualRemaining = Math.max(0L, currentFile.length() - currentOffset);
+                bytesRemaining = requestedLength == C.LENGTH_UNSET
+                        ? actualRemaining
+                        : Math.min(actualRemaining, Math.max(0L, requestedLength));
             }
         }
-        FileLog.e("FileStreamLoadOperation " + document.id + " open operation=" + loadOperation + " currentFile=" + currentFile + " file=" + file + " bytesRemaining=" + bytesRemaining + " me=" + this);
-        FileLog.e("FileStreamLoadOperation " + document.id + " " + MessageObject.getVideoWidth(document) + "x" + MessageObject.getVideoWidth(document) + " mime_type="+document.mime_type+" codec="+MessageObject.getVideoCodec(document)+" size="+ document.size);
+        FileLog.e("FileStreamLoadOperation " + document.id + " open operation=" + loadOperation
+                + " currentFile=" + currentFile + " file=" + file
+                + " bytesRemaining=" + bytesRemaining + " me=" + this);
+        FileLog.e("FileStreamLoadOperation " + document.id + " "
+                + MessageObject.getVideoWidth(document) + "x" + MessageObject.getVideoWidth(document)
+                + " mime_type=" + document.mime_type + " codec=" + MessageObject.getVideoCodec(document)
+                + " size=" + document.size);
         return bytesRemaining;
     }
 
@@ -164,7 +185,7 @@ public class FileStreamLoadOperation extends BaseDataSource implements FileLoadO
                     }
                 }
 
-                long availableLength = active.getDownloadedLengthFromOffset(currentOffset, readLength)[0];
+                long availableLength = active.getKnownDownloadedLengthFast(currentOffset, readLength);
                 if (availableLength <= 0 && active.isFinished()) {
                     // Once finished, the range bitmap may be gone. The final file length is then
                     // the authoritative readable boundary.
@@ -202,7 +223,7 @@ public class FileStreamLoadOperation extends BaseDataSource implements FileLoadO
                     // replacement. Never turn this into RESULT_END_OF_INPUT: retry against a
                     // freshly queried range and a freshly opened file.
                     closeFileHandle();
-                    if (++staleReadAttempts >= 3) {
+                    if (++staleReadAttempts >= 3 || !awaitDataChange(observedRevision)) {
                         throw new EOFException("Downloaded range was not readable at " + currentOffset);
                     }
                     continue;
