@@ -68,6 +68,10 @@ public final class Mp4IndexExtractorsFactory implements ExtractorsFactory {
     private volatile ChunkIndex resolvedIndex;
     private volatile boolean attempted;
 
+    /** Native SIDX/MFRA maps emitted by Media3 outrank inferred fallbacks. */
+    @Nullable
+    private volatile SeekMap nativeSeekMap;
+
     @Nullable
     private TLRPC.Document seekDocument;
     private int seekAccount;
@@ -132,7 +136,9 @@ public final class Mp4IndexExtractorsFactory implements ExtractorsFactory {
      * 不能在这里触发探测，否则 UI 线程会被网络请求阻塞。
      */
     public boolean hasIndex() {
-        return attempted && (resolvedIndex != null || remotePoint != null);
+        SeekMap nativeMap = nativeSeekMap;
+        return attempted && (resolvedIndex != null || remotePoint != null
+                || (nativeMap != null && nativeMap.isSeekable()));
     }
 
     /**
@@ -143,6 +149,12 @@ public final class Mp4IndexExtractorsFactory implements ExtractorsFactory {
     public boolean canSeekTo(long timeUs) {
         if (!attempted) {
             return false;
+        }
+        // Native Media3 maps (notably MFRA/tfra TrackAwareSeekMap) describe the
+        // file's actual random-access points and outrank inferred local/remote indexes.
+        SeekMap nativeMap = nativeSeekMap;
+        if (nativeMap != null && nativeMap.isSeekable()) {
+            return true;
         }
         ChunkIndex local = resolvedIndex;
         if (SeekCoverageRules.coversLocal(local != null ? local.timesUs : null,
@@ -296,22 +308,26 @@ public final class Mp4IndexExtractorsFactory implements ExtractorsFactory {
 
                 /**
                  * extractor 提交 seekMap 时做替换：
-                 * - 真实 sidx 产生的 ChunkIndex 最权威，原样放行；
-                 * - 其余情况（库的 unseekable fallback）用我们的本地/远端组合映射替换。
-                 * 这样 media3 看到的永远是 isSeekable()==真，不会把 seek 解析成 0。
+                 * - 所有 Media3 原生可 Seek 的映射都原样放行，包括 SIDX 的 ChunkIndex
+                 *   和 MFRA/tfra 的 MfraSeekMap；
+                 * - 只有不可 Seek 的 fallback 才用本地/远端组合映射替换。
                  */
                 @Override
                 public void seekMap(SeekMap seekMap) {
-                    //  ChunkIndex emitted 由  extractor comes 从  real Sidx 和 是 more
-                    // authoritative than  scanned 索引. Anything 否则 是  fallback
-                    // (restartable/unseekable) 该  old fork replaced 使用  injected one.
-                    if (seekMap instanceof ChunkIndex) {
+                    // Do not narrow a native seekable map to our one-fragment remote
+                    // proof. Media3 1.11 enables MFRA parsing by default, whose
+                    // MfraSeekMap is seekable but deliberately is not a ChunkIndex.
+                    if (seekMap.isSeekable()) {
+                        nativeSeekMap = seekMap;
                         output.seekMap(seekMap);
-                    } else if (remotePoint != null) {
-                        output.seekMap(new RemoteExtendedSeekMap(chunkIndex, remotePoint,
-                                remoteNextPoint, remoteSpanUs, (long) (durationSec * 1000000.0)));
                     } else {
-                        output.seekMap(chunkIndex);
+                        nativeSeekMap = null;
+                        if (remotePoint != null) {
+                            output.seekMap(new RemoteExtendedSeekMap(chunkIndex, remotePoint,
+                                    remoteNextPoint, remoteSpanUs, (long) (durationSec * 1000000.0)));
+                        } else {
+                            output.seekMap(chunkIndex);
+                        }
                     }
                 }
             });
