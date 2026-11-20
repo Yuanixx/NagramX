@@ -291,10 +291,8 @@ public final class Mp4IndexExtractorsFactory implements ExtractorsFactory {
 
         @Override
         public void init(ExtractorOutput output) {
-            if (chunkIndex == null && remotePoint == null) {
-                delegate.init(output);
-                return;
-            }
+            // Always intercept the callback: Media3 may emit a usable MFRA map even
+            // when StreamX has no local index and remote probing did not run.
             delegate.init(new ExtractorOutput() {
                 @Override
                 public TrackOutput track(int id, int type) {
@@ -325,8 +323,10 @@ public final class Mp4IndexExtractorsFactory implements ExtractorsFactory {
                         if (remotePoint != null) {
                             output.seekMap(new RemoteExtendedSeekMap(chunkIndex, remotePoint,
                                     remoteNextPoint, remoteSpanUs, (long) (durationSec * 1000000.0)));
-                        } else {
+                        } else if (chunkIndex != null) {
                             output.seekMap(chunkIndex);
+                        } else {
+                            output.seekMap(seekMap);
                         }
                     }
                 }
