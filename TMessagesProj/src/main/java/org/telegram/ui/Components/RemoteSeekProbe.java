@@ -529,6 +529,10 @@ public final class RemoteSeekProbe {
                     if ((flags & 0x000010L) != 0L) {
                         q += 4;
                     }
+                    if (q > childEnd) {
+                        malformed = true;
+                        break;
+                    }
                     if ((flags & 0x000020L) != 0L) {
                         if (q + 4 > childEnd) {
                             malformed = true;
@@ -552,6 +556,10 @@ public final class RemoteSeekProbe {
                         int q = p + 16;
                         if ((flags & 0x000001L) != 0L) {
                             q += 4;
+                        }
+                        if (q > childEnd) {
+                            malformed = true;
+                            break;
                         }
                         long flagsForFirstSample = defaultFlags;
                         if ((flags & 0x000004L) != 0L) {
