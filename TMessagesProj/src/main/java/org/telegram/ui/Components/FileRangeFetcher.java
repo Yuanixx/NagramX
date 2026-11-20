@@ -248,7 +248,8 @@ public final class FileRangeFetcher {
                                              long deadlineMs, int requestBlockBytes,
                                              FetchHandle handle) {
         final long started = System.currentTimeMillis();
-        if (requestBlockBytes <= 0 || requestBlockBytes > 1024 * 1024
+        if (requestBlockBytes < 1024 || requestBlockBytes > 1024 * 1024
+                || requestBlockBytes % 1024 != 0
                 || (1024 * 1024) % requestBlockBytes != 0) {
             return failure(FetchResult.Status.ERROR, 0, -1,
                     "invalid request block size", false, 0, started);
