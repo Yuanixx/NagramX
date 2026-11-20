@@ -785,8 +785,8 @@ public class FileLoadOperation {
      * Non-blocking, conservative availability check for streaming reads.
      *
      * Unlike getDownloadedLengthFast(), this method never treats an absent range
-     * snapshot as proof that bytes are present. A null snapshot means "unknown",
-     * so callers must wait for a later download notification and check again.
+     * snapshot as proof that bytes are present. A null or incomplete snapshot
+     * returns -1 ("unknown"), allowing callers to use the authoritative query.
      */
     public long getKnownDownloadedLengthFast(final long offset, final long length) {
         if (length <= 0 || offset < 0) {
