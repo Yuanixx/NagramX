@@ -56,6 +56,7 @@ public class FileLoadOperation {
         this.stream = stream;
         this.streamOffset = streamOffset;
         this.streamPriority = streamPriority;
+        final long requestedOffset = streamOffset;
         Utilities.stageQueue.postRunnable(() -> {
             if (streamListeners == null) {
                 streamListeners = new ArrayList<>();
@@ -65,6 +66,29 @@ public class FileLoadOperation {
             }
             if (!streamListeners.isEmpty()) {
                 Utilities.stageQueue.cancelRunnable(cancelAfterNoStreamListeners);
+            }
+            // loadStreamFile() can attach a new DataSource to an already-running
+            // operation without causing the priority queue to call start() again.
+            // Re-aim here, on the stage queue, rather than leaving the old range
+            // requests occupying every download slot after a seek.
+            if (stream != null && !streamPriority && state == stateDownloading
+                    && currentDownloadChunkSize > 0) {
+                final long nextOffset = requestedOffset / currentDownloadChunkSize
+                        * currentDownloadChunkSize;
+                final long previousOffset = streamStartOffset;
+                if (nextOffset != previousOffset) {
+                    streamStartOffset = nextOffset;
+                    if (StreamRepositionRules.shouldCancelInFlightRequests(
+                            true, true, false,
+                            allowDisordererFileSave && notLoadedBytesRanges != null,
+                            previousOffset, nextOffset)) {
+                        final int cancelledCount = requestInfos != null ? requestInfos.size() : 0;
+                        clearOperation(null, false, false);
+                        FileLog.d("stream seek re-aim old=" + previousOffset + " new="
+                                + nextOffset + " cancelled=" + cancelledCount);
+                    }
+                    startDownloadRequest(-1);
+                }
             }
             if (stream != null && state != stateDownloading && state != stateIdle) {
                 stream.newDataAvailable();
@@ -192,7 +216,8 @@ public class FileLoadOperation {
     protected long lastProgressUpdateTime;
 
     private ArrayList<Range> notLoadedBytesRanges;
-    private volatile ArrayList<Range> notLoadedBytesRangesCopy;
+    /** Immutable availability snapshot published only after a completed disk write. */
+    private volatile DownloadedRangeSnapshot downloadedRangeSnapshot;
     private ArrayList<Range> notRequestedBytesRanges;
     private ArrayList<Range> notCheckedCdnRanges;
     private long requestedBytesCount;
@@ -747,11 +772,17 @@ public class FileLoadOperation {
     }
 
     protected float getDownloadedLengthFromOffset(final float progress) {
-        ArrayList<Range> ranges = notLoadedBytesRangesCopy;
-        if (totalBytesCount == 0 || ranges == null) {
+        if (totalBytesCount <= 0) {
             return 0;
         }
-        return progress + getDownloadedLengthFromOffsetInternal(ranges, (int) (totalBytesCount * progress), totalBytesCount) / (float) totalBytesCount;
+        final DownloadedRangeSnapshot snapshot = downloadedRangeSnapshot;
+        if (snapshot == null) {
+            return 0;
+        }
+        final long offset = (long) (totalBytesCount * progress);
+        final long available = snapshot.availableLength(offset, totalBytesCount);
+        return available < 0 ? 0
+                : progress + available / (float) totalBytesCount;
     }
 
     /**
@@ -765,20 +796,19 @@ public class FileLoadOperation {
      *         capped at {@code length}
      */
     public long getDownloadedLengthFast(final long offset, final long length) {
-        if (length <= 0) {
+        if (length <= 0 || offset < 0) {
             return 0;
         }
-        try {
-            final ArrayList<Range> ranges = notLoadedBytesRangesCopy;
-            if (ranges == null || state == stateFinished) {
-                // Finished, or nothing recorded yet: treat the whole span as
-                // present rather than blocking a decoder on bookkeeping.
-                return length;
-            }
-            return getDownloadedLengthFromOffsetInternal(ranges, offset, length);
-        } catch (Throwable e) {
-            return length;
+        if (state == stateFinished) {
+            return Math.min(length, Math.max(0L, totalBytesCount - offset));
         }
+        final DownloadedRangeSnapshot snapshot = downloadedRangeSnapshot;
+        if (snapshot == null) {
+            return 0;
+        }
+        final long available = snapshot.availableLength(offset, length);
+        // Unknown is not proof that a sparse-file range contains real bytes.
+        return Math.max(0L, available);
     }
 
     /**
@@ -795,21 +825,8 @@ public class FileLoadOperation {
         if (state == stateFinished) {
             return Math.min(length, Math.max(0L, totalBytesCount - offset));
         }
-        try {
-            final ArrayList<Range> ranges = notLoadedBytesRangesCopy;
-            if (ranges == null) {
-                return -1L;
-            }
-            if (ranges.isEmpty()) {
-                if (totalBytesCount > 0 && downloadedBytes >= totalBytesCount) {
-                    return Math.min(length, Math.max(0L, totalBytesCount - offset));
-                }
-                return -1L;
-            }
-            return getDownloadedLengthFromOffsetInternal(ranges, offset, length);
-        } catch (Throwable e) {
-            return -1L;
-        }
+        final DownloadedRangeSnapshot snapshot = downloadedRangeSnapshot;
+        return snapshot == null ? -1L : snapshot.availableLength(offset, length);
     }
 
     protected long[] getDownloadedLengthFromOffset(final long offset, final long length) {
@@ -866,9 +883,23 @@ public class FileLoadOperation {
 
     private void copyNotLoadedRanges() {
         if (notLoadedBytesRanges == null) {
+            downloadedRangeSnapshot = null;
             return;
         }
-        notLoadedBytesRangesCopy = new ArrayList<>(notLoadedBytesRanges);
+        final int count = notLoadedBytesRanges.size();
+        final long[] starts = new long[count];
+        final long[] ends = new long[count];
+        for (int i = 0; i < count; i++) {
+            final Range range = notLoadedBytesRanges.get(i);
+            starts[i] = range.start;
+            ends[i] = range.end;
+        }
+        // Publish primitive, immutable bounds. A shallow ArrayList copy is unsafe:
+        // addPart/removePart mutate the Range objects already visible to reader threads.
+        final boolean complete = count == 0 && totalBytesCount > 0
+                && downloadedBytes >= totalBytesCount;
+        downloadedRangeSnapshot = new DownloadedRangeSnapshot(
+                starts, ends, totalBytesCount, complete);
     }
 
     public void pause() {
@@ -945,7 +976,19 @@ public class FileLoadOperation {
                         streamPriorityStartOffset = offset;
                     }
                 } else {
-                    streamStartOffset = streamOffset / currentDownloadChunkSize * currentDownloadChunkSize;
+                    final long nextOffset = streamOffset / currentDownloadChunkSize
+                            * currentDownloadChunkSize;
+                    final long previousOffset = streamStartOffset;
+                    streamStartOffset = nextOffset;
+                    if (alreadyStarted && StreamRepositionRules.shouldCancelInFlightRequests(
+                            true, true, false,
+                            allowDisordererFileSave && notLoadedBytesRanges != null,
+                            previousOffset, nextOffset)) {
+                        final int cancelledCount = requestInfos != null ? requestInfos.size() : 0;
+                        clearOperation(null, false, false);
+                        FileLog.d("stream seek re-aim old=" + previousOffset + " new="
+                                + nextOffset + " cancelled=" + cancelledCount);
+                    }
                 }
                 if (!streamListeners.contains(stream)) {
                     streamListeners.add(stream);

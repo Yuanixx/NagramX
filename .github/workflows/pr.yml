@@ -7,54 +7,65 @@ on:
       - '**.md'
       - '**.xml'
 
+permissions:
+  contents: read
+
 jobs:
-  build:
-    name: Gradle Build
+  regression-tests:
+    name: JVM Regression Tests
     runs-on: ubuntu-latest
-    env:
-      NATIVE_TARGET: "arm64-v8a"
     steps:
       - name: Checkout
         uses: actions/checkout@v7
         with:
           fetch-depth: 1
-          submodules: recursive
+
       - name: Set up JDK
         uses: actions/setup-java@v5
         with:
           distribution: 'temurin'
           java-version: '21'
-      - name: Set up Gradle
-        uses: gradle/actions/setup-gradle@v6
-      - name: Set up Android SDK Tools
-        uses: android-actions/setup-android@v4
-        with:
-          packages: "build-tools;36.0.0 ndk;27.2.12479018 platforms;android-37.0"
-      - name: Configure Android SDK Path
-        run: |
-          echo "sdk.dir=${ANDROID_HOME}" >> local.properties
-      - name: Modify Gradle JVM Args
-        run: |
-          MEMORY_KB=$(awk '/MemTotal/ {print $2}' /proc/meminfo)
-          MEMORY_GB=$((MEMORY_KB / 1024 / 1024))
-          echo "Detected memory size: ${MEMORY_GB}GB"
-          if [ $MEMORY_GB -ge 12 ]; then
-            sed -i '/^org\.gradle\.jvmargs=/d' gradle.properties
-            echo "org.gradle.jvmargs=-Xmx8G -XX:MaxMetaspaceSize=2G -XX:+UseParallelGC -XX:+HeapDumpOnOutOfMemoryError -Dfile.encoding=UTF-8" >> gradle.properties
-          fi
-          cat gradle.properties
-      - name: Debug Build
-        run: |
-          export LOCAL_PROPERTIES="${{ secrets.LOCAL_PROPERTIES }}"
-          export DEBUG_BUILD=true
-          sed -i 's/signingConfig = signingConfigs.release//g' TMessagesProj/build.gradle
-          ./gradlew TMessagesProj:assembleDebug
 
-          APK=$(find TMessagesProj/build/outputs/apk -name '*arm64-v8a*.apk')
-          APK=$(dirname $APK)
-          echo "APK=$APK" >> $GITHUB_ENV
-      - name: Upload Artifacts
-        uses: actions/upload-artifact@v7
-        with:
-          name: Debug
-          path: ${{ env.APK }}
+      # Keep PR validation aligned with staging.yml. APK compilation happens
+      # only once, through the cached arm64-v8a Staging workflow after merge.
+      - name: Check preview and seek rules
+        run: |
+          mkdir -p /tmp/streamx-tests
+          javac -d /tmp/streamx-tests \
+            TMessagesProj/src/test/java/org/telegram/ui/Components/preview/PreviewRulesTest.java \
+            TMessagesProj/src/main/java/org/telegram/ui/Components/preview/PreviewRules.java \
+            TMessagesProj/src/main/java/org/telegram/messenger/FragmentIndexRules.java \
+            TMessagesProj/src/main/java/org/telegram/ui/Components/preview/TailMoovLocator.java \
+            TMessagesProj/src/main/java/org/telegram/ui/Components/preview/DecodeGate.java \
+            TMessagesProj/src/main/java/org/telegram/ui/Components/preview/RemoteFailureTracker.java \
+            TMessagesProj/src/main/java/org/telegram/ui/Components/preview/SeekRules.java
+          java -cp /tmp/streamx-tests org.telegram.ui.Components.preview.PreviewRulesTest
+
+          javac -d /tmp/streamx-tests \
+            TMessagesProj/src/test/java/org/telegram/ui/Components/preview/SeekRulesTest.java \
+            TMessagesProj/src/main/java/org/telegram/ui/Components/preview/SeekRules.java
+          java -cp /tmp/streamx-tests org.telegram.ui.Components.preview.SeekRulesTest
+
+          javac -d /tmp/streamx-tests \
+            TMessagesProj/src/test/java/org/telegram/ui/Components/seek/SeekCoverageRulesTest.java \
+            TMessagesProj/src/test/java/org/telegram/ui/Components/seek/RemoteFragmentRulesTest.java \
+            TMessagesProj/src/test/java/org/telegram/ui/Components/seek/PendingSeekRulesTest.java \
+            TMessagesProj/src/main/java/org/telegram/ui/Components/seek/SeekCoverageRules.java \
+            TMessagesProj/src/main/java/org/telegram/ui/Components/seek/RemoteFragmentRules.java \
+            TMessagesProj/src/main/java/org/telegram/ui/Components/seek/PendingSeekRules.java
+          java -cp /tmp/streamx-tests org.telegram.ui.Components.seek.SeekCoverageRulesTest
+          java -cp /tmp/streamx-tests org.telegram.ui.Components.seek.RemoteFragmentRulesTest
+          java -cp /tmp/streamx-tests org.telegram.ui.Components.seek.PendingSeekRulesTest
+
+          javac -d /tmp/streamx-tests \
+            TMessagesProj/src/main/java/org/telegram/messenger/FragmentMoofParser.java \
+            TMessagesProj/src/test/java/org/telegram/messenger/FragmentMoofParserTest.java
+          java -cp /tmp/streamx-tests org.telegram.messenger.FragmentMoofParserTest
+
+          javac -d /tmp/streamx-tests \
+            TMessagesProj/src/main/java/org/telegram/messenger/DownloadedRangeSnapshot.java \
+            TMessagesProj/src/main/java/org/telegram/messenger/StreamRepositionRules.java \
+            TMessagesProj/src/test/java/org/telegram/messenger/DownloadedRangeSnapshotTest.java \
+            TMessagesProj/src/test/java/org/telegram/messenger/StreamRepositionRulesTest.java
+          java -cp /tmp/streamx-tests org.telegram.messenger.DownloadedRangeSnapshotTest
+          java -cp /tmp/streamx-tests org.telegram.messenger.StreamRepositionRulesTest

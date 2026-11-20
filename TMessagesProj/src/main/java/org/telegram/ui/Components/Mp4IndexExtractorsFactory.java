@@ -39,7 +39,7 @@ import java.util.Map;
  *
  * 为什么包装 ExtractorOutput：media3 没有旧 fork 的 setChunkIndex 钩子，
  * 只能在 extractor 提交 seekMap 时，把库的 fallback（不可 seek）替换成我们准备好的索引。
- * 文件自带真实 sidx 时优先保留库自己的 ChunkIndex，因为那是服务端认证过的索引。
+ * 文件自带真实 sidx 或 mfra/tfra 时优先保留 Media3 的原生 SeekMap，因为它比推导索引更权威。
  *
  * 三个时间概念必须严格分开，混用就会重现“拖到未下载位置跳回开头”：
  * 1) declaredDurationUs：媒体声明的完整时长，只用于显示和时间轴，不代表能 seek 到任意位置；
@@ -67,6 +67,10 @@ public final class Mp4IndexExtractorsFactory implements ExtractorsFactory {
     @Nullable
     private volatile ChunkIndex resolvedIndex;
     private volatile boolean attempted;
+
+    /** Native SIDX/MFRA maps emitted by Media3 outrank inferred fallbacks. */
+    @Nullable
+    private volatile SeekMap nativeSeekMap;
 
     @Nullable
     private TLRPC.Document seekDocument;
@@ -132,17 +136,25 @@ public final class Mp4IndexExtractorsFactory implements ExtractorsFactory {
      * 不能在这里触发探测，否则 UI 线程会被网络请求阻塞。
      */
     public boolean hasIndex() {
-        return attempted && (resolvedIndex != null || remotePoint != null);
+        SeekMap nativeMap = nativeSeekMap;
+        return attempted && (resolvedIndex != null || remotePoint != null
+                || (nativeMap != null && nativeMap.isSeekable()));
     }
 
     /**
      * 当前映射能否把目标时间解析成真实字节位置。
-     * 本地只认索引实际覆盖的区间；远端只认探测证明过的左闭右开区间。
-     * 不再用固定秒数容差，超出区间必须重新探测（并因此重新 prepare）。
+     * 优先接受 Media3 原生完整索引；没有原生索引时，本地只认实际覆盖区间，
+     * 远端只认探测证明过的左闭右开区间，不使用固定秒数容差。
      */
     public boolean canSeekTo(long timeUs) {
         if (!attempted) {
             return false;
+        }
+        // Native Media3 maps (notably MFRA/tfra TrackAwareSeekMap) describe the
+        // file's actual random-access points and outrank inferred local/remote indexes.
+        SeekMap nativeMap = nativeSeekMap;
+        if (nativeMap != null && nativeMap.isSeekable()) {
+            return true;
         }
         ChunkIndex local = resolvedIndex;
         if (SeekCoverageRules.coversLocal(local != null ? local.timesUs : null,
@@ -254,7 +266,7 @@ public final class Mp4IndexExtractorsFactory implements ExtractorsFactory {
         return extractors;
     }
 
-    private static final class ChunkIndexInjectingExtractor implements Extractor {
+    private final class ChunkIndexInjectingExtractor implements Extractor {
 
         private final Extractor delegate;
         @Nullable
@@ -279,10 +291,8 @@ public final class Mp4IndexExtractorsFactory implements ExtractorsFactory {
 
         @Override
         public void init(ExtractorOutput output) {
-            if (chunkIndex == null && remotePoint == null) {
-                delegate.init(output);
-                return;
-            }
+            // Always intercept the callback: Media3 may emit a usable MFRA map even
+            // when StreamX has no local index and remote probing did not run.
             delegate.init(new ExtractorOutput() {
                 @Override
                 public TrackOutput track(int id, int type) {
@@ -296,22 +306,28 @@ public final class Mp4IndexExtractorsFactory implements ExtractorsFactory {
 
                 /**
                  * extractor 提交 seekMap 时做替换：
-                 * - 真实 sidx 产生的 ChunkIndex 最权威，原样放行；
-                 * - 其余情况（库的 unseekable fallback）用我们的本地/远端组合映射替换。
-                 * 这样 media3 看到的永远是 isSeekable()==真，不会把 seek 解析成 0。
+                 * - 所有 Media3 原生可 Seek 的映射都原样放行，包括 SIDX 的 ChunkIndex
+                 *   和 MFRA/tfra 的 MfraSeekMap；
+                 * - 只有不可 Seek 的 fallback 才用本地/远端组合映射替换。
                  */
                 @Override
                 public void seekMap(SeekMap seekMap) {
-                    //  ChunkIndex emitted 由  extractor comes 从  real Sidx 和 是 more
-                    // authoritative than  scanned 索引. Anything 否则 是  fallback
-                    // (restartable/unseekable) 该  old fork replaced 使用  injected one.
-                    if (seekMap instanceof ChunkIndex) {
+                    // Do not narrow a native seekable map to our one-fragment remote
+                    // proof. Media3 1.11 enables MFRA parsing by default, whose
+                    // MfraSeekMap is seekable but deliberately is not a ChunkIndex.
+                    if (seekMap.isSeekable()) {
+                        nativeSeekMap = seekMap;
                         output.seekMap(seekMap);
-                    } else if (remotePoint != null) {
-                        output.seekMap(new RemoteExtendedSeekMap(chunkIndex, remotePoint,
-                                remoteNextPoint, remoteSpanUs, (long) (durationSec * 1000000.0)));
                     } else {
-                        output.seekMap(chunkIndex);
+                        nativeSeekMap = null;
+                        if (remotePoint != null) {
+                            output.seekMap(new RemoteExtendedSeekMap(chunkIndex, remotePoint,
+                                    remoteNextPoint, remoteSpanUs, (long) (durationSec * 1000000.0)));
+                        } else if (chunkIndex != null) {
+                            output.seekMap(chunkIndex);
+                        } else {
+                            output.seekMap(seekMap);
+                        }
                     }
                 }
             });
