@@ -1614,10 +1614,17 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
         if (pendingStreamSeekRebuilt && pendingStreamSeekMs == targetMs && pendingStreamSeekDocId == doc.id) {
             return true;
         }
-        // 新请求覆盖旧请求：只有最后一个目标会存活，/B 的迟到 READY 无法消费 C。
-        pendingStreamSeekMs = targetMs;
-        pendingStreamSeekDocId = doc.id;
-        pendingStreamSeekRequestId = ++seekRequestIdSeq;
+        // 同一个目标的定时重试必须沿用原请求身份；只有用户发起新目标时才分配新 ID。
+        // 否则每次重试都换 ID，旧回调永远匹配不上，还会反复重建播放器。
+        final boolean sameTarget = pendingStreamSeekMs == targetMs
+                && pendingStreamSeekDocId == doc.id
+                && pendingStreamSeekRequestId > 0L;
+        if (!sameTarget) {
+            // 新目标覆盖旧目标：A/B 的迟到 READY 无法消费 C。
+            pendingStreamSeekMs = targetMs;
+            pendingStreamSeekDocId = doc.id;
+            pendingStreamSeekRequestId = ++seekRequestIdSeq;
+        }
         nextBoundRequestId = pendingStreamSeekRequestId;
         pendingSeekRetryAtMs = 0L;
         pendingStreamSeekRebuilt = false;
@@ -11658,11 +11665,6 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
                         }
                     }
                 };
-                // 把本次延迟 seek 的请求 ID 绑定到新播放器；监听器在注册时捕获它，
-                // READY 回调因此携带来源请求，而不是消费时现读的当前 pending ID。
-                if (videoPlayer != null) {
-                    videoPlayer.setBoundRequestId(nextBoundRequestId);
-                }
                 videoPlayer.setOnQualityChangeListener(this::updateQualityItems);
                 if (PipUtils.checkPermissions(parentActivity) == PipPermissions.PIP_GRANTED_PIP) {
                     pipSource = new PipSource.Builder(parentActivity, this)
@@ -11674,6 +11676,10 @@ public class PhotoViewer implements NotificationCenter.NotificationCenterDelegat
                 }
                 newPlayerCreated = true;
             }
+            // 每次 prepare 前都更新请求 ID（包装对象可能被复用，不能只在 new 分支里设置）。
+            // VideoPlayer 在 ensurePlayerCreated 里注册新监听器时会捕获这个值，
+            // READY 回调因此携带来源请求，而不是消费时现读的当前 pending ID。
+            videoPlayer.setBoundRequestId(nextBoundRequestId);
             // FMPIDX: one factory per prepare; 空值 清空 any 索引 left 在  reused (PiP) player.
             videoPlayer.setExtractorsFactory(createIndexFactory(videoUrises, uri, videoByteOffset, token));
             if (videoTextureView != null) {

@@ -396,6 +396,9 @@ public class VideoPlayer implements Player.Listener, AnalyticsListener, Notifica
     /** 当前正在分发的回调所携带的来源身份，由监听器在注册时捕获并写入。 */
     private volatile int callbackGeneration = -1;
     private volatile long callbackRequestId = -1L;
+    /** 当前注册的代次感知监听器；每次 prepare 都要先移除旧的再注册新的。 */
+    @Nullable
+    private Player.Listener generationAwareListener;
 
     /**
      * 设置Bound请求标识。
@@ -491,8 +494,7 @@ public class VideoPlayer implements Player.Listener, AnalyticsListener, Notifica
     boolean audioDisabled;
 
     /**
-     * 视频Player。
-     * @return public 类型的结果
+     * 构造方法：创建 VideoPlayer 实例并初始化其内部状态。
      */
     public VideoPlayer() {
         this(true, false);
@@ -500,10 +502,9 @@ public class VideoPlayer implements Player.Listener, AnalyticsListener, Notifica
 
     static int playerCounter = 0;
     /**
-     * 视频Player。
+     * 构造方法：创建 VideoPlayer 实例并初始化其内部状态。
      * @param pauseOther 布尔值类型的参数 pauseOther
      * @param audioDisabled 布尔值类型的参数 audioDisabled
-     * @return public 类型的结果
      */
     public VideoPlayer(boolean pauseOther, boolean audioDisabled) {
         this.audioDisabled = audioDisabled;
@@ -726,9 +727,6 @@ public class VideoPlayer implements Player.Listener, AnalyticsListener, Notifica
             player = builder.build();
 
             player.addAnalyticsListener(this);
-            // 监听器在注册时就捕获当前代次与请求 ID。回调从来源处携带这两个值，
-            // 而不是消费时再读当前字段——后者会让旧 prepare 的迟到回调伪装成新回调。
-            player.addListener(createGenerationAwareListener(prepareGeneration, boundRequestId));
             if (textureView != null) {
                 attachTextureView(textureView);
             } else if (surface != null) {
@@ -739,6 +737,16 @@ public class VideoPlayer implements Player.Listener, AnalyticsListener, Notifica
             player.setPlayWhenReady(autoplay);
             player.setRepeatMode(looping ? Player.REPEAT_MODE_ALL : Player.REPEAT_MODE_OFF);
         }
+        // 关键：监听器注册不能只在 player==null 分支里做。底层 ExoPlayer 在重建播放源时
+        // 通常不会销毁，如果沿用第一次 prepare 注册的监听器，它捕获的 generation/requestId
+        // 永远是旧的，新 prepare 的 READY 会被 PhotoViewer 当成旧回调拒绝。
+        // 因此每次 prepare 都先移除旧监听器，再注册一个捕获当前身份的新监听器。
+        // 已排队的旧回调仍携带旧身份，会被消费端拒绝，不会污染新请求。
+        if (generationAwareListener != null) {
+            player.removeListener(generationAwareListener);
+        }
+        generationAwareListener = createGenerationAwareListener(prepareGeneration, boundRequestId);
+        player.addListener(generationAwareListener);
         if (mixedAudio) {
             if (audioPlayer == null) {
                 audioPlayer = new ExoPlayer.Builder(ApplicationLoader.applicationContext)
@@ -1835,9 +1843,8 @@ public class VideoPlayer implements Player.Listener, AnalyticsListener, Notifica
         public final ArrayList<VideoUri> uris = new ArrayList<>();
 
         /**
-         * Quality。
+         * 构造方法：创建 Quality 实例并初始化其内部状态。
          * @param uri VideoUri类型的参数 uri
-         * @return public 类型的结果
          */
         public Quality(VideoUri uri) {
             original = uri.original;
@@ -3033,9 +3040,8 @@ public class VideoPlayer implements Player.Listener, AnalyticsListener, Notifica
     private class AudioVisualizerRenderersFactory extends SdrFallbackRenderersFactory {
 
         /**
-         * 音频VisualizerRenderersFactory。
+         * 构造方法：创建 AudioVisualizerRenderersFactory 实例并初始化其内部状态。
          * @param context 上下文类型的参数 context
-         * @return public 类型的结果
          */
         public AudioVisualizerRenderersFactory(Context context) {
             super(context);
@@ -3074,8 +3080,7 @@ public class VideoPlayer implements Player.Listener, AnalyticsListener, Notifica
         int position = 0;
 
         /**
-         * VisualizerBufferSink。
-         * @return public 类型的结果
+         * 构造方法：创建 VisualizerBufferSink 实例并初始化其内部状态。
          */
         public VisualizerBufferSink() {
             byteBuffer = ByteBuffer.allocateDirect(MAX_BUFFER_SIZE);
@@ -3401,10 +3406,9 @@ public class VideoPlayer implements Player.Listener, AnalyticsListener, Notifica
         private final long byteOffset;
 
         /**
-         * 偏移数据Source。
+         * 构造方法：创建 OffsetDataSource 实例并初始化其内部状态。
          * @param upstream DataSource类型的参数 upstream
          * @param byteOffset 长整型类型的参数 byteOffset
-         * @return public 类型的结果
          */
         public OffsetDataSource(DataSource upstream, long byteOffset) {
             this.upstream = upstream;
