@@ -91,6 +91,13 @@ jobs:
             TMessagesProj/src/main/java/org/telegram/messenger/FragmentMoofParser.java \
             TMessagesProj/src/test/java/org/telegram/messenger/FragmentMoofParserTest.java
           java -cp /tmp/preview-rules org.telegram.messenger.FragmentMoofParserTest
+          javac -d /tmp/preview-rules \
+            TMessagesProj/src/main/java/org/telegram/messenger/DownloadedRangeSnapshot.java \
+            TMessagesProj/src/main/java/org/telegram/messenger/StreamRepositionRules.java \
+            TMessagesProj/src/test/java/org/telegram/messenger/DownloadedRangeSnapshotTest.java \
+            TMessagesProj/src/test/java/org/telegram/messenger/StreamRepositionRulesTest.java
+          java -cp /tmp/preview-rules org.telegram.messenger.DownloadedRangeSnapshotTest
+          java -cp /tmp/preview-rules org.telegram.messenger.StreamRepositionRulesTest
       - name: Set up Ccache
         uses: hendrikmuhs/ccache-action@v1.2.23
         with:
