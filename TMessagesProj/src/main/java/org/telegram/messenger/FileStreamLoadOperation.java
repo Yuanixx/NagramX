@@ -79,6 +79,7 @@ public class FileStreamLoadOperation extends BaseDataSource implements FileLoadO
     @Override
     public long open(DataSpec dataSpec) throws IOException {
         uri = dataSpec.uri;
+        transferStarted = false;
         transferInitializing(dataSpec);
         currentAccount = Utilities.parseInt(uri.getQueryParameter("account"));
         parentObject = FileLoader.getInstance(currentAccount).getParentObject(Utilities.parseInt(uri.getQueryParameter("rid")));
@@ -102,9 +103,9 @@ public class FileStreamLoadOperation extends BaseDataSource implements FileLoadO
         requestedLength = dataSpec.length;
         loadOperation = FileLoader.getInstance(currentAccount).loadStreamFile(this, document, null, parentObject, currentOffset, false, getCurrentPriority());
         bytesTransferred = 0;
-        bytesRemaining = document.size - dataSpec.position;
+        bytesRemaining = Math.max(0L, document.size - dataSpec.position);
         if (requestedLength != C.LENGTH_UNSET) {
-            bytesRemaining = Math.min(bytesRemaining, requestedLength - bytesTransferred);
+            bytesRemaining = Math.min(bytesRemaining, Math.max(0L, requestedLength - bytesTransferred));
         }
         opened = true;
         android.util.Log.w("STREAMDBG", "open id=" + document.id + " mime=" + document.mime_type + " size=" + document.size + " pos=" + dataSpec.position + " len=" + dataSpec.length);
@@ -117,9 +118,9 @@ public class FileStreamLoadOperation extends BaseDataSource implements FileLoadO
                     file = new RandomAccessFile(currentFile, "r");
                     file.seek(currentOffset);
                     if (loadOperation.isFinished()) {
-                        bytesRemaining = currentFile.length() - currentOffset;
+                        bytesRemaining = Math.max(0L, currentFile.length() - currentOffset);
                         if (requestedLength != C.LENGTH_UNSET) {
-                            bytesRemaining = Math.min(bytesRemaining, requestedLength - bytesTransferred);
+                            bytesRemaining = Math.min(bytesRemaining, Math.max(0L, requestedLength - bytesTransferred));
                         }
                     }
                 } catch (Throwable e) {
