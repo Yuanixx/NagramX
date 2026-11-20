@@ -266,7 +266,7 @@ public final class Mp4IndexExtractorsFactory implements ExtractorsFactory {
         return extractors;
     }
 
-    private static final class ChunkIndexInjectingExtractor implements Extractor {
+    private final class ChunkIndexInjectingExtractor implements Extractor {
 
         private final Extractor delegate;
         @Nullable
