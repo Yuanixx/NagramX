@@ -281,7 +281,7 @@ public final class RemoteSeekProbe {
                         }
                     }
                 }
-                if (found.timeUs <= targetTimeUs && found.spanUs <= 0L) {
+                if (found == null || (found.timeUs <= targetTimeUs && found.spanUs <= 0L)) {
                     FileLog.d("FMPIDX: remote target fragment has no proven successor target="
                             + targetTimeUs + " windowBytes=" + probeData.length);
                     return null;
