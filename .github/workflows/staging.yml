@@ -149,7 +149,7 @@ jobs:
             keytool -genkeypair -v -keystore TMessagesProj/release.keystore \
               -storepass android -keypass android -alias androiddebugkey \
               -keyalg RSA -keysize 2048 -validity 10000 \
-              -dname "CN=NagramX CI, OU=CI, O=NagramX, L=Internet, ST=Internet, C=US"
+              -dname "CN=StreamX CI, OU=CI, O=NagramX, L=Internet, ST=Internet, C=US"
           fi
           {
             echo "KEYSTORE_PASS=android"
