@@ -39,7 +39,7 @@ import java.util.Map;
  *
  * 为什么包装 ExtractorOutput：media3 没有旧 fork 的 setChunkIndex 钩子，
  * 只能在 extractor 提交 seekMap 时，把库的 fallback（不可 seek）替换成我们准备好的索引。
- * 文件自带真实 sidx 时优先保留库自己的 ChunkIndex，因为那是服务端认证过的索引。
+ * 文件自带真实 sidx 或 mfra/tfra 时优先保留 Media3 的原生 SeekMap，因为它比推导索引更权威。
  *
  * 三个时间概念必须严格分开，混用就会重现“拖到未下载位置跳回开头”：
  * 1) declaredDurationUs：媒体声明的完整时长，只用于显示和时间轴，不代表能 seek 到任意位置；
@@ -143,8 +143,8 @@ public final class Mp4IndexExtractorsFactory implements ExtractorsFactory {
 
     /**
      * 当前映射能否把目标时间解析成真实字节位置。
-     * 本地只认索引实际覆盖的区间；远端只认探测证明过的左闭右开区间。
-     * 不再用固定秒数容差，超出区间必须重新探测（并因此重新 prepare）。
+     * 优先接受 Media3 原生完整索引；没有原生索引时，本地只认实际覆盖区间，
+     * 远端只认探测证明过的左闭右开区间，不使用固定秒数容差。
      */
     public boolean canSeekTo(long timeUs) {
         if (!attempted) {
