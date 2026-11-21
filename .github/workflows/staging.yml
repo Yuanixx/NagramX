@@ -58,6 +58,73 @@ jobs:
         with:
           distribution: 'temurin'
           java-version: '21'
+      # Hosted runner capacity can change between images/allocations. Detect the
+      # effective cgroup limits and size Gradle/R8 accordingly instead of using
+      # a fixed 6G heap on a 7G runner or underutilizing a 15G runner.
+      - name: Detect runner resources and tune Gradle
+        shell: bash
+        run: |
+          set -euo pipefail
+          CPU_COUNT="$(nproc)"
+          MEM_BYTES=""
+          if [[ -r /sys/fs/cgroup/memory.max ]]; then
+            CGROUP_MEM="$(cat /sys/fs/cgroup/memory.max)"
+            if [[ "$CGROUP_MEM" =~ ^[0-9]+$ ]]; then
+              MEM_BYTES="$CGROUP_MEM"
+            fi
+          fi
+          if [[ -z "$MEM_BYTES" ]] && [[ -r /sys/fs/cgroup/memory/memory.limit_in_bytes ]]; then
+            CGROUP_MEM="$(cat /sys/fs/cgroup/memory/memory.limit_in_bytes)"
+            if [[ "$CGROUP_MEM" =~ ^[0-9]+$ ]] && (( CGROUP_MEM < 1099511627776 )); then
+              MEM_BYTES="$CGROUP_MEM"
+            fi
+          fi
+          if [[ -z "$MEM_BYTES" ]]; then
+            MEM_BYTES="$(( $(awk '/MemTotal/ {print $2}' /proc/meminfo) * 1024 ))"
+          fi
+
+          if (( MEM_BYTES >= 12884901888 && CPU_COUNT >= 4 )); then
+            WORKERS=4
+            HEAP=8g
+            METASPACE=2g
+            NATIVE_PARALLELISM=2
+          elif (( MEM_BYTES >= 8589934592 && CPU_COUNT >= 3 )); then
+            WORKERS=3
+            HEAP=5g
+            METASPACE=1g
+            NATIVE_PARALLELISM=1
+          else
+            WORKERS=$CPU_COUNT
+            (( WORKERS > 2 )) && WORKERS=2
+            (( WORKERS < 1 )) && WORKERS=1
+            if (( MEM_BYTES >= 6442450944 )); then
+              HEAP=4g
+            else
+              HEAP=3g
+            fi
+            METASPACE=768m
+            NATIVE_PARALLELISM=1
+          fi
+
+          sed -i '/^org\.gradle\.jvmargs=/d;/^org\.gradle\.workers\.max=/d;/^android\.native\.buildParallelism=/d' gradle.properties
+          {
+            echo "org.gradle.jvmargs=-Xmx${HEAP} -XX:MaxMetaspaceSize=${METASPACE} -XX:+UseParallelGC -XX:+HeapDumpOnOutOfMemoryError -Dfile.encoding=UTF-8"
+            echo "org.gradle.workers.max=${WORKERS}"
+            echo "android.native.buildParallelism=${NATIVE_PARALLELISM}"
+          } >> gradle.properties
+
+          echo "Detected CPUs: ${CPU_COUNT}"
+          echo "Effective memory: $(( MEM_BYTES / 1024 / 1024 / 1024 )) GiB"
+          echo "Gradle workers: ${WORKERS}"
+          echo "Gradle heap: ${HEAP}; metaspace: ${METASPACE}"
+          echo "Native build parallelism: ${NATIVE_PARALLELISM}"
+          echo "Cgroup CPU quota:"
+          cat /sys/fs/cgroup/cpu.max 2>/dev/null || true
+          echo "Cgroup memory limit:"
+          cat /sys/fs/cgroup/memory.max 2>/dev/null || true
+          free -h
+          nproc
+          grep -E '^(org\.gradle\.jvmargs|org\.gradle\.workers\.max|android\.native\.buildParallelism)=' gradle.properties
       # 先跑纯规则测试（含本次新增的 seek 覆盖/远端片段/待重放状态机规则）。
       # 任何一项失败都会让该步骤退出码非零，后续 Gradle 构建不会执行，
       # 避免“测试失败但构建成功”的假通过。
