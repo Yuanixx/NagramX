@@ -8,6 +8,7 @@ public final class NativeSeekMapRulesTest {
     public static void main(String[] args) {
         testSidxChunkIndexPassesThrough();
         testMfraTrackAwareMapPassesThrough();
+        testMfraWithoutPrimaryTrackIndexIsRejected();
         testUnknownSeekableMapIsRejected();
         testUnseekableMapNeverPassesThrough();
         testHasManagedIndex();
@@ -25,6 +26,11 @@ public final class NativeSeekMapRulesTest {
     private static void testMfraTrackAwareMapPassesThrough() {
         check(NativeSeekMapRules.shouldPassThrough(false, true, true),
                 "a parsed MFRA TrackAwareSeekMap is trusted and passed through");
+    }
+
+    private static void testMfraWithoutPrimaryTrackIndexIsRejected() {
+        check(!NativeSeekMapRules.shouldPassThrough(false, false, true),
+                "an MFRA map without an index for the primary video/audio track is rejected");
     }
 
     private static void testUnknownSeekableMapIsRejected() {

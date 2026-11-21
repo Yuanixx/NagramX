@@ -34,6 +34,7 @@ import org.telegram.ui.Components.seek.NativeSeekMapRules;
 import org.telegram.ui.Components.seek.SeekCoverageRules;
 
 import java.io.IOException;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 
@@ -302,11 +303,19 @@ public final class Mp4IndexExtractorsFactory implements ExtractorsFactory {
 
         @Override
         public void init(ExtractorOutput output) {
-            // Always intercept the callback: Media3 may emit a usable MFRA map even
-            // when StreamX has no local index and remote probing did not run.
+            // TrackAwareSeekMap can expose separate indexes per track. ProgressiveMediaPeriod
+            // currently calls the track-agnostic getSeekPoints(), so accept MFRA only when its
+            // default primary stream (video when present, otherwise audio) has an index.
+            final List<Integer> videoTrackIds = new ArrayList<>();
+            final List<Integer> audioTrackIds = new ArrayList<>();
             delegate.init(new ExtractorOutput() {
                 @Override
                 public TrackOutput track(int id, int type) {
+                    if (type == C.TRACK_TYPE_VIDEO) {
+                        videoTrackIds.add(id);
+                    } else if (type == C.TRACK_TYPE_AUDIO) {
+                        audioTrackIds.add(id);
+                    }
                     return output.track(id, type);
                 }
 
@@ -324,9 +333,21 @@ public final class Mp4IndexExtractorsFactory implements ExtractorsFactory {
                  */
                 @Override
                 public void seekMap(SeekMap seekMap) {
+                    boolean hasTrackAwarePrimaryIndex = false;
+                    if (seekMap instanceof TrackAwareSeekMap && seekMap.isSeekable()) {
+                        TrackAwareSeekMap trackAwareSeekMap = (TrackAwareSeekMap) seekMap;
+                        List<Integer> primaryTrackCandidates =
+                                videoTrackIds.isEmpty() ? audioTrackIds : videoTrackIds;
+                        for (int trackId : primaryTrackCandidates) {
+                            if (trackAwareSeekMap.isSeekable(trackId)) {
+                                hasTrackAwarePrimaryIndex = true;
+                                break;
+                            }
+                        }
+                    }
                     final boolean passThrough = NativeSeekMapRules.shouldPassThrough(
                             seekMap instanceof ChunkIndex,
-                            seekMap instanceof TrackAwareSeekMap,
+                            hasTrackAwarePrimaryIndex,
                             seekMap.isSeekable());
                     if (passThrough) {
                         // 真实 sidx ChunkIndex：原样放行。

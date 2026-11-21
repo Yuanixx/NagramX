@@ -29,8 +29,8 @@ public final class NativeSeekMapRules {
 
     /** Whether a recognized native map may be passed through. */
     public static boolean shouldPassThrough(
-            boolean isChunkIndex, boolean isTrackAware, boolean isSeekable) {
-        return isSeekable && (isChunkIndex || isTrackAware);
+            boolean isChunkIndex, boolean hasTrackAwarePrimaryIndex, boolean isSeekable) {
+        return isSeekable && (isChunkIndex || hasTrackAwarePrimaryIndex);
     }
 
     /** Whether any usable local, remote, or native mapping has been initialized. */
