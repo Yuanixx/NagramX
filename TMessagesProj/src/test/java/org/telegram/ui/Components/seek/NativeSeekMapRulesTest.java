@@ -11,7 +11,8 @@ public final class NativeSeekMapRulesTest {
         testUnknownSeekableMapIsRejected();
         testUnseekableMapNeverPassesThrough();
         testHasManagedIndex();
-        testNativeSeekPointsRequireValidBytePositions();
+        testTrackAwareSeekPointsRequireValidBytePositions();
+        testChunkIndexStillUsesCoverageGate();
         testSidxPassThroughSyncsResolvedState();
         System.out.println("NATIVE SEEK MAP RULES: " + passed + " checks passed");
     }
@@ -48,25 +49,32 @@ public final class NativeSeekMapRulesTest {
         check(NativeSeekMapRules.hasManagedIndex(true, false, true, false),
                 "remote probe alone is a managed index");
         check(NativeSeekMapRules.hasManagedIndex(true, false, false, true),
-                "a passed-through native map is also a usable index");
+                "a passed-through track-aware native map is also a usable index");
     }
 
-    private static void testNativeSeekPointsRequireValidBytePositions() {
-        // Before the first TFRA entry, timeUs=0 is valid when the byte offset points
-        // at the first media fragment. The timestamp must not be confused with position.
-        check(NativeSeekMapRules.hasUsableNativeSeekPoints(true, true, 0L, 0L),
-                "zero is a valid non-negative byte position for an extractor input");
-        check(NativeSeekMapRules.hasUsableNativeSeekPoints(true, true, 128L, 128L),
-                "MFRA first-media-data and TFRA moof offsets are valid candidates");
-        // Seeking beyond the final TFRA entry clamps to its last preceding RAP, still valid.
-        check(NativeSeekMapRules.hasUsableNativeSeekPoints(true, true, 4096L, 4096L),
+    private static void testTrackAwareSeekPointsRequireValidBytePositions() {
+        // Before the first TFRA entry, the time is zero but the byte position is
+        // firstMediaDataPosition. The actual returned position must remain non-negative.
+        check(NativeSeekMapRules.hasUsableNativeSeekPoints(true, true, true, 128L, 128L),
+                "MFRA first-media-data byte position is accepted independently of timeUs=0");
+        // Seeking beyond the final TFRA entry resolves to the last preceding RAP.
+        check(NativeSeekMapRules.hasUsableNativeSeekPoints(true, true, true, 4096L, 4096L),
                 "a final preceding random-access point remains usable");
-        check(!NativeSeekMapRules.hasUsableNativeSeekPoints(true, true, -1L, 10L),
+        check(!NativeSeekMapRules.hasUsableNativeSeekPoints(true, true, true, -1L, 10L),
                 "negative byte offsets must never be accepted");
-        check(!NativeSeekMapRules.hasUsableNativeSeekPoints(false, true, 10L, 10L),
+        check(!NativeSeekMapRules.hasUsableNativeSeekPoints(false, true, true, 10L, 10L),
+                "ChunkIndex does not use the track-aware coverage shortcut");
+        check(!NativeSeekMapRules.hasUsableNativeSeekPoints(true, false, true, 10L, 10L),
                 "points without an accepted native map cannot authorize seeking");
-        check(!NativeSeekMapRules.hasUsableNativeSeekPoints(true, false, 10L, 10L),
+        check(!NativeSeekMapRules.hasUsableNativeSeekPoints(true, true, false, 10L, 10L),
                 "an unseekable native map cannot authorize seeking");
+    }
+
+    private static void testChunkIndexStillUsesCoverageGate() {
+        // SIDX is passed through and copied to resolvedIndex, but is not granted
+        // the unbounded TrackAwareSeekMap shortcut for targets past its coverage.
+        check(!NativeSeekMapRules.hasUsableNativeSeekPoints(false, true, true, 8192L, 8192L),
+                "a ChunkIndex must be checked against its actual finite coverage");
     }
 
     private static void testSidxPassThroughSyncsResolvedState() {

@@ -1,11 +1,11 @@
 /*
-// Copyright (C) 2024 NagramX Team
-//
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU General Public License as published by
-// the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
-*/
+ * Copyright (C) 2024 NagramX Team
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ */
 package org.telegram.ui.Components.seek;
 
 /**
@@ -27,9 +27,7 @@ public final class NativeSeekMapRules {
     private NativeSeekMapRules() {
     }
 
-    /**
-     * Whether a native map has a recognized index contract and may be passed through.
-     */
+    /** Whether a recognized native map may be passed through. */
     public static boolean shouldPassThrough(
             boolean isChunkIndex, boolean isTrackAware, boolean isSeekable) {
         return isSeekable && (isChunkIndex || isTrackAware);
@@ -42,14 +40,22 @@ public final class NativeSeekMapRules {
     }
 
     /**
-     * Whether a passed-through native map produced valid byte positions for this target.
-     * The extractor input is zero-based (including when OffsetDataSource is used), so
-     * non-negative positions are valid candidates; the DataSource translates them to
-     * the corresponding absolute document offsets.
+     * Whether a TrackAwareSeekMap produced valid byte positions for this target.
+     *
+     * <p>ChunkIndex is deliberately excluded from this shortcut: SIDX coverage is
+     * finite and remains guarded by the local ChunkIndex coverage check.
      */
     public static boolean hasUsableNativeSeekPoints(
-            boolean hasNativeMap, boolean isSeekable, long firstPosition, long secondPosition) {
-        return hasNativeMap && isSeekable && firstPosition >= 0 && secondPosition >= 0;
+            boolean isTrackAware,
+            boolean hasNativeMap,
+            boolean isSeekable,
+            long firstPosition,
+            long secondPosition) {
+        return isTrackAware
+                && hasNativeMap
+                && isSeekable
+                && firstPosition >= 0
+                && secondPosition >= 0;
     }
 
     /** A passed-through SIDX ChunkIndex must also be reflected in resolvedIndex. */

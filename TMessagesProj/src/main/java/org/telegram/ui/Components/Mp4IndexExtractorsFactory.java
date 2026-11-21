@@ -142,7 +142,7 @@ public final class Mp4IndexExtractorsFactory implements ExtractorsFactory {
         // Native SIDX and MFRA maps are both real time-to-byte mappings. MFRA is
         // TrackAwareSeekMap; its default getSeekPoints() selects the primary video track.
         SeekMap nativeMap = nativeSeekMap;
-        boolean hasNative = nativeMap != null && nativeMap.isSeekable();
+        boolean hasNative = nativeMap instanceof TrackAwareSeekMap && nativeMap.isSeekable();
         return NativeSeekMapRules.hasManagedIndex(attempted, resolvedIndex != null,
                 remotePoint != null, hasNative);
     }
@@ -160,10 +160,10 @@ public final class Mp4IndexExtractorsFactory implements ExtractorsFactory {
         // to non-negative byte positions. MFRA's timeUs=0 before its first TFRA entry
         // is a timestamp; the actual byte position is firstMediaDataPosition.
         SeekMap nativeMap = nativeSeekMap;
-        if (nativeMap != null && nativeMap.isSeekable()) {
+        if (nativeMap instanceof TrackAwareSeekMap && nativeMap.isSeekable()) {
             SeekMap.SeekPoints points = nativeMap.getSeekPoints(timeUs);
             if (NativeSeekMapRules.hasUsableNativeSeekPoints(
-                    true, true, points.first.position, points.second.position)) {
+                    true, true, true, points.first.position, points.second.position)) {
                 return true;
             }
         }
@@ -342,12 +342,9 @@ public final class Mp4IndexExtractorsFactory implements ExtractorsFactory {
                         output.seekMap(seekMap);
                         return;
                     }
-                    // Unknown seekable maps are still rejected. Do not erase a previously
-                    // accepted native map unless this callback explicitly replaces it with
-                    // an unseekable map.
-                    if (!seekMap.isSeekable()) {
-                        nativeSeekMap = null;
-                    }
+                    // This callback replaces the previous map. Never let a stale native
+                    // mapping authorize a seek after a different map was emitted.
+                    nativeSeekMap = null;
                     if (remotePoint != null) {
                         output.seekMap(new RemoteExtendedSeekMap(chunkIndex, remotePoint,
                                 remoteNextPoint, remoteSpanUs, (long) (durationSec * 1000000.0)));
