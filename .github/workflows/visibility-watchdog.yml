@@ -6,6 +6,15 @@ on:
       - Staging build
     types:
       - completed
+  # Last line of defence. A cancelled Staging run can leave the repository
+  # public: the restore_visibility job only runs while the run still has a
+  # runner, so cancelling it early (or cancelling it while the restore job is
+  # still queued) skips the restore entirely. The workflow_run trigger above
+  # normally catches that, but if it is itself cancelled or fails there is
+  # nothing left to retry. This sweep makes the repository private again
+  # within half an hour even when every event-driven path is lost.
+  schedule:
+    - cron: '*/30 * * * *'
   workflow_dispatch:
 
 permissions:
@@ -14,7 +23,10 @@ permissions:
 
 concurrency:
   group: visibility-watchdog
-  cancel-in-progress: true
+  # Never cancel a sweep that may be mid-restore. Consecutive Staging runs
+  # finish seconds apart; queueing them costs a few seconds and guarantees
+  # each one actually checks the visibility.
+  cancel-in-progress: false
 
 jobs:
   restore:
@@ -38,7 +50,7 @@ jobs:
                  --workflow staging.yml \
                  --limit 20 \
                  --json status \
-                 --jq '[.[] | select(.status == "in_progress" or .status == "queued")] | length'); then
+                 --jq '[.[] | select(.status == "in_progress" or .status == "queued" or .status == "waiting" or .status == "pending" or .status == "requested")] | length'); then
             echo "Could not list staging runs; restoring privacy anyway."
             busy=0
           fi

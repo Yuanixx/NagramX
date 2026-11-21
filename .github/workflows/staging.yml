@@ -346,7 +346,11 @@ jobs:
     needs:
       - prepare_visibility
       - build
-    if: ${{ always() && needs.prepare_visibility.outputs.original_visibility == 'private' }}
+    # Restore whenever this run may have made the repository public, even if
+    # prepare_visibility itself failed or was cancelled before it could report
+    # the original visibility. The step below no-ops when the repository is
+    # already private, so a false positive here is harmless.
+    if: ${{ always() && (needs.prepare_visibility.outputs.original_visibility == 'private' || needs.prepare_visibility.result != 'success') }}
     steps:
       - name: Restore private visibility
         env:
