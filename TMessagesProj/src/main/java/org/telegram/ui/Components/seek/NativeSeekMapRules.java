@@ -53,4 +53,15 @@ public final class NativeSeekMapRules {
                                           boolean hasRemote) {
         return attempted && (hasLocal || hasRemote);
     }
+
+    /**
+     * 放行的原生 ChunkIndex 是否要同步进 resolvedIndex。
+     *
+     * 状态一致性关键：M1 放行真实 sidx ChunkIndex 后，canSeekTo/hasIndex 只看
+     * resolvedIndex 与 remotePoint。若不同步，真实索引已交给播放器却仍被判"不可 seek"，
+     * 会触发无谓的延迟重建。因此放行可信 ChunkIndex 时必须同步为自管状态源。
+     */
+    public static boolean syncResolvedFromNative(boolean passThrough, boolean isChunkIndex) {
+        return passThrough && isChunkIndex;
+    }
 }

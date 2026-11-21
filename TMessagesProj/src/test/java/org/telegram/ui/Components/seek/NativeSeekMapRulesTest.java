@@ -10,6 +10,7 @@ public final class NativeSeekMapRulesTest {
         testMfraSeekableIsRejected();
         testUnseekableNeverPassesThrough();
         testHasManagedIndex();
+        testSidxPassThroughSyncsResolvedState();
         System.out.println("NATIVE SEEK MAP RULES: " + passed + " checks passed");
     }
 
@@ -39,6 +40,20 @@ public final class NativeSeekMapRulesTest {
                 "local coverage alone is a managed index");
         check(NativeSeekMapRules.hasManagedIndex(true, false, true),
                 "remote probe alone is a managed index");
+    }
+
+    private static void testSidxPassThroughSyncsResolvedState() {
+        // 原生 SIDX 放行 → 必须同步进 resolvedIndex，否则 canSeekTo/hasIndex 看不到它。
+        check(NativeSeekMapRules.syncResolvedFromNative(true, true),
+                "passed-through sidx ChunkIndex must sync into resolvedIndex");
+        check(!NativeSeekMapRules.syncResolvedFromNative(true, false),
+                "a passed-through non-ChunkIndex must never sync");
+        check(!NativeSeekMapRules.syncResolvedFromNative(false, true),
+                "an intercepted map must not sync");
+        // 联动：同步后 resolvedIndex 存在 → hasManagedIndex 与 coversLocal 才能识别。
+        boolean resolvedReady = NativeSeekMapRules.syncResolvedFromNative(true, true);
+        check(NativeSeekMapRules.hasManagedIndex(true, resolvedReady, false),
+                "after sidx sync, hasIndex sees managed index (no needless rebuild)");
     }
 
     private static void check(boolean condition, String message) {

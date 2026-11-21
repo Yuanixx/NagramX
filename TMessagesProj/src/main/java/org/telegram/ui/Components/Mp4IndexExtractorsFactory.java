@@ -318,8 +318,16 @@ public final class Mp4IndexExtractorsFactory implements ExtractorsFactory {
                     final boolean passThrough = NativeSeekMapRules.shouldPassThrough(
                             seekMap instanceof ChunkIndex, seekMap.isSeekable());
                     if (passThrough) {
-                        // 真实 sidx ChunkIndex：原样放行并记录，供状态查询参考。
+                        // 真实 sidx ChunkIndex：原样放行。
                         nativeSeekMap = seekMap;
+                        // 状态一致性：canSeekTo/hasIndex 只看 resolvedIndex/remotePoint，
+                        // 若不同步，真实索引已交给播放器却仍被判"不可 seek"，会无谓重建。
+                        // 放行的可信 ChunkIndex 同步为自管状态源（与本地扫描索引同字段）。
+                        if (NativeSeekMapRules.syncResolvedFromNative(
+                                passThrough, seekMap instanceof ChunkIndex)
+                                && seekMap instanceof ChunkIndex) {
+                            resolvedIndex = (ChunkIndex) seekMap;
+                        }
                         output.seekMap(seekMap);
                         return;
                     }
