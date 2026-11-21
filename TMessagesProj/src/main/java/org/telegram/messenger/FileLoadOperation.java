@@ -896,8 +896,17 @@ public class FileLoadOperation {
         }
         // Publish primitive, immutable bounds. A shallow ArrayList copy is unsafe:
         // addPart/removePart mutate the Range objects already visible to reader threads.
-        final boolean complete = count == 0 && totalBytesCount > 0
-                && downloadedBytes >= totalBytesCount;
+        // 完成态不能只信账面计数器：临时文件是稀疏写入的，下载被打断/文件被裁剪后
+        // 可能出现"账面完成、磁盘实际变短"。若此时把 complete 标成 true，可读区间
+        // 会放开到整段，播放器读到从未落盘的零字节洞，解码失败后跳回开头。
+        // 用纯规则交叉校验磁盘真实长度（只看当前文件的元数据，非逐字节 IO）。
+        long diskLength = -1L;
+        final File currentFile = getCurrentFileFast();
+        if (currentFile != null) {
+            diskLength = currentFile.length();
+        }
+        final boolean complete = DownloadCompletionRules.isComplete(
+                count == 0, downloadedBytes, totalBytesCount, diskLength);
         downloadedRangeSnapshot = new DownloadedRangeSnapshot(
                 starts, ends, totalBytesCount, complete);
     }
