@@ -38,6 +38,12 @@ jobs:
       CCACHE_SLOPPINESS: "time_macros"
       # 只产 arm64 单包，与 publish-staging.yml 的契约保持一致。
       NATIVE_TARGET: "arm64-v8a"
+      # 下面三个值按「公开仓库 = 4 核 / 16 GB」写死，不做运行时探测。
+      # 注意：私有仓库只有 2 核 / 7 GB，这套参数在那边会把内存打满。
+      # 若要切回私有档，把 workers 降到 2、堆降到 -Xmx4g（或 3g）。
+      GRADLE_WORKERS: "4"
+      NATIVE_PARALLELISM: "4"
+      GRADLE_JVMARGS: "-Xmx8G -XX:MaxMetaspaceSize=2G -XX:+UseParallelGC -XX:+HeapDumpOnOutOfMemoryError -Dfile.encoding=UTF-8"
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -65,90 +71,6 @@ jobs:
         with:
           distribution: "temurin"
           java-version: "21"
-
-      # 只测量，不改写工作区里的 gradle.properties。
-      # nproc 在容器里可能报的是宿主机核数，所以再用 cgroup 配额兜一次底；
-      # 内存同理，取 /proc/meminfo 与 cgroup 限制里更小的那个。
-      # 结果写进 GITHUB_ENV，由下面的 ./gradlew 命令行直接覆盖项目默认值。
-      - name: Detect runner resources
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          HOST_CPUS="$(nproc)"
-          EFFECTIVE_CPUS="$HOST_CPUS"
-          MEM_BYTES="$(( $(awk '/MemTotal/ {print $2}' /proc/meminfo) * 1024 ))"
-          CGROUP_CPU="unlimited"
-          CGROUP_MEM="unlimited"
-
-          # cgroup v2：cpu.max 形如 "200000 100000"，第一列是配额，max 表示不限。
-          if [[ -r /sys/fs/cgroup/cpu.max ]]; then
-            read -r CPU_QUOTA CPU_PERIOD < /sys/fs/cgroup/cpu.max
-            CGROUP_CPU="${CPU_QUOTA}/${CPU_PERIOD}"
-            if [[ "$CPU_QUOTA" =~ ^[0-9]+$ && "$CPU_PERIOD" =~ ^[0-9]+$ && "$CPU_PERIOD" -gt 0 ]]; then
-              QUOTA_CPUS=$((CPU_QUOTA / CPU_PERIOD))
-              if (( QUOTA_CPUS < 1 )); then QUOTA_CPUS=1; fi
-              if (( QUOTA_CPUS < EFFECTIVE_CPUS )); then EFFECTIVE_CPUS="$QUOTA_CPUS"; fi
-            fi
-          # cgroup v1 兜底：老镜像只有 cfs_quota_us / cfs_period_us。
-          elif [[ -r /sys/fs/cgroup/cpu/cpu.cfs_quota_us && -r /sys/fs/cgroup/cpu/cpu.cfs_period_us ]]; then
-            CPU_QUOTA="$(cat /sys/fs/cgroup/cpu/cpu.cfs_quota_us)"
-            CPU_PERIOD="$(cat /sys/fs/cgroup/cpu/cpu.cfs_period_us)"
-            CGROUP_CPU="${CPU_QUOTA}/${CPU_PERIOD}"
-            if [[ "$CPU_QUOTA" =~ ^[0-9]+$ && "$CPU_PERIOD" =~ ^[0-9]+$ && "$CPU_QUOTA" -gt 0 && "$CPU_PERIOD" -gt 0 ]]; then
-              QUOTA_CPUS=$((CPU_QUOTA / CPU_PERIOD))
-              if (( QUOTA_CPUS < 1 )); then QUOTA_CPUS=1; fi
-              if (( QUOTA_CPUS < EFFECTIVE_CPUS )); then EFFECTIVE_CPUS="$QUOTA_CPUS"; fi
-            fi
-          fi
-
-          if [[ -r /sys/fs/cgroup/memory.max ]]; then
-            CGROUP_MEM="$(cat /sys/fs/cgroup/memory.max)"
-            if [[ "$CGROUP_MEM" =~ ^[0-9]+$ ]] && (( CGROUP_MEM < MEM_BYTES )); then
-              MEM_BYTES="$CGROUP_MEM"
-            fi
-          elif [[ -r /sys/fs/cgroup/memory/memory.limit_in_bytes ]]; then
-            CGROUP_MEM="$(cat /sys/fs/cgroup/memory/memory.limit_in_bytes)"
-            if [[ "$CGROUP_MEM" =~ ^[0-9]+$ ]] && (( CGROUP_MEM < 1099511627776 )) && (( CGROUP_MEM < MEM_BYTES )); then
-              MEM_BYTES="$CGROUP_MEM"
-            fi
-          fi
-
-          # 并行度最多 4：再多也不会更快，只会加重内存压力。
-          WORKERS="$EFFECTIVE_CPUS"
-          if (( WORKERS > 4 )); then WORKERS=4; fi
-          if (( WORKERS < 1 )); then WORKERS=1; fi
-
-          # 堆上限按可用内存分档。项目默认 -Xmx6g 在 7 GiB 机器上叠加两路
-          # native 编译几乎必然触顶，会表现为长时间 GC 抖动甚至整步卡住。
-          MEM_GIB=$(( MEM_BYTES / 1024 / 1024 / 1024 ))
-          if (( MEM_BYTES >= 12884901888 )); then
-            GRADLE_JVMARGS="-Xmx8g -XX:MaxMetaspaceSize=2g -XX:+UseParallelGC -XX:+HeapDumpOnOutOfMemoryError -Dfile.encoding=UTF-8"
-            JVM_PROFILE="8g 堆 / 2g 元空间"
-          elif (( MEM_BYTES >= 7516192768 )); then
-            GRADLE_JVMARGS="-Xmx4g -XX:MaxMetaspaceSize=768m -XX:+UseParallelGC -XX:+HeapDumpOnOutOfMemoryError -Dfile.encoding=UTF-8"
-            JVM_PROFILE="4g 堆 / 768m 元空间"
-          else
-            GRADLE_JVMARGS="-Xmx3g -XX:MaxMetaspaceSize=512m -XX:+UseParallelGC -XX:+HeapDumpOnOutOfMemoryError -Dfile.encoding=UTF-8"
-            JVM_PROFILE="3g 堆 / 512m 元空间"
-          fi
-
-          {
-            echo "GRADLE_WORKERS=$WORKERS"
-            echo "NATIVE_PARALLELISM=$WORKERS"
-            echo "GRADLE_JVMARGS=$GRADLE_JVMARGS"
-          } >> "$GITHUB_ENV"
-
-          echo "===== 机器资源档位 ====="
-          echo "宿主机核数: $HOST_CPUS"
-          echo "cgroup CPU 配额: $CGROUP_CPU"
-          echo "实际可用核数: $EFFECTIVE_CPUS"
-          echo "cgroup 内存限制: $CGROUP_MEM"
-          echo "实际可用内存: ${MEM_GIB} GiB"
-          echo "Gradle 并行度: $WORKERS"
-          echo "JVM 档位: $JVM_PROFILE"
-          echo "JVM 参数: $GRADLE_JVMARGS"
-          free -h
 
       # 依赖缓存：只有 Gradle 脚本或 wrapper 变了才失效，命中后不会再重存，
       # 所以它是一份体量稳定（约 1 GB）的"只写一次"缓存，不占收尾时间。
@@ -287,6 +209,8 @@ jobs:
 
           echo "并行度: $GRADLE_WORKERS  native 并行: $NATIVE_PARALLELISM"
           echo "JVM 参数: $GRADLE_JVMARGS"
+          echo "实际核数: $(nproc)"
+          free -h
 
           ./gradlew TMessagesProj:assembleStaging \
             --console=plain \
