@@ -12,16 +12,20 @@ on:
 permissions:
   contents: read
 
-# One staging build at a time: two builds must never fight over the
-# staging release tag.
+# 同一时间只跑一个 staging 构建。新提交会立刻顶掉正在跑的旧构建：
+# 这里已经不创建 Release（Release 由 publish-staging.yml 负责），
+# 两个构建并发也不会互相踩到发布标签，没必要让旧构建占着机器跑完。
 concurrency:
   group: staging-build
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
   build:
     name: Gradle Build
     runs-on: ubuntu-latest
+    # 默认不设超时是 360 分钟：卡在缓存恢复或 Gradle 挂起时会一直占着机器，
+    # 只能手动取消。正常构建 8–9 分钟，给足余量后强制放弃。
+    timeout-minutes: 30
     outputs:
       build_timestamp: ${{ steps.staging_build_step.outputs.build_timestamp }}
     env:
@@ -185,6 +189,10 @@ jobs:
         uses: hendrikmuhs/ccache-action@v1.2.23
         with:
           append-timestamp: false
+          # 与上面的 CCACHE_MAXSIZE 保持一致。环境变量本来就会覆盖配置文件
+          # （日志里 "(environment) max_size = 10.0 GB" 才是实际生效值），
+          # 这里显式写一遍只是让 action 的日志不再显示 500MB 引起误判。
+          max-size: 10G
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v6
         with:
@@ -201,7 +209,10 @@ jobs:
             .gradle
             TMessagesProj/.gradle
             TMessagesProj/build
-          key: build-${{ hashFiles('**/*.gradle', '**/gradle-wrapper.properties', '**/gradle.properties') }}
+          # gradle.properties 故意不参与哈希：上面的资源检测步骤会按机器档位
+          # 改写它的 workers.max / jvmargs。一旦把档位差异算进 key，2 核和
+          # 4 核就各自持有一套缓存，精确 key 永远命中不了，每次都要重存 3 GB。
+          key: build-${{ hashFiles('**/*.gradle', '**/gradle-wrapper.properties') }}
           restore-keys: |
             build-
             gradle-
