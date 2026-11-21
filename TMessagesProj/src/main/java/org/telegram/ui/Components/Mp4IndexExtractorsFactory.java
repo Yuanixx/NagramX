@@ -14,6 +14,7 @@ import android.util.Log;
 
 import androidx.annotation.Nullable;
 
+import androidx.media3.common.C;
 import androidx.media3.extractor.ChunkIndex;
 import androidx.media3.extractor.DefaultExtractorsFactory;
 import androidx.media3.extractor.Extractor;
@@ -23,14 +24,17 @@ import androidx.media3.extractor.ExtractorsFactory;
 import androidx.media3.extractor.PositionHolder;
 import androidx.media3.extractor.SeekMap;
 import androidx.media3.extractor.SeekPoint;
+import androidx.media3.extractor.TrackAwareSeekMap;
 import androidx.media3.extractor.TrackOutput;
 import androidx.media3.extractor.mp4.FragmentedMp4Extractor;
 
 import org.telegram.messenger.FragmentIndexBuilder;
 import org.telegram.tgnet.TLRPC;
+import org.telegram.ui.Components.seek.NativeSeekMapRules;
 import org.telegram.ui.Components.seek.SeekCoverageRules;
 
 import java.io.IOException;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 
@@ -136,9 +140,12 @@ public final class Mp4IndexExtractorsFactory implements ExtractorsFactory {
      * 不能在这里触发探测，否则 UI 线程会被网络请求阻塞。
      */
     public boolean hasIndex() {
+        // Native SIDX and MFRA maps are both real time-to-byte mappings. MFRA is
+        // TrackAwareSeekMap; its default getSeekPoints() selects the primary video track.
         SeekMap nativeMap = nativeSeekMap;
-        return attempted && (resolvedIndex != null || remotePoint != null
-                || (nativeMap != null && nativeMap.isSeekable()));
+        boolean hasNative = nativeMap instanceof TrackAwareSeekMap && nativeMap.isSeekable();
+        return NativeSeekMapRules.hasManagedIndex(attempted, resolvedIndex != null,
+                remotePoint != null, hasNative);
     }
 
     /**
@@ -150,11 +157,16 @@ public final class Mp4IndexExtractorsFactory implements ExtractorsFactory {
         if (!attempted) {
             return false;
         }
-        // Native Media3 maps (notably MFRA/tfra TrackAwareSeekMap) describe the
-        // file's actual random-access points and outrank inferred local/remote indexes.
+        // A passed-through native map is usable only when it resolves this target
+        // to non-negative byte positions. MFRA's timeUs=0 before its first TFRA entry
+        // is a timestamp; the actual byte position is firstMediaDataPosition.
         SeekMap nativeMap = nativeSeekMap;
-        if (nativeMap != null && nativeMap.isSeekable()) {
-            return true;
+        if (nativeMap instanceof TrackAwareSeekMap && nativeMap.isSeekable()) {
+            SeekMap.SeekPoints points = nativeMap.getSeekPoints(timeUs);
+            if (NativeSeekMapRules.hasUsableNativeSeekPoints(
+                    true, true, true, points.first.position, points.second.position)) {
+                return true;
+            }
         }
         ChunkIndex local = resolvedIndex;
         if (SeekCoverageRules.coversLocal(local != null ? local.timesUs : null,
@@ -291,11 +303,19 @@ public final class Mp4IndexExtractorsFactory implements ExtractorsFactory {
 
         @Override
         public void init(ExtractorOutput output) {
-            // Always intercept the callback: Media3 may emit a usable MFRA map even
-            // when StreamX has no local index and remote probing did not run.
+            // TrackAwareSeekMap can expose separate indexes per track. ProgressiveMediaPeriod
+            // currently calls the track-agnostic getSeekPoints(), so accept MFRA only when its
+            // default primary stream (video when present, otherwise audio) has an index.
+            final List<Integer> videoTrackIds = new ArrayList<>();
+            final List<Integer> audioTrackIds = new ArrayList<>();
             delegate.init(new ExtractorOutput() {
                 @Override
                 public TrackOutput track(int id, int type) {
+                    if (type == C.TRACK_TYPE_VIDEO) {
+                        videoTrackIds.add(id);
+                    } else if (type == C.TRACK_TYPE_AUDIO) {
+                        audioTrackIds.add(id);
+                    }
                     return output.track(id, type);
                 }
 
@@ -305,29 +325,59 @@ public final class Mp4IndexExtractorsFactory implements ExtractorsFactory {
                 }
 
                 /**
-                 * extractor 提交 seekMap 时做替换：
-                 * - 所有 Media3 原生可 Seek 的映射都原样放行，包括 SIDX 的 ChunkIndex
-                 *   和 MFRA/tfra 的 MfraSeekMap；
-                 * - 只有不可 Seek 的 fallback 才用本地/远端组合映射替换。
+                 * extractor 提交 seekMap 时做分流：
+                 * - 真实 sidx 的 ChunkIndex 原样放行；
+                 * - MFRA 的 MfraSeekMap 也原样放行：它实现 TrackAwareSeekMap，
+                 *   getSeekPoints() 返回所选主轨道的实际随机访问 moof 偏移；
+                 * - 其他未知的 seekable map 仍然拦截，避免未经验证的偏移进入 DataSource。
                  */
                 @Override
                 public void seekMap(SeekMap seekMap) {
-                    // Do not narrow a native seekable map to our one-fragment remote
-                    // proof. Media3 1.11 enables MFRA parsing by default, whose
-                    // MfraSeekMap is seekable but deliberately is not a ChunkIndex.
-                    if (seekMap.isSeekable()) {
-                        nativeSeekMap = seekMap;
-                        output.seekMap(seekMap);
-                    } else {
-                        nativeSeekMap = null;
-                        if (remotePoint != null) {
-                            output.seekMap(new RemoteExtendedSeekMap(chunkIndex, remotePoint,
-                                    remoteNextPoint, remoteSpanUs, (long) (durationSec * 1000000.0)));
-                        } else if (chunkIndex != null) {
-                            output.seekMap(chunkIndex);
-                        } else {
-                            output.seekMap(seekMap);
+                    boolean hasTrackAwarePrimaryIndex = false;
+                    if (seekMap instanceof TrackAwareSeekMap && seekMap.isSeekable()) {
+                        TrackAwareSeekMap trackAwareSeekMap = (TrackAwareSeekMap) seekMap;
+                        List<Integer> primaryTrackCandidates =
+                                videoTrackIds.isEmpty() ? audioTrackIds : videoTrackIds;
+                        for (int trackId : primaryTrackCandidates) {
+                            if (trackAwareSeekMap.isSeekable(trackId)) {
+                                hasTrackAwarePrimaryIndex = true;
+                                break;
+                            }
                         }
+                    }
+                    final boolean passThrough = NativeSeekMapRules.shouldPassThrough(
+                            seekMap instanceof ChunkIndex,
+                            hasTrackAwarePrimaryIndex,
+                            seekMap.isSeekable());
+                    if (passThrough) {
+                        // 真实 sidx ChunkIndex：原样放行。
+                        nativeSeekMap = seekMap;
+                        // 状态一致性：canSeekTo/hasIndex 只看 resolvedIndex/remotePoint，
+                        // 若不同步，真实索引已交给播放器却仍被判"不可 seek"，会无谓重建。
+                        // 放行的可信 ChunkIndex 同步为自管状态源（与本地扫描索引同字段）。
+                        if (NativeSeekMapRules.syncResolvedFromNative(
+                                passThrough, seekMap instanceof ChunkIndex)
+                                && seekMap instanceof ChunkIndex) {
+                            resolvedIndex = (ChunkIndex) seekMap;
+                        }
+                        output.seekMap(seekMap);
+                        return;
+                    }
+                    // This callback replaces the previous map. Never let a stale native
+                    // mapping authorize a seek after a different map was emitted.
+                    nativeSeekMap = null;
+                    if (remotePoint != null) {
+                        output.seekMap(new RemoteExtendedSeekMap(chunkIndex, remotePoint,
+                                remoteNextPoint, remoteSpanUs, (long) (durationSec * 1000000.0)));
+                    } else if (chunkIndex != null) {
+                        output.seekMap(chunkIndex);
+                    } else if (seekMap.isSeekable()) {
+                        // Unknown seekable map: do not pass through an unclassified
+                        // implementation. Use a managed map if available, otherwise defer.
+                        output.seekMap(new SeekMap.Unseekable(C.TIME_UNSET, 0L));
+                    } else {
+                        // 原本就不可 seek 的 fallback：保持原行为。
+                        output.seekMap(seekMap);
                     }
                 }
             });
