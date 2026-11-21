@@ -28,6 +28,7 @@ import androidx.media3.extractor.mp4.FragmentedMp4Extractor;
 
 import org.telegram.messenger.FragmentIndexBuilder;
 import org.telegram.tgnet.TLRPC;
+import org.telegram.ui.Components.seek.NativeSeekRules;
 import org.telegram.ui.Components.seek.SeekCoverageRules;
 
 import java.io.IOException;
@@ -152,9 +153,14 @@ public final class Mp4IndexExtractorsFactory implements ExtractorsFactory {
         }
         // Native Media3 maps (notably MFRA/tfra TrackAwareSeekMap) describe the
         // file's actual random-access points and outrank inferred local/remote indexes.
+        // 但不能只凭 isSeekable() 无条件信任：Media3 1.11.1 的 MfraSeekMap 在目标早于
+        // tfra 首点时会把 seek 解析回时间 0（getSeekPoints 返回 SeekPoint(0, ...)），
+        // 这正是拖到某处又跳回开头的代码路径。用 map 自己对目标的解析结果和时间做校验。
         SeekMap nativeMap = nativeSeekMap;
         if (nativeMap != null && nativeMap.isSeekable()) {
-            return true;
+            SeekPoint resolved = nativeMap.getSeekPoints(timeUs).first;
+            return NativeSeekRules.canResolve(
+                    nativeMap.getDurationUs(), resolved.timeUs, timeUs);
         }
         ChunkIndex local = resolvedIndex;
         if (SeekCoverageRules.coversLocal(local != null ? local.timesUs : null,
