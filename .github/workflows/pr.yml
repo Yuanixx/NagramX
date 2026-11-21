@@ -50,12 +50,15 @@ jobs:
             TMessagesProj/src/test/java/org/telegram/ui/Components/seek/SeekCoverageRulesTest.java \
             TMessagesProj/src/test/java/org/telegram/ui/Components/seek/RemoteFragmentRulesTest.java \
             TMessagesProj/src/test/java/org/telegram/ui/Components/seek/PendingSeekRulesTest.java \
+            TMessagesProj/src/test/java/org/telegram/ui/Components/seek/NativeSeekMapRulesTest.java \
             TMessagesProj/src/main/java/org/telegram/ui/Components/seek/SeekCoverageRules.java \
             TMessagesProj/src/main/java/org/telegram/ui/Components/seek/RemoteFragmentRules.java \
-            TMessagesProj/src/main/java/org/telegram/ui/Components/seek/PendingSeekRules.java
+            TMessagesProj/src/main/java/org/telegram/ui/Components/seek/PendingSeekRules.java \
+            TMessagesProj/src/main/java/org/telegram/ui/Components/seek/NativeSeekMapRules.java
           java -cp /tmp/streamx-tests org.telegram.ui.Components.seek.SeekCoverageRulesTest
           java -cp /tmp/streamx-tests org.telegram.ui.Components.seek.RemoteFragmentRulesTest
           java -cp /tmp/streamx-tests org.telegram.ui.Components.seek.PendingSeekRulesTest
+          java -cp /tmp/streamx-tests org.telegram.ui.Components.seek.NativeSeekMapRulesTest
 
           javac -d /tmp/streamx-tests \
             TMessagesProj/src/main/java/org/telegram/messenger/FragmentMoofParser.java \

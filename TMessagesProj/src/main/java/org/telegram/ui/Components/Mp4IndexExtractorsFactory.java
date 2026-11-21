@@ -14,6 +14,7 @@ import android.util.Log;
 
 import androidx.annotation.Nullable;
 
+import androidx.media3.common.C;
 import androidx.media3.extractor.ChunkIndex;
 import androidx.media3.extractor.DefaultExtractorsFactory;
 import androidx.media3.extractor.Extractor;
@@ -28,6 +29,7 @@ import androidx.media3.extractor.mp4.FragmentedMp4Extractor;
 
 import org.telegram.messenger.FragmentIndexBuilder;
 import org.telegram.tgnet.TLRPC;
+import org.telegram.ui.Components.seek.NativeSeekMapRules;
 import org.telegram.ui.Components.seek.SeekCoverageRules;
 
 import java.io.IOException;
@@ -136,9 +138,11 @@ public final class Mp4IndexExtractorsFactory implements ExtractorsFactory {
      * 不能在这里触发探测，否则 UI 线程会被网络请求阻塞。
      */
     public boolean hasIndex() {
-        SeekMap nativeMap = nativeSeekMap;
-        return attempted && (resolvedIndex != null || remotePoint != null
-                || (nativeMap != null && nativeMap.isSeekable()));
+        // 原生 map 不再作为"有索引"的依据：MfraSeekMap 虽 isSeekable，
+        // 但其 byte offset 可能归零/钳末点，不能当作可信的自管映射。
+        // 只有本地 ChunkIndex 覆盖或远端探测结果才算 StreamX 自管映射就绪。
+        return NativeSeekMapRules.hasManagedIndex(attempted, resolvedIndex != null,
+                remotePoint != null);
     }
 
     /**
@@ -150,12 +154,10 @@ public final class Mp4IndexExtractorsFactory implements ExtractorsFactory {
         if (!attempted) {
             return false;
         }
-        // Native Media3 maps (notably MFRA/tfra TrackAwareSeekMap) describe the
-        // file's actual random-access points and outrank inferred local/remote indexes.
-        SeekMap nativeMap = nativeSeekMap;
-        if (nativeMap != null && nativeMap.isSeekable()) {
-            return true;
-        }
+        // 不再无条件信任原生 map。真实 sidx 的 ChunkIndex 由 M1 原样放行，
+        // 此时它已被记入 resolvedIndex，下面的 coversLocal 会覆盖该情形；
+        // MfraSeekMap 之类不可信 map 在 M1 已被替换/降级，nativeSeekMap 不再参与 gate。
+        // 因此这里只认"自管映射的真实覆盖"，与真正送给 Media3 的 byte offset 来源一致。
         ChunkIndex local = resolvedIndex;
         if (SeekCoverageRules.coversLocal(local != null ? local.timesUs : null,
                 local != null ? local.durationsUs : null,
@@ -305,29 +307,37 @@ public final class Mp4IndexExtractorsFactory implements ExtractorsFactory {
                 }
 
                 /**
-                 * extractor 提交 seekMap 时做替换：
-                 * - 所有 Media3 原生可 Seek 的映射都原样放行，包括 SIDX 的 ChunkIndex
-                 *   和 MFRA/tfra 的 MfraSeekMap；
-                 * - 只有不可 Seek 的 fallback 才用本地/远端组合映射替换。
+                 * extractor 提交 seekMap 时做分流：
+                 * - 只有真实 sidx 的 ChunkIndex 才原样放行（严肃的 时间→字节 映射）；
+                 * - MFRA/tfra 的 MfraSeekMap 虽 isSeekable，但 getSeekPoints 会归零/钳末点，
+                 *   原样放行会让 ExoPlayer 拿错误 byte offset 去 open DataSource，
+                 *   因此一律拦截并替换为 StreamX 自管映射（本地 ChunkIndex / 远端探测）。
                  */
                 @Override
                 public void seekMap(SeekMap seekMap) {
-                    // Do not narrow a native seekable map to our one-fragment remote
-                    // proof. Media3 1.11 enables MFRA parsing by default, whose
-                    // MfraSeekMap is seekable but deliberately is not a ChunkIndex.
-                    if (seekMap.isSeekable()) {
+                    final boolean passThrough = NativeSeekMapRules.shouldPassThrough(
+                            seekMap instanceof ChunkIndex, seekMap.isSeekable());
+                    if (passThrough) {
+                        // 真实 sidx ChunkIndex：原样放行并记录，供状态查询参考。
                         nativeSeekMap = seekMap;
                         output.seekMap(seekMap);
+                        return;
+                    }
+                    // 不可信（典型 MFRA）或不可 seek：不写入 nativeSeekMap，走自管映射。
+                    nativeSeekMap = null;
+                    if (remotePoint != null) {
+                        output.seekMap(new RemoteExtendedSeekMap(chunkIndex, remotePoint,
+                                remoteNextPoint, remoteSpanUs, (long) (durationSec * 1000000.0)));
+                    } else if (chunkIndex != null) {
+                        output.seekMap(chunkIndex);
+                    } else if (seekMap.isSeekable()) {
+                        // 关键：不可信的 seekable map（MfraSeekMap）且没有任何自管映射时，
+                        // 绝不能原样放行，否则错误 byte offset 会流入播放器。降级为
+                        // Unseekable，让 canSeekTo 如实返回假、触发延迟重建 + 远端探测。
+                        output.seekMap(new SeekMap.Unseekable(C.TIME_UNSET, 0L));
                     } else {
-                        nativeSeekMap = null;
-                        if (remotePoint != null) {
-                            output.seekMap(new RemoteExtendedSeekMap(chunkIndex, remotePoint,
-                                    remoteNextPoint, remoteSpanUs, (long) (durationSec * 1000000.0)));
-                        } else if (chunkIndex != null) {
-                            output.seekMap(chunkIndex);
-                        } else {
-                            output.seekMap(seekMap);
-                        }
+                        // 原本就不可 seek 的 fallback：保持原行为。
+                        output.seekMap(seekMap);
                     }
                 }
             });
