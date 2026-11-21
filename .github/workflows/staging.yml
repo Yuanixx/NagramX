@@ -99,6 +99,8 @@ jobs:
       # CPUs outside a container quota, so cap it by cgroup cpu.max as well.
       # Restore the historical 4-worker / 8G profile on the 4-core / 16GB tier.
       - name: Detect runner resources and tune Gradle
+        env:
+          ORIGINAL_VISIBILITY: ${{ needs.prepare_visibility.outputs.original_visibility }}
         shell: bash
         run: |
           set -euo pipefail
@@ -174,6 +176,15 @@ jobs:
           echo "Gradle workers: $WORKERS"
           echo "Native build parallelism: $NATIVE_PARALLELISM"
           echo "JVM profile: $JVM_PROFILE"
+
+          # If this workflow changed a private repository to public, refuse to
+          # spend a full Android build on a runner that still has private-tier
+          # resources. The cleanup job will restore the original visibility.
+          if [[ "$ORIGINAL_VISIBILITY" == "private" ]] && (( EFFECTIVE_CPUS < 4 || EFFECTIVE_MEM_BYTES < 12884901888 )); then
+            echo "::error::Repository was made public before build allocation, but runner resources are below the expected public tier (CPUs=$EFFECTIVE_CPUS, memory=${EFFECTIVE_MEM_GIB} GiB). Aborting before Gradle."
+            exit 1
+          fi
+
           echo "cpu.max: $(cat /sys/fs/cgroup/cpu.max 2>/dev/null || echo unavailable)"
           echo "memory.max: $(cat /sys/fs/cgroup/memory.max 2>/dev/null || echo unavailable)"
           free -h
