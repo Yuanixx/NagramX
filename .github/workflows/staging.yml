@@ -7,7 +7,6 @@ on:
     paths-ignore:
       - '**.md'
       - '.github/**'
-      - '!.github/workflows/staging.yml'
   workflow_dispatch:
 
 permissions:
@@ -20,8 +19,46 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  prepare_visibility:
+    name: Prepare repository visibility
+    runs-on: ubuntu-latest
+    outputs:
+      original_visibility: ${{ steps.visibility.outputs.original_visibility }}
+    steps:
+      - name: Make repository public before build runner allocation
+        id: visibility
+        env:
+          GH_TOKEN: ${{ secrets.REPO_ADMIN_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -z "${GH_TOKEN:-}" ]]; then
+            echo "::error::REPO_ADMIN_TOKEN is required to obtain the public-repository runner tier."
+            exit 1
+          fi
+
+          original="$(gh api "repos/$GITHUB_REPOSITORY" --jq .visibility)"
+          echo "original_visibility=$original" >> "$GITHUB_OUTPUT"
+          echo "Repository visibility before build allocation: $original"
+
+          if [[ "$original" == "private" ]]; then
+            gh api -X PATCH "repos/$GITHUB_REPOSITORY" -f visibility=public
+            current="$(gh api "repos/$GITHUB_REPOSITORY" --jq .visibility)"
+            if [[ "$current" != "public" ]]; then
+              echo "::error::Repository visibility did not become public (current: $current)."
+              exit 1
+            fi
+            echo "Repository is public. The dependent Gradle job will now be allocated."
+          elif [[ "$original" == "public" ]]; then
+            echo "Repository was already public; no visibility change is needed."
+          else
+            echo "::error::Unexpected repository visibility: $original"
+            exit 1
+          fi
+
   build:
     name: Gradle Build
+    needs: prepare_visibility
     runs-on: ubuntu-latest
     outputs:
       build_timestamp: ${{ steps.staging_build_step.outputs.build_timestamp }}
@@ -58,72 +95,88 @@ jobs:
         with:
           distribution: 'temurin'
           java-version: '21'
-      # Hosted runner capacity can change between images/allocations. Detect the
-      # effective cgroup limits and size Gradle/R8 accordingly instead of using
-      # a fixed 6G heap on a 7G runner or underutilizing a 15G runner.
+      # Detect the resources actually available to this job. nproc can report
+      # CPUs outside a container quota, so cap it by cgroup cpu.max as well.
+      # Restore the historical 4-worker / 8G profile on the 4-core / 16GB tier.
       - name: Detect runner resources and tune Gradle
         shell: bash
         run: |
           set -euo pipefail
-          CPU_COUNT="$(nproc)"
-          MEM_BYTES=""
+
+          HOST_CPUS="$(nproc)"
+          EFFECTIVE_CPUS="$HOST_CPUS"
+          HOST_MEM_KB="$(awk '/MemTotal/ {print $2}' /proc/meminfo)"
+          HOST_MEM_BYTES="$((HOST_MEM_KB * 1024))"
+          CGROUP_MEM_BYTES="unlimited"
+          EFFECTIVE_MEM_BYTES="$HOST_MEM_BYTES"
+
+          if [[ -r /sys/fs/cgroup/cpu.max ]]; then
+            read -r CPU_QUOTA CPU_PERIOD < /sys/fs/cgroup/cpu.max
+            if [[ "$CPU_QUOTA" != "max" && "$CPU_QUOTA" =~ ^[0-9]+$ && "$CPU_PERIOD" =~ ^[0-9]+$ && "$CPU_PERIOD" -gt 0 ]]; then
+              QUOTA_CPUS=$((CPU_QUOTA / CPU_PERIOD))
+              (( QUOTA_CPUS < 1 )) && QUOTA_CPUS=1
+              (( QUOTA_CPUS < EFFECTIVE_CPUS )) && EFFECTIVE_CPUS="$QUOTA_CPUS"
+            fi
+          elif [[ -r /sys/fs/cgroup/cpu/cpu.cfs_quota_us && -r /sys/fs/cgroup/cpu/cpu.cfs_period_us ]]; then
+            CPU_QUOTA="$(cat /sys/fs/cgroup/cpu/cpu.cfs_quota_us)"
+            CPU_PERIOD="$(cat /sys/fs/cgroup/cpu/cpu.cfs_period_us)"
+            if [[ "$CPU_QUOTA" =~ ^[0-9]+$ && "$CPU_PERIOD" =~ ^[0-9]+$ && "$CPU_QUOTA" -gt 0 && "$CPU_PERIOD" -gt 0 ]]; then
+              QUOTA_CPUS=$((CPU_QUOTA / CPU_PERIOD))
+              (( QUOTA_CPUS < 1 )) && QUOTA_CPUS=1
+              (( QUOTA_CPUS < EFFECTIVE_CPUS )) && EFFECTIVE_CPUS="$QUOTA_CPUS"
+            fi
+          fi
+
           if [[ -r /sys/fs/cgroup/memory.max ]]; then
-            CGROUP_MEM="$(cat /sys/fs/cgroup/memory.max)"
-            if [[ "$CGROUP_MEM" =~ ^[0-9]+$ ]]; then
-              MEM_BYTES="$CGROUP_MEM"
+            CGROUP_LIMIT="$(cat /sys/fs/cgroup/memory.max)"
+            if [[ "$CGROUP_LIMIT" =~ ^[0-9]+$ ]]; then
+              CGROUP_MEM_BYTES="$CGROUP_LIMIT"
+              (( CGROUP_LIMIT < EFFECTIVE_MEM_BYTES )) && EFFECTIVE_MEM_BYTES="$CGROUP_LIMIT"
             fi
-          fi
-          if [[ -z "$MEM_BYTES" ]] && [[ -r /sys/fs/cgroup/memory/memory.limit_in_bytes ]]; then
-            CGROUP_MEM="$(cat /sys/fs/cgroup/memory/memory.limit_in_bytes)"
-            if [[ "$CGROUP_MEM" =~ ^[0-9]+$ ]] && (( CGROUP_MEM < 1099511627776 )); then
-              MEM_BYTES="$CGROUP_MEM"
+          elif [[ -r /sys/fs/cgroup/memory/memory.limit_in_bytes ]]; then
+            CGROUP_LIMIT="$(cat /sys/fs/cgroup/memory/memory.limit_in_bytes)"
+            if [[ "$CGROUP_LIMIT" =~ ^[0-9]+$ ]] && (( CGROUP_LIMIT < 1099511627776 )); then
+              CGROUP_MEM_BYTES="$CGROUP_LIMIT"
+              (( CGROUP_LIMIT < EFFECTIVE_MEM_BYTES )) && EFFECTIVE_MEM_BYTES="$CGROUP_LIMIT"
             fi
-          fi
-          if [[ -z "$MEM_BYTES" ]]; then
-            MEM_BYTES="$(( $(awk '/MemTotal/ {print $2}' /proc/meminfo) * 1024 ))"
           fi
 
-          if (( MEM_BYTES >= 12884901888 && CPU_COUNT >= 4 )); then
-            WORKERS=4
-            HEAP=8g
-            METASPACE=2g
-            NATIVE_PARALLELISM=2
-          elif (( MEM_BYTES >= 8589934592 && CPU_COUNT >= 3 )); then
-            WORKERS=3
-            HEAP=5g
-            METASPACE=1g
-            NATIVE_PARALLELISM=1
-          else
-            WORKERS=$CPU_COUNT
-            (( WORKERS > 2 )) && WORKERS=2
-            (( WORKERS < 1 )) && WORKERS=1
-            if (( MEM_BYTES >= 6442450944 )); then
-              HEAP=4g
-            else
-              HEAP=3g
-            fi
-            METASPACE=768m
-            NATIVE_PARALLELISM=1
-          fi
+          WORKERS="$EFFECTIVE_CPUS"
+          (( WORKERS > 4 )) && WORKERS=4
+          (( WORKERS < 1 )) && WORKERS=1
+          NATIVE_PARALLELISM="$WORKERS"
 
-          sed -i '/^org\.gradle\.jvmargs=/d;/^org\.gradle\.workers\.max=/d;/^android\.native\.buildParallelism=/d' gradle.properties
+          sed -i '/^org\.gradle\.workers\.max=/d;/^android\.native\.buildParallelism=/d' gradle.properties
           {
-            echo "org.gradle.jvmargs=-Xmx${HEAP} -XX:MaxMetaspaceSize=${METASPACE} -XX:+UseParallelGC -XX:+HeapDumpOnOutOfMemoryError -Dfile.encoding=UTF-8"
-            echo "org.gradle.workers.max=${WORKERS}"
-            echo "android.native.buildParallelism=${NATIVE_PARALLELISM}"
+            echo "org.gradle.workers.max=$WORKERS"
+            echo "android.native.buildParallelism=$NATIVE_PARALLELISM"
           } >> gradle.properties
 
-          echo "Detected CPUs: ${CPU_COUNT}"
-          echo "Effective memory: $(( MEM_BYTES / 1024 / 1024 / 1024 )) GiB"
-          echo "Gradle workers: ${WORKERS}"
-          echo "Gradle heap: ${HEAP}; metaspace: ${METASPACE}"
-          echo "Native build parallelism: ${NATIVE_PARALLELISM}"
-          echo "Cgroup CPU quota:"
-          cat /sys/fs/cgroup/cpu.max 2>/dev/null || true
-          echo "Cgroup memory limit:"
-          cat /sys/fs/cgroup/memory.max 2>/dev/null || true
+          EFFECTIVE_MEM_GIB=$((EFFECTIVE_MEM_BYTES / 1024 / 1024 / 1024))
+          if (( EFFECTIVE_MEM_BYTES >= 12884901888 )); then
+            sed -i '/^org\.gradle\.jvmargs=/d' gradle.properties
+            echo "org.gradle.jvmargs=-Xmx8G -XX:MaxMetaspaceSize=2G -XX:+UseParallelGC -XX:+HeapDumpOnOutOfMemoryError -Dfile.encoding=UTF-8" >> gradle.properties
+            JVM_PROFILE="8G heap / 2G metaspace"
+          else
+            JVM_PROFILE="repository default (6G heap / 1G metaspace)"
+          fi
+
+          echo "===== GitHub Actions runner resource profile ====="
+          echo "Host-visible CPUs (nproc): $HOST_CPUS"
+          echo "Effective CPUs after cgroup quota: $EFFECTIVE_CPUS"
+          echo "Host MemTotal: $((HOST_MEM_BYTES / 1024 / 1024 / 1024)) GiB"
+          if [[ "$CGROUP_MEM_BYTES" == "unlimited" ]]; then
+            echo "Cgroup memory limit: unlimited/not exposed"
+          else
+            echo "Cgroup memory limit: $((CGROUP_MEM_BYTES / 1024 / 1024 / 1024)) GiB"
+          fi
+          echo "Effective memory: ${EFFECTIVE_MEM_GIB} GiB"
+          echo "Gradle workers: $WORKERS"
+          echo "Native build parallelism: $NATIVE_PARALLELISM"
+          echo "JVM profile: $JVM_PROFILE"
+          echo "cpu.max: $(cat /sys/fs/cgroup/cpu.max 2>/dev/null || echo unavailable)"
+          echo "memory.max: $(cat /sys/fs/cgroup/memory.max 2>/dev/null || echo unavailable)"
           free -h
-          nproc
           grep -E '^(org\.gradle\.jvmargs|org\.gradle\.workers\.max|android\.native\.buildParallelism)=' gradle.properties
       # 先跑纯规则测试（含本次新增的 seek 覆盖/远端片段/待重放状态机规则）。
       # 任何一项失败都会让该步骤退出码非零，后续 Gradle 构建不会执行，
@@ -234,22 +287,6 @@ jobs:
             echo "ALIAS_NAME=androiddebugkey"
             echo "ALIAS_PASS=android"
           } >> local.properties
-      - name: Make repository public for the build
-        continue-on-error: true
-        env:
-          GH_TOKEN: ${{ secrets.REPO_ADMIN_TOKEN }}
-        run: |
-          if [ -z "$GH_TOKEN" ]; then
-            echo "No admin token configured; building privately."
-            exit 0
-          fi
-          current=$(gh api "repos/$GITHUB_REPOSITORY" --jq .visibility || echo unknown)
-          if [ "$current" != "public" ]; then
-            gh api -X PATCH "repos/$GITHUB_REPOSITORY" -f visibility=public
-            echo "Repository is public for this run."
-          else
-            echo "Repository is already public."
-          fi
       - name: Staging Build
         id: staging_build_step
         env:
@@ -291,37 +328,42 @@ jobs:
           path: |
             TMessagesProj/build/outputs/apk/staging/*-arm64-v8a.apk
             TMessagesProj/build/outputs/apk/staging/build-info.json
-      - name: Make repository private again
-        if: always()
-        timeout-minutes: 2
+
+  restore_visibility:
+    name: Restore repository visibility
+    runs-on: ubuntu-latest
+    needs:
+      - prepare_visibility
+      - build
+    if: ${{ always() && needs.prepare_visibility.outputs.original_visibility == 'private' }}
+    steps:
+      - name: Restore private visibility
         env:
           GH_TOKEN: ${{ secrets.REPO_ADMIN_TOKEN }}
+        timeout-minutes: 3
+        shell: bash
         run: |
-          if [ -z "$GH_TOKEN" ]; then
-            echo "No admin token configured; visibility left unchanged."
-            exit 0
-          fi
-          current=$(gh api "repos/$GITHUB_REPOSITORY" --jq .visibility || echo unknown)
-          if [ "$current" != "public" ]; then
-            echo "Repository is already $current."
-            exit 0
-          fi
-          # A single PATCH can be lost to an expired token, API error or rate
-          # limit and would leave the source public. Retry and verify the
-          # result, then fail the job loudly so the watchdog sees it too.
-          ok=0
-          for attempt in 1 2 3; do
-            gh api -X PATCH "repos/$GITHUB_REPOSITORY" -f visibility=private || true
-            sleep 2
-            current=$(gh api "repos/$GITHUB_REPOSITORY" --jq .visibility || echo unknown)
-            if [ "$current" = "private" ]; then
-              echo "Repository is private again (attempt $attempt)."
-              ok=1
-              break
-            fi
-            echo "Visibility still $current after attempt $attempt."
-          done
-          if [ "$ok" -ne 1 ]; then
-            echo "::error::Repository is still public. Restore it manually."
+          set -euo pipefail
+          if [[ -z "${GH_TOKEN:-}" ]]; then
+            echo "::error::REPO_ADMIN_TOKEN is unavailable; repository may still be public."
             exit 1
           fi
+
+          for attempt in 1 2 3; do
+            current="$(gh api "repos/$GITHUB_REPOSITORY" --jq .visibility)"
+            if [[ "$current" == "private" ]]; then
+              echo "Repository is already private."
+              exit 0
+            fi
+            gh api -X PATCH "repos/$GITHUB_REPOSITORY" -f visibility=private || true
+            sleep 2
+            current="$(gh api "repos/$GITHUB_REPOSITORY" --jq .visibility)"
+            if [[ "$current" == "private" ]]; then
+              echo "Repository restored to private (attempt $attempt)."
+              exit 0
+            fi
+            echo "Visibility remains $current after attempt $attempt."
+          done
+
+          echo "::error::Failed to restore repository privacy after 3 attempts."
+          exit 1
