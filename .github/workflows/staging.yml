@@ -1,48 +1,61 @@
 name: Staging build
 
+# 这个工作流只干一件事：把 dev 上的代码编成一个可安装的 staging 包，挂成 artifact。
+# 它不跑单元测试（那套纯 JVM 规则测试由 pr.yml 在每个 PR 上跑），也不创建 Release
+# （发版是 publish-staging.yml 的人工闸门）。职责越单一，红的时候越好定位。
+
 on:
   push:
     branches:
       - dev
     paths-ignore:
-      - '**.md'
-      - '.github/**'
-      - '!.github/workflows/staging.yml'
+      - "**.md"
+      - ".github/**"
   workflow_dispatch:
 
 permissions:
   contents: read
 
-# One staging build at a time: two builds must never fight over the
-# repository visibility or over the staging release tag.
+# 同一时间只跑一个 staging 构建，新提交直接顶掉旧构建。
+# 本工作流不创建 Release，并发不会踩到发布标签，没必要让旧构建占着机器跑完。
 concurrency:
   group: staging-build
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
   build:
     name: Gradle Build
     runs-on: ubuntu-latest
-    outputs:
-      build_timestamp: ${{ steps.staging_build_step.outputs.build_timestamp }}
+    # 公开仓库 4 核 / 16 GB，实测编译约 4 分钟、整个 job 约 8 分钟（含缓存保存
+    # 和磁盘清理）。10 分钟是卡住就立刻放弃的上限，不设的话默认 360 分钟，
+    # 挂起时会一直占着机器。
+    timeout-minutes: 10
     env:
       CCACHE_COMPILERCHECK: "%compiler% -dumpmachine; %compiler% -dumpversion"
       CCACHE_HARDLINK: "true"
       CCACHE_NOHASHDIR: "true"
-      CCACHE_MAXSIZE: "10G"
+      CCACHE_MAXSIZE: "16G"
       CCACHE_COMPRESS: "true"
       CCACHE_SLOPPINESS: "time_macros"
-      NATIVE_TARGET: "universal"
+      # 只产 arm64 单包，与 publish-staging.yml 的契约保持一致。
+      NATIVE_TARGET: "arm64-v8a"
+      # 下面三个值按「公开仓库 = 4 核 / 16 GB」写死，不做运行时探测。
+      # 注意：私有仓库只有 2 核 / 7 GB，这套参数在那边会把内存打满。
+      # 若要切回私有档，把 workers 降到 2、堆降到 -Xmx4g（或 3g）。
+      GRADLE_WORKERS: "4"
+      NATIVE_PARALLELISM: "4"
+      GRADLE_JVMARGS: "-Xmx8G -XX:MaxMetaspaceSize=2G -XX:+UseParallelGC -XX:+HeapDumpOnOutOfMemoryError -Dfile.encoding=UTF-8"
     steps:
       - name: Checkout
         uses: actions/checkout@v7
         with:
           fetch-depth: 1
+          # .gitmodules 里有 libvpx / dav1d / ffmpeg 三个子模块，原生编译要用，必须递归拉取。
           submodules: recursive
-      # ubuntu-latest ships with ~14 GB of toolchains this Android build never uses.
-      # With ccache (10G) + a cached TMessagesProj/build, Gradle's desugar/resource steps
-      # ran out of space ("Could not pack tree ... No space left on device"). Drop the
-      # unused SDKs/images before building; the Android SDK/NDK we need is installed below.
+
+      # 宿主机镜像自带约 14 GB 本项目用不到的工具链。ccache 16G 加上缓存的
+      # TMessagesProj/build 会和 Gradle 的 desugar / 资源打包抢磁盘，历史上
+      # 出现过 "No space left on device"，所以先腾地方。
       - name: Free up disk space
         run: |
           df -h . | tail -1
@@ -53,207 +66,226 @@ jobs:
                       /usr/lib/jvm/java-8-openjdk-amd64 \
                       "$AGENT_TOOLSDIRECTORY/boost" 2>/dev/null || true
           df -h . | tail -1
+
       - name: Set up JDK
         uses: actions/setup-java@v5
         with:
-          distribution: 'temurin'
-          java-version: '21'
-      - name: Check preview rules
-        run: |
-          mkdir -p /tmp/preview-rules
-          javac -d /tmp/preview-rules \
-            TMessagesProj/src/test/java/org/telegram/ui/Components/preview/PreviewRulesTest.java \
-            TMessagesProj/src/main/java/org/telegram/ui/Components/preview/PreviewRules.java \
-            TMessagesProj/src/main/java/org/telegram/messenger/FragmentIndexRules.java \
-            TMessagesProj/src/main/java/org/telegram/ui/Components/preview/TailMoovLocator.java \
-            TMessagesProj/src/main/java/org/telegram/ui/Components/preview/DecodeGate.java \
-            TMessagesProj/src/main/java/org/telegram/ui/Components/preview/RemoteFailureTracker.java \
-            TMessagesProj/src/main/java/org/telegram/ui/Components/preview/SeekRules.java
-          java -cp /tmp/preview-rules org.telegram.ui.Components.preview.PreviewRulesTest
-          javac -d /tmp/preview-rules \
-            TMessagesProj/src/test/java/org/telegram/ui/Components/preview/SeekRulesTest.java \
-            TMessagesProj/src/main/java/org/telegram/ui/Components/preview/SeekRules.java
-          java -cp /tmp/preview-rules org.telegram.ui.Components.preview.SeekRulesTest
+          distribution: "temurin"
+          java-version: "21"
+
+      # 依赖缓存：只有 Gradle 脚本或 wrapper 变了才失效，命中后不会再重存，
+      # 所以它是一份体量稳定（约 1 GB）的"只写一次"缓存，不占收尾时间。
+      - name: Restore Gradle dependency cache
+        uses: actions/cache@v6
+        # 缓存坏了不该让构建失败：拿不到就当没有缓存继续跑。
+        continue-on-error: true
+        timeout-minutes: 5
+        with:
+          path: |
+            ~/.gradle/caches/modules-2
+            ~/.gradle/wrapper
+          key: gradle-deps-v1-${{ runner.os }}-${{ hashFiles('**/*.gradle', '**/gradle-wrapper.properties') }}
+          restore-keys: |
+            gradle-deps-v1-${{ runner.os }}-
+
+      # 构建状态缓存：Gradle 构建缓存 + 两处 .gradle + build 目录。
+      # key 末尾带 run_id 是刻意的"滚动"策略——固定 key 一旦命中就永远不会再保存，
+      # 增量成果会一直停在第一次的快照上。带上 run_id 后每次都会存回最新状态。
+      - name: Restore build state cache
+        uses: actions/cache@v6
+        continue-on-error: true
+        timeout-minutes: 5
+        with:
+          path: |
+            ~/.gradle/caches/build-cache-1
+            .gradle
+            TMessagesProj/.gradle
+            TMessagesProj/build
+          key: android-state-v1-${{ hashFiles('**/*.gradle', 'gradle.properties', '**/gradle-wrapper.properties') }}-${{ github.run_id }}
+          restore-keys: |
+            android-state-v1-${{ hashFiles('**/*.gradle', 'gradle.properties', '**/gradle-wrapper.properties') }}-
+            android-state-v1-
+
       - name: Set up Ccache
         uses: hendrikmuhs/ccache-action@v1.2.23
         with:
           append-timestamp: false
-      - name: Set up Gradle
-        uses: gradle/actions/setup-gradle@v6
-        with:
-          cache-disabled: true
-      - name: Set up Gradle cache
-        uses: actions/cache@v6
-        with:
-          # A fresh checkout otherwise throws away every compiled task output:
-          # ~/.gradle holds dependencies and the Gradle build cache, while the
-          # two .gradle dirs and the build dir hold the incremental state that
-          # lets AGP skip unchanged Java/resource/native work.
-          path: |
-            ~/.gradle
-            .gradle
-            TMessagesProj/.gradle
-            TMessagesProj/build
-          key: build-${{ hashFiles('**/*.gradle', '**/gradle-wrapper.properties', '**/gradle.properties') }}
-          restore-keys: |
-            build-
-            gradle-
+          # 与上面的 CCACHE_MAXSIZE 保持一致。真正生效的是环境变量，
+          # 这里显式写一遍只是免得 action 日志里显示 500MB 引起误判。
+          max-size: 16G
+
       - name: Set up Android SDK Tools
         uses: android-actions/setup-android@v4
         with:
           packages: "build-tools;36.0.0 ndk;27.2.12479018 platforms;android-37.0"
-      - name: Tune build parallelism
-        run: |
-          cores=$(nproc)
-          if [ "$cores" -gt 4 ]; then cores=4; fi
-          echo "Using $cores workers"
-          sed -i '/^org\.gradle\.workers\.max=/d' gradle.properties
-          sed -i '/^android\.native\.buildParallelism=/d' gradle.properties
-          echo "org.gradle.workers.max=$cores" >> gradle.properties
-          echo "android.native.buildParallelism=$cores" >> gradle.properties
-      - name: Install Native Build Dependencies
+
+      - name: Install native build dependencies
         run: |
           if ! command -v nasm >/dev/null 2>&1; then
             sudo apt-get update
             sudo apt-get install --no-install-recommends --yes nasm
           else
-            echo "nasm is already installed"
+            echo "nasm 已存在，跳过安装"
           fi
-      - name: Configure Android SDK Path
-        run: |
-          echo "sdk.dir=${ANDROID_HOME}" >> local.properties
-      # Builds on GitHub are signed with a throwaway key that lives in the
-      # actions cache, never in the repository and never in secrets. The cache
-      # keeps the key identical between runs so artifacts can install over
-      # each other. If the cache is evicted a new key is generated and the
-      # signature changes; bump the cache key below to force a deliberate one.
+
+      # 缓存路径刻意放在 ci-signing/，而不是仓库里那个被 git 跟踪的
+      # TMessagesProj/release.keystore：缓存恢复绝不能在没有校验的情况下
+      # 直接盖掉上游密钥，覆盖只发生在下面这步显式 cp 的时候。
       - name: Restore CI signing key
         uses: actions/cache@v6
-        with:
-          path: TMessagesProj/release.keystore
-          key: ci-signing-key-v1
-      - name: Set up CI signing
-        if: ${{ !startsWith(runner.os, 'Windows') }}
-        run: |
-          # The repository ships the upstream signing key, whose password CI
-          # does not have. Replace anything that is not the cached throwaway
-          # key with a fresh one; the cache keeps that key identical between
-          # runs so CI artifacts can install over each other.
-          if ! keytool -list -keystore TMessagesProj/release.keystore \
-                 -storepass android -alias androiddebugkey >/dev/null 2>&1; then
-            rm -f TMessagesProj/release.keystore
-            keytool -genkeypair -v -keystore TMessagesProj/release.keystore \
-              -storepass android -keypass android -alias androiddebugkey \
-              -keyalg RSA -keysize 2048 -validity 10000 \
-              -dname "CN=NagramX CI, OU=CI, O=NagramX, L=Internet, ST=Internet, C=US"
-          fi
-          {
-            echo "KEYSTORE_PASS=android"
-            echo "ALIAS_NAME=androiddebugkey"
-            echo "ALIAS_PASS=android"
-          } >> local.properties
-      - name: Modify Gradle JVM Args
-        run: |
-          MEMORY_KB=$(awk '/MemTotal/ {print $2}' /proc/meminfo)
-          MEMORY_GB=$((MEMORY_KB / 1024 / 1024))
-          echo "Detected memory size: ${MEMORY_GB}GB"
-          if [ $MEMORY_GB -ge 12 ]; then
-            sed -i '/^org\.gradle\.jvmargs=/d' gradle.properties
-            echo "org.gradle.jvmargs=-Xmx8G -XX:MaxMetaspaceSize=2G -XX:+UseParallelGC -XX:+HeapDumpOnOutOfMemoryError -Dfile.encoding=UTF-8" >> gradle.properties
-          fi
-          cat gradle.properties
-      - name: Make repository public for the build
         continue-on-error: true
+        timeout-minutes: 3
+        with:
+          path: ci-signing/release.keystore
+          key: ci-signing-key-v2
+
+      # build.gradle 的凭据来源优先级是：
+      #   LOCAL_PROPERTIES(secret, base64) > local.properties > KEYSTORE_PASS 等环境变量
+      # 所以密码必须和密钥来自同一处。这里先从 secret 里解出密码/别名，
+      # 再用同一组值去校验缓存里的密钥——不通过就用这组值重建，
+      # 从根上避免"缓存里的密钥配 secret 里的密码"这种静默错配。
+      - name: Prepare CI signing key
         env:
-          GH_TOKEN: ${{ secrets.REPO_ADMIN_TOKEN }}
+          LOCAL_PROPERTIES_B64: ${{ secrets.LOCAL_PROPERTIES }}
         run: |
-          if [ -z "$GH_TOKEN" ]; then
-            echo "No admin token configured; building privately."
-            exit 0
+          set -euo pipefail
+          mkdir -p ci-signing
+          KS=ci-signing/release.keystore
+
+          PASS=android
+          ALIAS=androiddebugkey
+          KEYPASS=android
+
+          if [ -n "${LOCAL_PROPERTIES_B64:-}" ]; then
+            DECODED="$(printf '%s' "$LOCAL_PROPERTIES_B64" | base64 -d 2>/dev/null | tr -d '\r' || true)"
+            if [ -n "$DECODED" ]; then
+              V="$(printf '%s\n' "$DECODED" | sed -n 's/^KEYSTORE_PASS=//p' | tail -n1)"
+              if [ -n "$V" ]; then PASS="$V"; fi
+              V="$(printf '%s\n' "$DECODED" | sed -n 's/^ALIAS_NAME=//p' | tail -n1)"
+              if [ -n "$V" ]; then ALIAS="$V"; fi
+              V="$(printf '%s\n' "$DECODED" | sed -n 's/^ALIAS_PASS=//p' | tail -n1)"
+              if [ -n "$V" ]; then KEYPASS="$V"; fi
+            fi
           fi
-          current=$(gh api "repos/$GITHUB_REPOSITORY" --jq .visibility || echo unknown)
-          if [ "$current" != "public" ]; then
-            gh api -X PATCH "repos/$GITHUB_REPOSITORY" -f visibility=public
-            echo "Repository is public for this run."
+
+          # 能用就复用：多次构建签名一致，包才能互相覆盖安装。
+          if [ -f "$KS" ] && keytool -list -keystore "$KS" -storepass "$PASS" -alias "$ALIAS" >/dev/null 2>&1; then
+            echo "复用缓存里的 CI 签名密钥"
           else
-            echo "Repository is already public."
+            echo "没有可用的 CI 签名密钥，按当前凭据重新生成"
+            rm -f "$KS"
+            keytool -genkeypair -v -keystore "$KS" \
+              -storepass "$PASS" -keypass "$KEYPASS" -alias "$ALIAS" \
+              -keyalg RSA -keysize 2048 -validity 10000 \
+              -dname "CN=StreamX CI, OU=CI, O=StreamX, L=Internet, ST=Internet, C=US"
           fi
+
+          # build.gradle 把证书路径写死成 project.file('release.keystore')，
+          # 只能落到这个位置。这只是 CI 的一次性工作区，不会写回仓库。
+          cp -f "$KS" TMessagesProj/release.keystore
+
+          # sdk.dir 和签名凭据一次写完，替代原先单独的 Configure Android SDK Path 步骤。
+          {
+            echo "sdk.dir=${ANDROID_HOME}"
+            echo "KEYSTORE_PASS=$PASS"
+            echo "ALIAS_NAME=$ALIAS"
+            echo "ALIAS_PASS=$KEYPASS"
+          } > local.properties
+
+          echo "--- local.properties（已脱敏）---"
+          sed -E 's/(PASS|KEY)=.*/\1=***/' local.properties
+
+      # Gradle 属性优先级：命令行 > 项目 gradle.properties > 用户目录。
+      # 所以这里用命令行覆盖，不去 sed 改写仓库文件——工作区保持干净，
+      # 缓存 key 也就可以放心把 gradle.properties 算进去。
       - name: Staging Build
-        id: staging_build_step
         env:
           COMMIT_ID: ${{ github.sha }}
         run: |
+          set -euo pipefail
+          BUILD_TIMESTAMP="$(date +%s)"
+          echo "BUILD_TIMESTAMP=$BUILD_TIMESTAMP" >> "$GITHUB_ENV"
+          export BUILD_TIMESTAMP
           export LOCAL_PROPERTIES="${{ secrets.LOCAL_PROPERTIES }}"
-          export BUILD_TIMESTAMP=$(date +%s)
-          echo "build_timestamp=$BUILD_TIMESTAMP" >> "$GITHUB_OUTPUT"
-          ./gradlew TMessagesProj:assembleStaging
-      # No Release is created here on purpose. The build only uploads an
-      # artifact; nothing reaches a public URL until the phone check passes
-      # and the manual publish workflow runs on that same artifact.
+
+          echo "并行度: $GRADLE_WORKERS  native 并行: $NATIVE_PARALLELISM"
+          echo "JVM 参数: $GRADLE_JVMARGS"
+          echo "实际核数: $(nproc)"
+          free -h
+
+          ./gradlew TMessagesProj:assembleStaging \
+            --console=plain \
+            --max-workers="$GRADLE_WORKERS" \
+            -Dorg.gradle.jvmargs="$GRADLE_JVMARGS" \
+            -Pandroid.native.buildParallelism="$NATIVE_PARALLELISM"
+
+          # 自检：证明 -D 覆盖真的进了 daemon，而不是仍然用项目里的 -Xmx6g。
+          echo "--- daemon 实际 JVM 参数 ---"
+          grep -ho -- '-Xmx[0-9a-zA-Z]*' ~/.gradle/daemon/*/daemon-*.out.log 2>/dev/null | sort -u | head -5 || true
+          du -sh TMessagesProj/build ~/.gradle 2>/dev/null || true
+
+      # 用 output-metadata.json 的 outputFile 精确定位本次产物：
+      # elements[] 的顺序不保证是 arm64，而且缓存里可能残留上一次提交的 APK。
+      # 再断言文件名含本次 commit 短哈希（versionName 尾部就是它），
+      # 彻底排除"上传了旧包"这种最难发现的事故。全程不删任何文件。
       - name: Write build info
-        env:
-          BUILD_TIMESTAMP: ${{ steps.staging_build_step.outputs.build_timestamp }}
+        id: build_info
         run: |
-          META=TMessagesProj/build/outputs/apk/staging/output-metadata.json
-          VERSION_NAME=$(jq -r '.elements[0].versionName' "$META")
-          VERSION_CODE=$(jq -r '.elements[0].versionCode' "$META")
+          set -euo pipefail
+          OUT=TMessagesProj/build/outputs/apk/staging
+          META="$OUT/output-metadata.json"
+          test -f "$META" || { echo "::error::缺少 $META"; exit 1; }
+
+          APK_NAME=$(jq -r '[.elements[] | select(.outputFile | test("-arm64-v8a\\.apk$")) | .outputFile][0] // empty' "$META")
+          test -n "$APK_NAME" || { echo "::error::metadata 里没有 arm64-v8a 产物"; exit 1; }
+          test -f "$OUT/$APK_NAME" || { echo "::error::找不到 $OUT/$APK_NAME"; exit 1; }
+
+          SHORT_SHA="${GITHUB_SHA:0:7}"
+          case "$APK_NAME" in
+            *"$SHORT_SHA"*) ;;
+            *) echo "::error::产物 $APK_NAME 不含本次提交 $SHORT_SHA，疑似缓存里的旧包"; exit 1 ;;
+          esac
+
+          VERSION_NAME=$(jq -r --arg f "$APK_NAME" '[.elements[] | select(.outputFile==$f) | .versionName][0]' "$META")
+          VERSION_CODE=$(jq -r --arg f "$APK_NAME" '[.elements[] | select(.outputFile==$f) | .versionCode][0]' "$META")
+          ARM64_SHA=$(sha256sum "$OUT/$APK_NAME" | cut -d' ' -f1)
           BUILD_TIMESTAMP="${BUILD_TIMESTAMP:-0}"
-          ARM64=$(ls TMessagesProj/build/outputs/apk/staging/*-arm64-v8a.apk | head -n1)
-          UNIVERSAL=$(ls TMessagesProj/build/outputs/apk/staging/*-universal.apk | head -n1)
-          ARM64_SHA=$(sha256sum "$ARM64" | cut -d' ' -f1)
-          UNIVERSAL_SHA=$(sha256sum "$UNIVERSAL" | cut -d' ' -f1)
+
           jq -n \
             --arg version "$VERSION_NAME" \
             --argjson versionCode "$VERSION_CODE" \
             --arg commit "$GITHUB_SHA" \
             --argjson builtAt "$BUILD_TIMESTAMP" \
-            --arg notes "这一版改好了视频拖动时的画面预览，等待真机验收。" \
+            --arg notes "由 GitHub Actions 自动构建，未经真机验收。" \
             --arg runId "$GITHUB_RUN_ID" \
             --arg runNumber "$GITHUB_RUN_NUMBER" \
             --arg arm64Sha "$ARM64_SHA" \
-            --arg universalSha "$UNIVERSAL_SHA" \
-            '{version:$version, versionCode:$versionCode, commit:$commit, builtAt:$builtAt, notes:$notes, runId:$runId, runNumber:$runNumber, arm64Sha:$arm64Sha, universalSha:$universalSha}' \
-            > TMessagesProj/build/outputs/apk/staging/build-info.json
-          cat TMessagesProj/build/outputs/apk/staging/build-info.json
+            '{version:$version, versionCode:$versionCode, commit:$commit, builtAt:$builtAt, notes:$notes, runId:$runId, runNumber:$runNumber, arm64Sha:$arm64Sha}' \
+            > "$OUT/build-info.json"
+
+          echo "apk_name=$APK_NAME" >> "$GITHUB_OUTPUT"
+          cat "$OUT/build-info.json"
+
+      # 最后一道保险：产物必须由 CI 密钥签名。就算前面所有判断都漏了，
+      # 用错密钥也会在这里断掉，而不是"发布成功、用户装不上"。
+      - name: Verify APK signature
+        run: |
+          set -euo pipefail
+          APK="TMessagesProj/build/outputs/apk/staging/${{ steps.build_info.outputs.apk_name }}"
+          APKSIGNER="$ANDROID_HOME/build-tools/36.0.0/apksigner"
+          if [ ! -x "$APKSIGNER" ]; then
+            APKSIGNER=$(find "$ANDROID_HOME/build-tools" -name apksigner -type f | sort | tail -n1)
+          fi
+          "$APKSIGNER" verify --print-certs "$APK" | tee /tmp/certs.txt
+          grep -q 'CN=StreamX CI' /tmp/certs.txt || { echo "::error::APK 不是用 CI 密钥签名的"; exit 1; }
+
+      # 只上传本次确定的那一个 APK。用 *-arm64-v8a.apk 通配会把缓存里堆积的
+      # 历史包一起塞进 artifact，下游 publish 按名字取包就可能拿到旧包。
       - name: Upload Artifacts
         uses: actions/upload-artifact@v7
         with:
           name: Staging
+          if-no-files-found: error
           path: |
-            TMessagesProj/build/outputs/apk/staging/*-arm64-v8a.apk
-            TMessagesProj/build/outputs/apk/staging/*-universal.apk
+            TMessagesProj/build/outputs/apk/staging/${{ steps.build_info.outputs.apk_name }}
             TMessagesProj/build/outputs/apk/staging/build-info.json
-      - name: Make repository private again
-        if: always()
-        timeout-minutes: 2
-        env:
-          GH_TOKEN: ${{ secrets.REPO_ADMIN_TOKEN }}
-        run: |
-          if [ -z "$GH_TOKEN" ]; then
-            echo "No admin token configured; visibility left unchanged."
-            exit 0
-          fi
-          current=$(gh api "repos/$GITHUB_REPOSITORY" --jq .visibility || echo unknown)
-          if [ "$current" != "public" ]; then
-            echo "Repository is already $current."
-            exit 0
-          fi
-          # A single PATCH can be lost to an expired token, API error or rate
-          # limit and would leave the source public. Retry and verify the
-          # result, then fail the job loudly so the watchdog sees it too.
-          ok=0
-          for attempt in 1 2 3; do
-            gh api -X PATCH "repos/$GITHUB_REPOSITORY" -f visibility=private || true
-            sleep 2
-            current=$(gh api "repos/$GITHUB_REPOSITORY" --jq .visibility || echo unknown)
-            if [ "$current" = "private" ]; then
-              echo "Repository is private again (attempt $attempt)."
-              ok=1
-              break
-            fi
-            echo "Visibility still $current after attempt $attempt."
-          done
-          if [ "$ok" -ne 1 ]; then
-            echo "::error::Repository is still public. Restore it manually."
-            exit 1
-          fi

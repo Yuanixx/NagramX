@@ -48,26 +48,20 @@ jobs:
             echo "::error::Build info belongs to run $actual, not $RUN_ID."
             exit 1
           fi
-          # A restored build directory must never silently publish a stale
-          # APK: compare the downloaded bytes with the hashes recorded when
-          # the build produced them.
+          # The artifact now carries a single arm64 APK. Still verify the bytes:
+          # a build directory restored from cache must never silently publish a
+          # stale package.
           arm64_sha=$(jq -r '.arm64Sha // empty' staging/build-info.json)
-          universal_sha=$(jq -r '.universalSha // empty' staging/build-info.json)
-          if [ -z "$arm64_sha" ] || [ -z "$universal_sha" ]; then
-            echo "::error::Build info has no APK checksums; refusing to publish."
+          if [ -z "$arm64_sha" ]; then
+            echo "::error::Build info has no arm64 checksum; refusing to publish."
             exit 1
           fi
-          arm64_file=$(ls staging/*-arm64-v8a.apk | head -n1)
-          universal_file=$(ls staging/*-universal.apk | head -n1)
-          for pair in "$arm64_file:$arm64_sha" "$universal_file:$universal_sha"; do
-            file=${pair%:*}
-            want=${pair##*:}
-            got=$(sha256sum "$file" | cut -d' ' -f1)
-            if [ "$got" != "$want" ]; then
-              echo "::error::APK $file does not match the build ($got != $want)."
-              exit 1
-            fi
-          done
+          arm64_file=$(ls staging/*-arm64-v8a.apk)
+          got=$(sha256sum "$arm64_file" | cut -d' ' -f1)
+          if [ "$got" != "$arm64_sha" ]; then
+            echo "::error::APK $arm64_file does not match the build ($got != $arm64_sha)."
+            exit 1
+          fi
           # Print only the fields we use; older artifacts may carry text we
           # must not push into a public log.
           jq '{version,versionCode,commit,builtAt}' staging/build-info.json
@@ -94,15 +88,13 @@ jobs:
             exit 1
           fi
           MIRROR=Yuanixx/NagramX-releases
-          ARM64="NagramX-${VERSION_NAME}-arm64-v8a.apk"
-          UNIVERSAL="NagramX-${VERSION_NAME}-universal.apk"
+          ARM64="StreamX-${VERSION_NAME}-arm64-v8a.apk"
           # Never copy a commit message verbatim into a public Release: it can
           # carry paths, hosts or credentials. Use a fixed plain-language line.
-          NOTES='这一版改好了视频拖动时的画面预览，已经过真机验收。'
+          NOTES='这一版已通过真机验收。'
           rm -rf mirror
           mkdir -p mirror
-          cp "$(ls staging/*-arm64-v8a.apk | head -n1)" "mirror/$ARM64"
-          cp "$(ls staging/*-universal.apk | head -n1)" "mirror/$UNIVERSAL"
+          cp "$(ls staging/*-arm64-v8a.apk)" "mirror/$ARM64"
           {
             echo "已验收的构建。"
             echo
@@ -112,6 +104,9 @@ jobs:
             echo "$NOTES"
           } > mirror/notes.md
           BUILD_TIMESTAMP="${BUILD_TIMESTAMP:-0}"
+          # No "universal" key on purpose: the client falls back to "arm64"
+          # when it is missing (GithubReleaseChecker), so publishing an arm64
+          # package under a "universal" label would only be a lie.
           jq -n \
             --arg version "$VERSION_NAME" \
             --argjson versionCode "$VERSION_CODE" \
@@ -119,8 +114,7 @@ jobs:
             --argjson builtAt "$BUILD_TIMESTAMP" \
             --arg notes "$NOTES" \
             --arg arm64 "$ARM64" \
-            --arg universal "$UNIVERSAL" \
-            '{version:$version, versionCode:$versionCode, commit:$commit, builtAt:$builtAt, notes:$notes, arm64:$arm64, universal:$universal}' \
+            '{version:$version, versionCode:$versionCode, commit:$commit, builtAt:$builtAt, notes:$notes, arm64:$arm64}' \
             > mirror/update.json
           gh release delete staging --repo "$MIRROR" --yes --cleanup-tag=false 2>/dev/null || true
           gh release create staging \
@@ -128,7 +122,6 @@ jobs:
             --title "Staging build" \
             --notes-file mirror/notes.md \
             "mirror/$ARM64" \
-            "mirror/$UNIVERSAL" \
             mirror/update.json
           gh release view staging --repo "$MIRROR" --json assets \
             --jq '.assets[].name'
