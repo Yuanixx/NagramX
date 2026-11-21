@@ -13,52 +13,14 @@ permissions:
   contents: read
 
 # One staging build at a time: two builds must never fight over the
-# repository visibility or over the staging release tag.
+# staging release tag.
 concurrency:
   group: staging-build
   cancel-in-progress: false
 
 jobs:
-  prepare_visibility:
-    name: Prepare repository visibility
-    runs-on: ubuntu-latest
-    outputs:
-      original_visibility: ${{ steps.visibility.outputs.original_visibility }}
-    steps:
-      - name: Make repository public before build runner allocation
-        id: visibility
-        env:
-          GH_TOKEN: ${{ secrets.REPO_ADMIN_TOKEN }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          if [[ -z "${GH_TOKEN:-}" ]]; then
-            echo "::error::REPO_ADMIN_TOKEN is required to obtain the public-repository runner tier."
-            exit 1
-          fi
-
-          original="$(gh api "repos/$GITHUB_REPOSITORY" --jq .visibility)"
-          echo "original_visibility=$original" >> "$GITHUB_OUTPUT"
-          echo "Repository visibility before build allocation: $original"
-
-          if [[ "$original" == "private" ]]; then
-            gh api -X PATCH "repos/$GITHUB_REPOSITORY" -f visibility=public
-            current="$(gh api "repos/$GITHUB_REPOSITORY" --jq .visibility)"
-            if [[ "$current" != "public" ]]; then
-              echo "::error::Repository visibility did not become public (current: $current)."
-              exit 1
-            fi
-            echo "Repository is public. The dependent Gradle job will now be allocated."
-          elif [[ "$original" == "public" ]]; then
-            echo "Repository was already public; no visibility change is needed."
-          else
-            echo "::error::Unexpected repository visibility: $original"
-            exit 1
-          fi
-
   build:
     name: Gradle Build
-    needs: prepare_visibility
     runs-on: ubuntu-latest
     outputs:
       build_timestamp: ${{ steps.staging_build_step.outputs.build_timestamp }}
@@ -99,8 +61,6 @@ jobs:
       # CPUs outside a container quota, so cap it by cgroup cpu.max as well.
       # Restore the historical 4-worker / 8G profile on the 4-core / 16GB tier.
       - name: Detect runner resources and tune Gradle
-        env:
-          ORIGINAL_VISIBILITY: ${{ needs.prepare_visibility.outputs.original_visibility }}
         shell: bash
         run: |
           set -euo pipefail
@@ -176,14 +136,6 @@ jobs:
           echo "Gradle workers: $WORKERS"
           echo "Native build parallelism: $NATIVE_PARALLELISM"
           echo "JVM profile: $JVM_PROFILE"
-
-          # If this workflow changed a private repository to public, refuse to
-          # spend a full Android build on a runner that still has private-tier
-          # resources. The cleanup job will restore the original visibility.
-          if [[ "$ORIGINAL_VISIBILITY" == "private" ]] && (( EFFECTIVE_CPUS < 4 || EFFECTIVE_MEM_BYTES < 12884901888 )); then
-            echo "::error::Repository was made public before build allocation, but runner resources are below the expected public tier (CPUs=$EFFECTIVE_CPUS, memory=${EFFECTIVE_MEM_GIB} GiB). Aborting before Gradle."
-            exit 1
-          fi
 
           echo "cpu.max: $(cat /sys/fs/cgroup/cpu.max 2>/dev/null || echo unavailable)"
           echo "memory.max: $(cat /sys/fs/cgroup/memory.max 2>/dev/null || echo unavailable)"
@@ -339,46 +291,3 @@ jobs:
           path: |
             TMessagesProj/build/outputs/apk/staging/*-arm64-v8a.apk
             TMessagesProj/build/outputs/apk/staging/build-info.json
-
-  restore_visibility:
-    name: Restore repository visibility
-    runs-on: ubuntu-latest
-    needs:
-      - prepare_visibility
-      - build
-    # Restore whenever this run may have made the repository public, even if
-    # prepare_visibility itself failed or was cancelled before it could report
-    # the original visibility. The step below no-ops when the repository is
-    # already private, so a false positive here is harmless.
-    if: ${{ always() && (needs.prepare_visibility.outputs.original_visibility == 'private' || needs.prepare_visibility.result != 'success') }}
-    steps:
-      - name: Restore private visibility
-        env:
-          GH_TOKEN: ${{ secrets.REPO_ADMIN_TOKEN }}
-        timeout-minutes: 3
-        shell: bash
-        run: |
-          set -euo pipefail
-          if [[ -z "${GH_TOKEN:-}" ]]; then
-            echo "::error::REPO_ADMIN_TOKEN is unavailable; repository may still be public."
-            exit 1
-          fi
-
-          for attempt in 1 2 3; do
-            current="$(gh api "repos/$GITHUB_REPOSITORY" --jq .visibility)"
-            if [[ "$current" == "private" ]]; then
-              echo "Repository is already private."
-              exit 0
-            fi
-            gh api -X PATCH "repos/$GITHUB_REPOSITORY" -f visibility=private || true
-            sleep 2
-            current="$(gh api "repos/$GITHUB_REPOSITORY" --jq .visibility)"
-            if [[ "$current" == "private" ]]; then
-              echo "Repository restored to private (attempt $attempt)."
-              exit 0
-            fi
-            echo "Visibility remains $current after attempt $attempt."
-          done
-
-          echo "::error::Failed to restore repository privacy after 3 attempts."
-          exit 1
